@@ -11,6 +11,31 @@ A reverse-engineered **native Linux engine and installer for Kabus 22**. It read
 
 Original-media installation, startup, selected original-script/world consumers and real OpenGL/Vulkan GPU checks have been exercised privately. **A full campaign/Bonus playthrough, complete original-Windows parity and execution on older CPUs are not established.** Nondefault stencil, software-world-light and VIEW render-to-bitmap routes remain unsupported. Ray tracing has a 1024-material-sampler-binding ceiling.
 
+## AppImage prerelease download
+
+Download the **v0.1.0 experimental prerelease** from [GitHub Releases](https://github.com/sergen213/kabus22-linux/releases/tag/v0.1.0). Use the assets on that exact release page; the older private artifact hashes in the packaging notice do not identify this fresh build.
+
+Download these assets together:
+
+- `Kabus22-Linux-Installer-x86_64.AppImage` — native installer, engine and bundled non-host libraries.
+- `Kabus22-Linux-Installer-x86_64.AppImage.sources.tar.gz` — matching dependency/helper/runtime corresponding sources, build recipes and notices.
+- `native-source.tar.gz` — native project/build/test sources from the exact Git commit tagged `v0.1.0`, also available through the release's Git source links.
+- `SHA256SUMS` — checksums of the three release assets above.
+
+From the download directory, verify the files before execution:
+
+```sh
+sha256sum --check SHA256SUMS
+chmod +x Kabus22-Linux-Installer-x86_64.AppImage
+./Kabus22-Linux-Installer-x86_64.AppImage
+```
+
+Run as your ordinary user, **not with sudo**. In the ISO picker, select your legally obtained original Kabus 22 ISO, choose a new installation directory, and optionally select your separately obtained Kabus22Patch folder. No ISO, original game scripts/assets or patch is included in the release. The installer extracts the media without running Windows code and creates application-menu and desktop shortcuts. OpenGL is the default; the installed shortcuts also offer explicit Vulkan RT/raster actions. ISO-only installation retains authored legacy resolution modes; the optional patch supplies its authored widescreen UI, not automatic Hor+ camera conversion.
+
+**Minimum runtime requirements:** x86-64 Linux with **glibc 2.38 or newer**, a graphical desktop and a working host GPU driver/desktop OpenGL 3.3 or newer. GPU drivers, GL/Vulkan loaders and Wayland libraries are host-owned, not bundled. Optional Vulkan needs a host Vulkan loader/driver supporting Vulkan 1.3 and the requested features; hardware RT additionally needs ray queries, acceleration structures, buffer device addresses, descriptor indexing and shader int64. Unsupported explicit Vulkan/RT requests fail without automatic fallback. Generic x86-64 compilation does not establish execution on older CPUs.
+
+This is an experimental prerelease, **not certification of a complete campaign/Bonus playthrough, original-Windows parity, older-CPU compatibility or legal compliance**. See the scope limitations above and the release notes for checks actually performed on the published build. Keep both source archives and notices with any redistributed AppImage; component licenses apply, and no project-wide license is assigned.
+
 ## Build from source (Ubuntu 24.04, x86-64)
 
 CMake 3.20+, a C++20 compiler, Python 3 and these development packages are required. Vulkan headers and `glslangValidator` are build dependencies even when you run only OpenGL; shaders are compiled and embedded at build time.
@@ -102,7 +127,7 @@ Saves/configuration live under `${XDG_DATA_HOME:-$HOME/.local/share}/kabus22`, s
 
 ## Optional AppImage assembly — additional inputs required
 
-**No public AppImage or other executable binaries are uploaded. A clone is not immediately ready to produce an AppImage.** Assembly needs the excluded upstream helper/runtime binaries, Docker with BuildKit, network access for authenticated provisioning, and the exact pinned toolchain/dependency evidence. Redistribution authorization and LGPL dynamic-library replacement/source-compliance review remain unresolved; successful assembly does not clear that gate.
+Building your own AppImage is optional; downloading a release does not require Docker or the development toolchain. **A clone alone is not immediately ready to assemble an AppImage.** Assembly needs the excluded upstream helper/runtime binaries, Docker with BuildKit, network access for authenticated provisioning, and the exact pinned toolchain/dependency evidence. The public prerelease includes matching dependency sources and exact native release sources; successful local assembly alone is not runtime qualification or legal certification.
 
 The included `packaging/helper-innoextract/` and `packaging/runtime-uruntime/` inventories, referenced notices/provenance and licensed corresponding-source archives form the packaging metadata closure. Keep those members unchanged: the packager authenticates them. Historical notice references to private qualification reports are not files available in this checkout.
 
@@ -147,7 +172,7 @@ docker build --platform linux/amd64 -t kabus22-ubuntu24-toolchain \
 sh tools/build_kabus_baseline.sh "$PWD/build-baseline" kabus22-ubuntu24-toolchain
 ```
 
-The image pins Ubuntu 24.04/snapshot packages, builds LGPL-only FFmpeg 6.1.1 and classic SDL2 dependencies, and provides Python 3.11+, `readelf`, `patchelf`, SquashFS tools and `glib-compile-schemas`. Do not substitute Ubuntu's GPL-enabled FFmpeg binaries for this packaging closure. The driver builds with two parallel jobs using enumerated read-only source mounts, acquires authenticated corresponding dependency sources with network access, then assembles offline. ISO/assets/user data never enter the image. Output AppImage, JSON report and `.AppImage.sources.tar.gz` paths must be new; outputs are not overwritten or uploaded. Keep notices and dependency source sidecar with any artifact, subject to the unresolved distribution gate. The private qualified baseline imported GLIBC 2.38; generic compilation does not prove older-CPU portability.
+The image pins Ubuntu 24.04/snapshot packages, builds LGPL-only FFmpeg 6.1.1 and classic SDL2 dependencies, and provides Python 3.11+, `readelf`, `patchelf`, SquashFS tools and `glib-compile-schemas`. Do not substitute Ubuntu's GPL-enabled FFmpeg binaries for this packaging closure. The driver builds with two parallel jobs using enumerated read-only source mounts, acquires authenticated corresponding dependency sources with network access, then assembles offline. ISO/assets/user data never enter the image. Output AppImage, JSON report and `.AppImage.sources.tar.gz` paths must be new; outputs are not overwritten or uploaded. Keep notices, matching dependency source sidecar and exact native project sources with any distributed artifact. The private qualified baseline imported GLIBC 2.38; generic compilation does not prove older-CPU portability.
 
 ## Ghidra tools
 
@@ -165,8 +190,8 @@ The PCX script accepts `OUTPUT_DIRECTORY IMAGE_ADDRESS [POINTER_ADDRESS [PE_FILE
 
 ## Publication and rights
 
-This repository publishes implementation/build/test sources and the explicitly inventoried third-party source/notices. It excludes original ISOs, game assets/scripts/patches, proprietary SDKs, Windows executables, compiled helpers/runtimes, AppImages, build outputs, Ghidra databases, generated decompilations and private captures/acceptance receipts. The two authored Ghidra scripts are the exception within the otherwise excluded reverse-engineering workspace.
+This Git repository publishes implementation/build/test sources and the explicitly inventoried third-party source/notices. It excludes original ISOs, game assets/scripts/patches, proprietary SDKs, Windows executables, compiled helpers/runtimes, AppImages, build outputs, Ghidra databases, generated decompilations and private captures/acceptance receipts. The two authored Ghidra scripts are the exception within the otherwise excluded reverse-engineering workspace. Public binary/source release assets are distributed separately through GitHub Releases, not committed to the source tree.
 
 `.gitignore` is a strict reviewed-source allowlist, not a general build-output blacklist. New files remain ignored until explicitly reviewed and added to that allowlist; do not bypass it to publish game data or generated/private outputs.
 
-**No project-wide license has been assigned.** Public source visibility is not an open-source license or a clean-room certification. Existing file-specific third-party notices remain applicable: preserve the libgamestudio MIT attribution in `native/assets.cpp`, the ODE/OU BSD texts and dependency notices/source inventories. They do not grant rights to Kabus 22 or its original media. Obtain and use the game/optional patch yourself under their applicable terms. [Packaging notice](packaging/NOTICE.txt) preserves technical qualification history and unresolved public-binary redistribution/compliance gates; historical private reports and artifact paths referenced there are not included releases.
+**No project-wide license has been assigned.** Public source visibility is not an open-source license or a clean-room certification. Existing file-specific third-party notices remain applicable: preserve the libgamestudio MIT attribution in `native/assets.cpp`, the ODE/OU BSD texts and dependency notices/source inventories. They do not grant rights to Kabus 22 or its original media. Obtain and use the game/optional patch yourself under their applicable terms. [Packaging notice](packaging/NOTICE.txt) preserves historical private qualification and the public prerelease policy, including corresponding sources and shared-library replacement. Historical private reports and artifact paths referenced there are not downloadable releases.

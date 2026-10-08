@@ -352,3 +352,44 @@ Final cleanup-result.json records no remaining native game/installer processes;
 temporary helper source/CPU fixture/consumer executables removed, receipts and
 captures retained. Parent's postproof hashes still match39a122.../d025f9...;
 no further runtime or reassembly followed.
+
+Planned public v0.1.0 prerelease policy (2026-10-08):
+  The user has explicitly authorized a public binary release at
+  https://github.com/sergen213/kabus22-linux/releases/tag/v0.1.0.
+  This supersedes earlier pending user-authorization wording for this planned
+  release only. All preceding private artifact identities and pending-review
+  statements describe their historical scope; none is a fresh release hash,
+  an upload receipt or legal certification. The release is a new build from
+  its tagged Git commit, not a renamed copy of the frozen39a122... artifact.
+
+  Release assets are Kabus22-Linux-Installer-x86_64.AppImage, its matching
+  .AppImage.sources.tar.gz dependency source sidecar, native-source.tar.gz
+  from the exact tagged native-project Git commit, and SHA256SUMS covering
+  those three assets. The dependency sidecar supplies exact authenticated
+  distribution sources, helper/runtime sources, selected ODE sources and
+  custom FFmpeg/SDL build recipes/notices; it is not a substitute for the
+  separately published native-project sources. Preserve both archives and
+  installed notices with redistribution. No project-wide license is assigned;
+  existing file/component licenses remain applicable, including libgamestudio
+  MIT attribution, ODE/OU BSD and the runtime/dependency license texts.
+
+  Dynamic-library replacement uses the extracted AppImage payload or installed
+  native tree: usr/lib in the payload, lib beside bin in the installation.
+  The existing relative ELF RPATHs resolve these libraries without a forced
+  LD_LIBRARY_PATH. ABI-compatible rebuilt shared libraries may replace bundled
+  libraries in those writable trees; retain the applicable sources/notices.
+  glibc, GL/Vulkan loaders, GPU drivers and the narrow Wayland library family
+  remain host-owned. Source inventories, build recipes and packaging.json
+  identify the actual dependency/build closure; they are technical compliance
+  evidence, not a blanket legal guarantee or rights to original game media.
+
+  Publish as a prerelease, with fresh build/inventory/source-closure and runtime
+  checks recorded by the release owner separately from the history above.
+  This notice is frozen before assembly and cannot contain its own future
+  AppImage hash. The release requires x86-64 Linux, glibc>=2.38 and host desktop
+  OpenGL>=3.3; Vulkan1.3/RT feature requirements and explicit failure policy
+  remain as documented above. ISO/patch/game data are never release inputs.
+  Full campaign/Bonus playthrough, older-CPU execution and complete original
+  Windows parity remain unproved; nondefault stencil/software-world-light/
+  VIEW render-to-bitmap routes remain unsupported. Public user authorization
+  does not remove these technical limitations or certify legal compliance.
