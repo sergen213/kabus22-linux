@@ -7,19 +7,21 @@ A reverse-engineered **native Linux engine and installer for Kabus 22**. It read
 - C++20 WDL runtime with campaign/A6 and offline Bonus/A7 compatibility paths, native archive/model/world loading, collision and ODE physics.
 - SDL2 input/windowing, FFmpeg audio/video, FreeType/fontconfig text, and a default desktop OpenGL renderer.
 - Explicit Vulkan raster or hardware-ray-query rendering, including geometry-based visibility and reflections. Unsupported requested features fail instead of silently switching backends.
-- Native GTK installer: extracts a user-owned ISO, optionally applies a separately selected Kabus22Patch folder, recovers artwork/fonts from that media, and creates application-menu and desktop shortcuts.
+- Native GTK installer: extracts a user-owned ISO, recovers artwork/fonts from that media, and creates application-menu and desktop shortcuts. Native widescreen for the original campaign is included without a patch folder; separately selected Kabus22Patch extras remain optional.
 
 Original-media installation, startup, selected original-script/world consumers and real OpenGL/Vulkan GPU checks have been exercised privately. **A full campaign/Bonus playthrough, complete original-Windows parity and execution on older CPUs are not established.** Nondefault stencil, software-world-light and VIEW render-to-bitmap routes remain unsupported. Ray tracing has a 1024-material-sampler-binding ceiling.
 
 ## AppImage prerelease download
 
-Download the **v0.1.0 experimental prerelease** from [GitHub Releases](https://github.com/sergen213/kabus22-linux/releases/tag/v0.1.0). Use the assets on that exact release page; the older private artifact hashes in the packaging notice do not identify this fresh build.
+Use the **[v0.1.1 experimental prerelease](https://github.com/sergen213/kabus22-linux/releases/tag/v0.1.1)** for integrated original-ISO widescreen and the recovered bitmap-font palette correction. Use assets and checksums from that exact release; historical private artifact hashes in the packaging notice do not identify this download.
+
+The earlier [v0.1.0 release](https://github.com/sergen213/kabus22-linux/releases/tag/v0.1.0) is retained unchanged and predates these corrections.
 
 Download these assets together:
 
 - `Kabus22-Linux-Installer-x86_64.AppImage` — native installer, engine and bundled non-host libraries.
 - `Kabus22-Linux-Installer-x86_64.AppImage.sources.tar.gz` — matching distribution-library/FFmpeg/ODE corresponding sources, dependency build recipes and notices.
-- `native-source.tar.gz` — native project/build/test sources and the reviewed `packaging/helper-innoextract/` and `packaging/runtime-uruntime/` source/notice inventories from the exact Git commit tagged `v0.1.0`, also available through the release's Git source links.
+- `native-source.tar.gz` — native project/build/test sources and the reviewed `packaging/helper-innoextract/` and `packaging/runtime-uruntime/` source/notice inventories from the exact `v0.1.1` tagged Git commit, also available through its Git source links.
 - `SHA256SUMS` — checksums of the three release assets above.
 
 Helper/runtime corresponding sources are in those `packaging/` paths of `native-source.tar.gz`, and inside the extracted AppImage at `usr/share/licenses/kabus22/innoextract` and `usr/share/licenses/kabus22/uruntime`; they are **not** in the dependency sidecar. Uruntime's MIT license is distinct from its separately executed GPL-containing squashfuse/unsquashfs helpers (including GPL LZO and, in squashfuse, LGPL libfuse). Their complete retained sources/static build recipes provide the rebuild/relink route; the [packaging notice](packaging/NOTICE.txt) identifies these boundaries and the preserved component attributions.
@@ -32,7 +34,7 @@ chmod +x Kabus22-Linux-Installer-x86_64.AppImage
 ./Kabus22-Linux-Installer-x86_64.AppImage
 ```
 
-Run as your ordinary user, **not with sudo**. In the ISO picker, select your legally obtained original Kabus 22 ISO, choose a new installation directory, and optionally select your separately obtained Kabus22Patch folder. No ISO, original game scripts/assets or patch is included in the release. The installer extracts the media without running Windows code and creates application-menu and desktop shortcuts. OpenGL is the default; the installed shortcuts also offer explicit Vulkan RT/raster actions. ISO-only installation retains authored legacy resolution modes; the optional patch supplies its authored widescreen UI, not automatic Hor+ camera conversion.
+Run as your ordinary user, **not with sudo**. In the ISO picker, select your legally obtained original Kabus 22 ISO and choose a new installation directory. Leave community extras empty for native original-campaign widescreen; a separately obtained Kabus22Patch folder is optional for independently desired extras. No ISO, original game scripts/assets or patch is included in the release. The installer extracts media without running Windows code and creates application-menu and desktop shortcuts. OpenGL is the default; shortcuts also offer explicit Vulkan RT/raster actions.
 
 **Minimum runtime requirements:** x86-64 Linux with **glibc 2.38 or newer**, a graphical desktop and a working host GPU driver/desktop OpenGL 3.3 or newer. GPU drivers, GL/Vulkan loaders and Wayland libraries are host-owned, not bundled. Optional Vulkan needs a host Vulkan loader/driver supporting Vulkan 1.3 and the requested features; hardware RT additionally needs ray queries, acceleration structures, buffer device addresses, descriptor indexing and shader int64. Unsupported explicit Vulkan/RT requests fail without automatic fallback. Generic x86-64 compilation does not establish execution on older CPUs.
 
@@ -81,7 +83,7 @@ Run the installer as your ordinary user, **not with sudo**. A separately built i
   --engine "$PWD/build/native/kabus22" --extractor /usr/bin/innoextract
 ```
 
-In the window, select your original ISO, choose a **new** installation directory, and optionally select your own Kabus22Patch folder. The patch is neither bundled nor automatically discovered. ISO-only installation retains the original scripted resolution modes; the optional patch supplies its authored widescreen/borderless/menu/HUD layout, not an automatic Hor+ camera conversion.
+In the window, select your original ISO and choose a **new** installation directory. **Current source includes native original-campaign widescreen by default; leave community extras empty for an ISO-only install.** A separately obtained Kabus22Patch folder is only needed if you independently want its extras. It is neither bundled nor automatically discovered, and installation does not rewrite WDL scripts or require patch artwork.
 
 For an unattended install, substitute your own absolute media path:
 
@@ -92,9 +94,9 @@ For an unattended install, substitute your own absolute media path:
   --unattended
 ```
 
-Add `--patch "/path/to/Kabus22Patch"` if wanted. The installer refuses existing destinations and existing shortcuts; it stages extraction and preserves the source media on cancellation. The developer `--setup` route accepts the original loose `setup.exe` with its original sibling `setup-1.bin`, instead of `--iso`; it extracts them without running Windows code. `--help` lists options and `--self-check` runs asset-free CLI/security checks.
+Add `--patch "/path/to/Kabus22Patch"` only for separately desired community extras, not to enable native original-campaign widescreen. The installer refuses existing destinations and existing shortcuts; it stages extraction and preserves the source media on cancellation. The developer `--setup` route accepts the original loose `setup.exe` with its original sibling `setup-1.bin`, instead of `--iso`; it extracts them without running Windows code. `--help` lists options and `--self-check` runs asset-free CLI/security checks.
 
-The install contains `bin/kabus22` and `game/`. The examples above rely on installed host libraries; a bundled dependency payload additionally requires its corresponding notices. Shortcuts launch native OpenGL by default and offer explicit Vulkan RT/raster actions. Your desktop environment may require marking a desktop shortcut trusted before opening it.
+The install contains `bin/kabus22` and `game/`. The examples above rely on installed host libraries; a bundled dependency payload additionally requires its corresponding notices. Launchers keep the existing `bin/kabus22 --data game` route: display adaptation is engine-owned, not an installer flag or configuration copy. Shortcuts launch native OpenGL by default and offer explicit Vulkan RT/raster actions. Your desktop environment may require marking a desktop shortcut trusted before opening it.
 
 ## Run the native engine
 
@@ -112,11 +114,37 @@ The install contains `bin/kabus22` and `game/`. The examples above rely on insta
 
 You can instead run the installed `"$HOME/Games/Kabus22/bin/kabus22"` with the same arguments. Vulkan requires a working host Vulkan loader/driver, Vulkan 1.3 and the requested device features. RT additionally requires ray queries, acceleration structures, buffer device addresses, descriptor indexing and shader int64. There is no automatic fallback on unsupported hardware. GPU drivers and GL/Vulkan loaders are not shipped here.
 
+### Original-campaign widescreen (v0.1.1)
+
+For an automatically selected, recognized original `K22.wdl` campaign, the engine defaults to desktop-sized borderless display. It integrates the recovered Kabus22Patch resolution and state-dependent menu/HUD/text geometry using **original ISO artwork**, including the original menu illustration and eye animation. No proprietary patch scripts, replacement artwork or Windows DLLs are shipped. Already-patched `K22Widescreen.wdl` and custom `--script` entries retain their own behavior rather than receiving a second transform.
+
+OpenGL, Vulkan raster and Vulkan RT consume the **same engine-prepared camera, UI and hit geometry**. Main-camera viewport dimensions track the native window; authored signed ARC/ASPECT behavior is preserved, and portal/mirror/custom VIEWs are not forced full-window. This is recovered resolution/UI integration, **not an inferred Hor+ projection or exact community-patch restyling**. The community patch does not supply a Bonus widescreen algorithm; Bonus is unchanged by this correction. Full campaign/Bonus acceptance and steady campaign CPU performance remain unestablished.
+
+Ghidra recovery distinguishes indexed-PCX **FONT** decoding from ordinary BMAP decoding: FONT preserves glyph indices and uses the normalized **active RGB palette**, not the embedded PCX palette or index-as-alpha. Palette selection tries the supplied input's basename `.raw`, then `palette.raw`, then RGB332; normalization keeps index 0 black and 255 white and lifts dark nonzero entries to brightness 8. World-palette events refresh cached FONT images; ordinary BMAP embedded-palette decoding is unchanged. Font data still comes only from your supplied media.
+
+Actual OpenGL, Vulkan raster and Vulkan RT glyph-pixel checks show all **eight genuine Font0 load-menu rows at 2560×1377** (the window-manager-clamped window), with source text alpha 50 unchanged. **5120×1440** was checked only through headless producer/API geometry, preserving authored load-row spacing, not actual GPU/window-system output. The extreme **16384×720** API check exercises a **selected-slot viewport with clipping**, not eight simultaneously visible rows or GPU/window-system proof at that size. This retains the recovered script-scale asymmetry rather than inventing a uniform fit-to-screen layout.
+
+v0.1.1 qualification passed all six native CTests and the separate installer CTest, and exercised fresh shipping-library original-ISO standalone consumers in OpenGL, Vulkan raster and Vulkan RT: source-input menus/FONT rows and selected HUD, pause, map, fade, projection and extreme-display API paths. The exact corrected AppImage additionally passed ISO-only installation without payload overrides, all installed inventory hashes, both generated shortcuts, 2560×1440 startup/captures in all three backends, and an ABI-compatible shared-library loader/replacement check in an independent extracted tree. **These bounded checks are not full NewGame/playthrough acceptance or proof of a rebuilt/new-ABI replacement library.** Historical release/artifact receipts do not qualify this correction.
+
+Use `--display authored` to restore original scripted display services and resolution presets. In native mode, `--resolution WIDTHxHEIGHT` chooses explicit dimensions for windowed/fullscreen use (minimum 1280×720, maximum 16384 per dimension); unset dimensions or either dimension zero use the desktop dimensions for both. `--window-mode windowed|fullscreen|borderless` selects the mode; borderless always uses desktop dimensions, even with an explicit resolution. These options do not change incidental headless/custom-script defaults or require changes to installer shortcuts.
+
+```sh
+# Explicit native windowed resolution for the original campaign
+./build/native/kabus22 --data "$HOME/Games/Kabus22/game" \
+  --display native --resolution 1920x1080 --window-mode windowed
+
+# Original scripted display/preset behavior
+./build/native/kabus22 --data "$HOME/Games/Kabus22/game" --display authored
+```
+
 Useful engine options:
 
 | Option | Purpose |
 | --- | --- |
 | `--mode campaign\|bonus` | Campaign is default; Bonus uses your supplied Bonus data. |
+| `--display native\|authored` | Native original-campaign display adaptation (default), or original scripted display services/presets. |
+| `--resolution WIDTHxHEIGHT` | Native windowed/fullscreen dimensions; unset/either zero uses desktop, borderless always uses desktop. |
+| `--window-mode windowed\|fullscreen\|borderless` | Native display mode; original campaign defaults to borderless. |
 | `--language tr\|en\|de` | Select text language. |
 | `--audio-language tr\|en` | Select campaign audio language. |
 | `--script ENTRY` | Select a supplied WDL entry instead of automatic selection. |

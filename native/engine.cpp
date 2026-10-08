@@ -638,6 +638,7 @@ void worldFrameEvents(Engine&,Runtime&);
 namespace {
 void svc_flush(FileData&);
 std::filesystem::path svc_private(const std::filesystem::path&,const std::filesystem::path&);
+const Image& svc_bitmap(Engine&,Value);
 }
 static bool core_equal(std::string_view a,std::string_view b){return !CaseLess{}(a,b)&&!CaseLess{}(b,a);}
 static const NativeMask* core_mask(Object::Kind kind,std::string_view name,SemanticProfile profile){if(kind==Object::Kind::Particle)kind=Object::Kind::Entity;
@@ -678,6 +679,153 @@ void Engine::configure_language(Runtime& runtime,std::string_view language,bool 
  if(explicitChoice){bytes[31]=index;changed=true;}
  if(bytes[31]>5)throw std::runtime_error("invalid saved patch language index");
  if(changed){FileData file{std::move(bytes),0,destination,true};svc_flush(file);}
+}
+bool Engine::display_admitted(){
+ if(!nativeDisplay_)return false;
+ for(auto [name,id]:{std::pair{"GA_Cozunurlukler",displayResolution_},std::pair{"GA_ScaleOranlari",displayScale_},std::pair{"GA_ScaleOranlari2",displayScale2_},std::pair{"GA_FontOranlari",displayFont_}}){const auto* object=state.get(id);if(global(name).bits!=id||!object||!object->alive){nativeDisplay_=false;displayObjects_.clear();displayFills_.clear();return false;}}
+ return true;
+}
+bool Engine::configure_display(Runtime& runtime,bool originalCampaignEntry,bool native,int width,int height,WindowMode mode){
+ const bool continuing=display_admitted();
+ if(continuing&&!native){auto restore=[&](ObjectId id,double x,double y){auto& a=state.require(id).array;a[0].value=Value::from_double(x);a[1].value=Value::from_double(y);};restore(displayResolution_,640,480);restore(displayScale_,1,1);restore(displayScale2_,1,1);restore(displayFont_,1,1.166);}
+ nativeDisplay_=false;if(!continuing||!native){displayObjects_.clear();displayFills_.clear();}
+ if(!originalCampaignEntry||!native||state.profile!=SemanticProfile::CampaignA6||runtime.function("dbg_screen_reset"))return false;
+ for(auto name:{"GA_AyarlariYukle","Menu_AcilisEkrani","AnaMenuAc","EM_Ayarla","GrafikMenuKapat","SmartMenuAc"})if(!runtime.function(name))return false;
+ auto array=[&](std::string_view name,std::size_t count)->ObjectId{auto value=global(name);auto* object=state.get(value.bits);return value.kind==Value::Kind::Object&&object&&object->alive&&object->array.size()==count?object->id:0;};
+ displayResolution_=array("GA_Cozunurlukler",10);displayScale_=array("GA_ScaleOranlari",10);displayScale2_=array("GA_ScaleOranlari2",10);displayFont_=array("GA_FontOranlari",4);
+ if(!displayResolution_||!displayScale_||!displayScale2_||!displayFont_||!array("EM_Kordinat",54)||!array("EML_Paneller",27))return false;
+ const auto& resolution=state.require(displayResolution_).array;
+ constexpr std::array<int,10> authored{640,480,800,600,1024,768,1280,1024,1600,1200};
+ for(std::size_t i=continuing?2:0;i<authored.size();++i)if(resolution[i].value.integer()!=authored[i])return false;
+ auto matches=[&](ObjectId id,const auto& values){const auto& a=state.require(id).array;for(std::size_t i=continuing?2:0;i<values.size();++i)if(a[i].value.raw()!=Value::from_double(values[i]).raw())return false;return true;};
+ if(!matches(displayScale_,std::array{1.0,1.0,1.25,1.25,1.6,1.6,2.0,2.133,2.5,2.5})||
+    !matches(displayScale2_,std::array{1.0,1.0,1.25,1.25,1.0,1.0,1.25,1.334,1.563,1.563})||
+    !matches(displayFont_,std::array{1.0,1.166,1.611,2.0}))return false;
+ if(width<0||height<0||width>16384||height>16384||(width&&width<1280)||(height&&height<720))throw std::runtime_error("native resolution must be1280x720 through16384x16384, or unset");
+ if(!width||!height||mode==WindowMode::Borderless){
+  if(renderer){SDL_DisplayMode desktop{};if(SDL_GetDesktopDisplayMode(0,&desktop))throw std::runtime_error(std::string("cannot query native desktop: ")+SDL_GetError());width=desktop.w;height=desktop.h;}
+  else if(!width||!height){width=currentWidth_;height=currentHeight_;}
+ }
+ if(width<1280||height<720||width>16384||height>16384)throw std::runtime_error("native display dimensions outside1280x720 through16384x16384");
+ if(renderer){renderer->set_mode(width,height,mode);const auto metrics=renderer->metrics();width=metrics.width;height=metrics.height;}
+ std::snprintf(displayLabel_.data(),displayLabel_.size(),"%dx%d",width,height);
+ currentWindowMode=mode;windowStyle=mode==WindowMode::Borderless?1:mode==WindowMode::Windowed?16:0;currentWidth_=width;currentHeight_=height;if(!continuing){displayWidth_=width;displayHeight_=height;}
+ set_vector(global_vector("screen_size"),{float(width),float(height),0});set_global("video_screen",Value::from_int(mode==WindowMode::Fullscreen?1:2));
+ displayScrolls_={global("CRMT_Credit").bits,global("Son_yazi").bits,global("CRMT_Oyunsonu").bits};
+ static constexpr std::array textNames{"VST_AltText","LYT_AltYazi","LYT_UstYazi","ozel_Altdiyalog","Gecici_AltYazi","LYT_OyunSonuYazi","CRMT_Oyunsonu","Son_yazi","Par_AltYaziText","Par_AltGorunText","Par_AltGormeText","Envanter_AltYazi","Buyu_GosterYazi","NBM_AltYazi","envanterload_text","intaktifload1_text","intaktifload2_text","YUMT_Buffer","t_Silah","t_Olay","NMT_AltYazi"};
+ if(!continuing)for(ObjectId id:state.uiCandidates){auto* object=state.get(id);if(!object||!object->alive||(object->kind!=Object::Kind::Panel&&object->kind!=Object::Kind::Text))continue;
+  auto is=[&](std::string_view name){return core_equal(object->name,name);};auto starts=[&](std::string_view prefix){return object->name.size()>=prefix.size()&&core_equal(std::string_view(object->name).substr(0,prefix.size()),prefix);};
+  DisplayRole role=DisplayRole::Ordinary;int index=0;
+  if(is("Menu_Acilis")||is("DMP_Arka")||is("PMP_Arka")||is("STMP_Arka")||is("EMP_Arka")||is("EMP_ArkaO")||is("loading_pn")||starts("Giris_Acilispnl")||is("kararma_fon_pnl")||is("videokara_fon_pnl")||is("siyah_fon_pnl")||is("LYP_Fade")||is("KBP_Fade"))role=DisplayRole::Fill;
+  else if(is("grid_fon_pnl"))role=DisplayRole::Grid;
+  else if(starts("genel_panel")||starts("kapi_panel")||starts("yon_oklari")||is("player_noktasi"))role=DisplayRole::MapPixel;
+  else if(starts("Intro_Acilpnl"))role=DisplayRole::IntroTitle;
+  else if(is("DMP_GozSag"))role=DisplayRole::EyeRight;
+  else if(is("DMP_Gozsol"))role=DisplayRole::EyeLeft;
+  else if(is("YUMT_Liste"))role=DisplayRole::LoadList;
+  else if(is("YUMP_Cursor"))role=DisplayRole::LoadCursor;
+  else if(is("CRMT_Credit"))role=DisplayRole::Credit;
+  else if(starts("CRMP_Cerceve_"))role=DisplayRole::CreditFrame;
+  else if(is("DOTP_Dokuman_text"))role=DisplayRole::Document;
+  else if(starts("EMT_Cisim")&&object->name.size()==10){role=DisplayRole::InventoryLabel;index=object->name.back()-'0';}
+  else if(is("oy_syh_pan1")||is("oy_syh_pan2"))role=DisplayRole::Bar;
+  else if(is("BEP_Enerji"))role=DisplayRole::BossEnergy;
+  else if(starts("BEP_"))role=DisplayRole::Boss;
+  else if(starts("STMP_"))role=DisplayRole::Pause;
+  else if(object->kind==Object::Kind::Panel&&(starts("AMP_")||starts("AYMP_")||starts("CMP_")||starts("YMP_")||starts("GMP_")||starts("SMP_")||starts("KSMP_")||starts("KONMP_")||starts("JKONMP_")||starts("YUMP_")))role=DisplayRole::Menu;
+  else if(object->kind==Object::Kind::Panel&&(starts("EMP_")||starts("PEMP_")||starts("KVMP_")||starts("KOMP_")))role=DisplayRole::Gameplay;
+  else for(auto name:textNames)if(is(name)){role=DisplayRole::Text;break;}
+  displayObjects_.push_back({id,role,index});
+  if(role==DisplayRole::Fill)displayFills_.insert(id);
+ }
+ nativeDisplay_=true;prepare_display();return true;
+}
+void Engine::prepare_display(){
+ if(!display_admitted())return;
+ const float width=float(currentWidth_),height=float(currentHeight_);auto ratio=[](float size,float basis){return float(Value::from_double(size/basis).real());};const float mx=ratio(width,1280),my=ratio(height,720),gx=ratio(width,640),gy=ratio(height,480);
+ const bool gameplay=number("LY_AktifLevelID")!=0&&number("level_yuklendi_ok")!=0&&number("game_over_start")==0&&number("STM_Acik")==0;
+ auto pair=[&](ObjectId id,float x,float y){auto& a=state.require(id).array;a[0].value=Value::from_double(x);a[1].value=Value::from_double(y);};
+ const float sourceScale2X=float(state.require(displayScale2_).array[0].value.real());
+ pair(displayResolution_,width,height);pair(displayScale_,gameplay?gx:mx,gameplay?gy:my);pair(displayScale2_,gameplay?gx:mx,gameplay?gy:my);pair(displayFont_,mx,my);
+ set_global("GA_Cozunurluk",{});set_global("GM_CursorCozunurluk",{});
+ set_global("video_screen",Value::from_int(currentWindowMode==WindowMode::Fullscreen?1:2));
+ const bool resized=displayWidth_!=currentWidth_||displayHeight_!=currentHeight_;
+ if(resized)std::snprintf(displayLabel_.data(),displayLabel_.size(),"%dx%d",currentWidth_,currentHeight_);
+ const float rx=width/displayWidth_,ry=height/displayHeight_;
+ const float oldmx=resized?ratio(float(displayWidth_),1280):mx,oldmy=resized?ratio(float(displayHeight_),720):my;
+ auto scale=[&](ObjectId id,float x,float y){set_field(id,"scale_x",x);set_field(id,"scale_y",y);};
+ auto place=[&](ObjectId id,float x,float y){set_field(id,"pos_x",x);set_field(id,"pos_y",y);};
+ float loadTop=height-170*my,loadBottom=height-10*my;displayLoadScroll_=0;displayLoadBudget_=0;
+ const auto loadList=global("YUMT_Liste");const bool loadVisible=loadList&&field(loadList.bits,"visible");
+ if(loadVisible){float cursorHeight=18;for(auto& entry:displayObjects_)if(entry.role==DisplayRole::LoadCursor){auto* cursor=state.get(entry.id);if(cursor&&cursor->alive){auto bitmap=cursor->fields.find("bmap");if(bitmap!=cursor->fields.end()&&bitmap->second.value){if(entry.bitmap!=bitmap->second.value.bits){const auto& image=svc_bitmap(*this,bitmap->second.value);entry.bitmap=bitmap->second.value.bits;entry.bitmapSize={float(image.width),float(image.height)};}cursorHeight=entry.bitmapSize.y;}}break;}
+  const float body=std::max({160*my,144*mx+12*my,(126+cursorHeight)*mx+12*my}),available=height-20*my;
+  loadTop=loadBottom-std::min(body,available);
+  if(body>available){const float selected=std::clamp(float(number("YUM_Cursor")),0.0f,7.0f);displayLoadScroll_=std::max(0,int(std::ceil((18*selected*mx+std::max(18.0f,cursorHeight)*mx+12*my-available)/mx)));displayLoadBudget_=std::max(19,int((available-10*my)/mx)+1);}
+  set_global("YUM_Y",Value::from_double(loadTop));
+ }
+ for(auto& entry:displayObjects_){auto* object=state.get(entry.id);if(!object||!object->alive)continue;const ObjectId id=entry.id;
+  const float sourceBossScaleX=entry.role==DisplayRole::BossEnergy?float(field(id,"scale_x")):0;
+  // Retain authored center/bottom offsets in the quantized menu scale domain.
+  // Scaling cached physical pixels first truncates scale_y and drifts the anchor.
+  if(resized&&entry.role==DisplayRole::Menu&&entry.menuPrepared){place(id,width/2+(float(field(id,"pos_x"))-displayWidth_/2.0f)*mx/oldmx,height+(float(field(id,"pos_y"))-displayHeight_)*my/oldmy);scale(id,mx,my);entry.menuY=float(field(id,"pos_y"));}
+  else if(resized&&entry.role!=DisplayRole::MapPixel){place(id,float(field(id,"pos_x"))*rx,float(field(id,"pos_y"))*ry);scale(id,float(field(id,"scale_x"))*rx,float(field(id,"scale_y"))*ry);entry.menuY=float(field(id,"pos_y"));}
+  auto bitmap_size=[&](Value bitmap){if(entry.bitmap!=bitmap.bits){const auto& image=svc_bitmap(*this,bitmap);entry.bitmap=bitmap.bits;entry.bitmapSize={float(image.width),float(image.height)};if(entry.role==DisplayRole::BossEnergy){auto* cam=state.get(global("BEP_Cam").bits);if(cam){auto found=cam->fields.find("bmap");if(found!=cam->fields.end()&&found->second.value)entry.bitmapSize.x=float(svc_bitmap(*this,found->second.value).width);}}}return entry.bitmapSize;};
+  switch(entry.role){
+   case DisplayRole::Grid:scale(id,gx,gy);break;
+   case DisplayRole::Fill:{const auto bitmap=object->fields.find("bmap");if(field(id,"visible")&&bitmap!=object->fields.end()&&bitmap->second.value){const auto size=bitmap_size(bitmap->second.value);scale(id,width/size.x,height/size.y);place(id,0,0);}break;}
+   case DisplayRole::IntroTitle:{const auto bitmap=object->fields.find("bmap");if(field(id,"visible")&&bitmap!=object->fields.end()&&bitmap->second.value){const auto size=bitmap_size(bitmap->second.value);scale(id,gx,gy);place(id,(width-size.x*gx)/2,(height-size.y*gy)/2);}break;}
+   case DisplayRole::EyeRight:case DisplayRole::EyeLeft:{const bool right=entry.role==DisplayRole::EyeRight;scale(id,gx,gy);place(id,(right?414:205)*gx,(right?376:377)*gy);break;}
+   case DisplayRole::CreditFrame:scale(id,mx,my);place(id,(width-400*mx)/2,(height-300*my)/2);break;
+   case DisplayRole::Text:case DisplayRole::Document:case DisplayRole::InventoryLabel:case DisplayRole::Credit:case DisplayRole::LoadList:{
+    scale(id,mx,entry.role==DisplayRole::LoadList?mx:my);
+    if(core_equal(object->name,"VST_AltText"))set_field(id,"pos_y",height*15/16);
+    if(entry.role==DisplayRole::Document)place(id,10*gx,10*gy);
+    if(entry.role==DisplayRole::Credit){place(id,width/2,(height-300*my)/2+5*my);set_field(id,"size_y",290);}
+    if(entry.role==DisplayRole::LoadList){place(id,(width-384*mx)/2+5*mx,loadTop+5*my);set_field(id,"size_y",std::max(290*my,144.0f));}
+    break;
+   }
+   case DisplayRole::LoadCursor:scale(id,mx,mx);place(id,(width-384*mx)/2,loadTop+(float(number("YUM_Cursor"))*18-displayLoadScroll_)*mx+6*my);break;
+   case DisplayRole::Bar:scale(id,gx,gy);break;
+   case DisplayRole::Boss:case DisplayRole::BossEnergy:{auto bitmap=object->fields.find("bmap");if(field(id,"visible")&&bitmap!=object->fields.end()&&bitmap->second.value){const auto size=bitmap_size(bitmap->second.value);float sx=gx;if(entry.role==DisplayRole::BossEnergy){sx=float(field(id,"scale_x"));if(sourceBossScaleX!=entry.bossScaleX&&sourceScale2X>0)sx=sourceBossScaleX*gx/sourceScale2X;}scale(id,sx,gy);entry.bossScaleX=float(field(id,"scale_x"));place(id,(width-size.x*gx)/2,218*gy+(height-size.y*gy)/2);}break;}
+   case DisplayRole::Pause:{
+    scale(id,mx,my);const float bottom=height-32*my-10;
+    if(core_equal(object->name,"STMP_Devam")||core_equal(object->name,"STMP_AnaMenu"))place(id,(width-172*mx)/2+22*mx,bottom-(core_equal(object->name,"STMP_Devam")?32*my:0));
+    else if(core_equal(object->name,"STMP_MenuSoru"))place(id,(width-344*mx)/2,bottom-60*my);
+    else if(core_equal(object->name,"STMP_SoruEvet")||core_equal(object->name,"STMP_SoruHayir"))place(id,(width-340*mx)/2+(core_equal(object->name,"STMP_SoruHayir")?170*mx:0),bottom);
+    break;
+   }
+   case DisplayRole::Menu:{
+    const float sx=float(field(id,"scale_x")),sy=float(field(id,"scale_y"));
+    const float y=float(field(id,"pos_y"));
+    if(field(id,"visible")&&sx>0&&sy>0&&(!entry.menuPrepared||y!=entry.menuY||sx!=mx||sy!=my)){const float margin=entry.menuPrepared&&y==entry.menuY?0:16;place(id,width/2+(float(field(id,"pos_x"))-width/2)*mx/sx,height+(y-height+margin)*my/sy);scale(id,mx,my);entry.menuY=float(field(id,"pos_y"));entry.menuPrepared=true;}
+    break;
+   }
+   case DisplayRole::Gameplay:{
+    const float sx=float(field(id,"scale_x")),sy=float(field(id,"scale_y"));
+    if(sx>0&&sy>0&&(sx!=gx||sy!=gy)){place(id,float(field(id,"pos_x"))*gx/sx,float(field(id,"pos_y"))*gy/sy);scale(id,gx,gy);}
+    break;
+   }
+   case DisplayRole::Ordinary:case DisplayRole::MapPixel:break;
+  }
+ }
+ for(const auto& entry:displayObjects_)if(entry.role==DisplayRole::InventoryLabel&&entry.index>=0&&entry.index<8){static constexpr std::array names{"EMP_Nesne0","EMP_Nesne1","EMP_Nesne2","EMP_Nesne3","EMP_Nesne4","EMP_Nesne5","EMP_Nesne6","EMP_Nesne7"};auto panel=global(names[entry.index]);if(panel)place(entry.id,float(field(panel.bits,"pos_x")),float(field(panel.bits,"pos_y"))+34*gy);}
+ if(resized){
+  const bool credit=field(global("CRMT_Credit").bits,"visible")!=0;
+  const float oldAnchor=credit?displayHeight_/2.0f:float(displayHeight_),anchor=credit?height/2:height;
+  const float margin=number("DM_Acik")!=0&&!credit&&!loadVisible?16.0f:0;
+  for(auto name:{"Cer_aX1","Cer_aX2","Cer_hX1","Cer_hX2"})set_global(name,Value::from_double(width/2+(number(name)-displayWidth_/2.0)*mx/oldmx));
+  for(auto name:{"Cer_aY1","Cer_aY2","Cer_hY1","Cer_hY2"})set_global(name,Value::from_double(anchor+(number(name)-oldAnchor+margin)*my/oldmy-margin));
+  set_global("GM_ParlakKor",Value::from_double(number("GM_ParlakKor")*rx));
+ }
+ if(loadVisible){set_global("Cer_hX1",Value::from_double((width-384*mx)/2));set_global("Cer_hX2",Value::from_double((width+384*mx)/2));set_global("Cer_hY1",Value::from_double(loadTop));set_global("Cer_hY2",Value::from_double(loadBottom));}
+ auto camera=global("camera");if(camera){set_field(camera.bits,"size_x",width);set_field(camera.bits,"size_y",height);}
+ displayWidth_=currentWidth_;displayHeight_=currentHeight_;
+}
+float Engine::display_aspect(float authored)const{
+ if(!nativeDisplay_||authored==0)return authored;
+ // Original0044e260/0044cd00: screen-mode factor, not a patch-added Hor+ projection.
+ const float modeFactor=currentWindowMode==WindowMode::Fullscreen?float(currentHeight_)*320/(float(currentWidth_)*240):1;
+ return 1/(authored*modeFactor);
 }
 Value Engine::global(std::string_view n)const{auto i=state.globals.find(n);return i==state.globals.end()?Value{}:i->second.value;}
 Argument Engine::global_vector(std::string_view n)const{auto it=state.numericGlobals.find(n);if(it!=state.numericGlobals.end())return {global(n),{state.require(it->second).scalar,it->second,"x"}};auto v=global(n);if(v.kind!=Value::Kind::Object)throw std::runtime_error("unknown vector global "+std::string(n));return {v,{}};}
@@ -753,7 +901,7 @@ EntityData& Engine::register_entity(ObjectId id){
  if(state.profile==SemanticProfile::BonusA7&&data.type==5&&data.model)prepare_query_geometry(id,data);
  return entities.emplace(id,std::move(data)).first->second;
 }
-void Engine::prepare(Runtime& runtime){assets.initialize_native_lightmap_tables(global("GAMMA").raw(),global("D3D_MONOCHROME").bits!=0,renderer!=nullptr);const auto count=state.objects.size();for(std::size_t i=0;i<count;++i){auto& object=state.objects[i];if(!object.alive||object.kind!=Object::Kind::Entity||entities.contains(object.id))continue;ObjectId id=object.id;register_entity(id);auto fn=callback(id,"action");if(fn){if(state.profile==SemanticProfile::BonusA7)runtime.enqueue(fn,{},id,0);else runtime.start(fn,{},id,0);}}if(state.profile==SemanticProfile::BonusA7)for(std::size_t i=0;i<count;++i){const auto& object=state.objects[i];if(object.alive&&object.kind==Object::Kind::Entity)initialize_query_actor(object.id);}make_frame();}
+void Engine::prepare(Runtime& runtime){ensure_font_palette(runtime.compiler_settings().entry);assets.initialize_native_lightmap_tables(global("GAMMA").raw(),global("D3D_MONOCHROME").bits!=0,renderer!=nullptr);const auto count=state.objects.size();for(std::size_t i=0;i<count;++i){auto& object=state.objects[i];if(!object.alive||object.kind!=Object::Kind::Entity||entities.contains(object.id))continue;ObjectId id=object.id;register_entity(id);auto fn=callback(id,"action");if(fn){if(state.profile==SemanticProfile::BonusA7)runtime.enqueue(fn,{},id,0);else runtime.start(fn,{},id,0);}}if(state.profile==SemanticProfile::BonusA7)for(std::size_t i=0;i<count;++i){const auto& object=state.objects[i];if(object.alive&&object.kind==Object::Kind::Entity)initialize_query_actor(object.id);}make_frame();}
 int legacy_scancode(int code){static constexpr int codes[]={SDL_SCANCODE_UNKNOWN,SDL_SCANCODE_ESCAPE,SDL_SCANCODE_1,SDL_SCANCODE_2,SDL_SCANCODE_3,SDL_SCANCODE_4,SDL_SCANCODE_5,SDL_SCANCODE_6,SDL_SCANCODE_7,SDL_SCANCODE_8,SDL_SCANCODE_9,SDL_SCANCODE_0,SDL_SCANCODE_MINUS,SDL_SCANCODE_EQUALS,SDL_SCANCODE_BACKSPACE,SDL_SCANCODE_TAB,SDL_SCANCODE_Q,SDL_SCANCODE_W,SDL_SCANCODE_E,SDL_SCANCODE_R,SDL_SCANCODE_T,SDL_SCANCODE_Y,SDL_SCANCODE_U,SDL_SCANCODE_I,SDL_SCANCODE_O,SDL_SCANCODE_P,SDL_SCANCODE_LEFTBRACKET,SDL_SCANCODE_RIGHTBRACKET,SDL_SCANCODE_RETURN,SDL_SCANCODE_LCTRL,SDL_SCANCODE_A,SDL_SCANCODE_S,SDL_SCANCODE_D,SDL_SCANCODE_F,SDL_SCANCODE_G,SDL_SCANCODE_H,SDL_SCANCODE_J,SDL_SCANCODE_K,SDL_SCANCODE_L,SDL_SCANCODE_SEMICOLON,SDL_SCANCODE_APOSTROPHE,SDL_SCANCODE_GRAVE,SDL_SCANCODE_LSHIFT,SDL_SCANCODE_BACKSLASH,SDL_SCANCODE_Z,SDL_SCANCODE_X,SDL_SCANCODE_C,SDL_SCANCODE_V,SDL_SCANCODE_B,SDL_SCANCODE_N,SDL_SCANCODE_M,SDL_SCANCODE_COMMA,SDL_SCANCODE_PERIOD,SDL_SCANCODE_SLASH,SDL_SCANCODE_RSHIFT,SDL_SCANCODE_KP_MULTIPLY,SDL_SCANCODE_LALT,SDL_SCANCODE_SPACE,SDL_SCANCODE_CAPSLOCK,SDL_SCANCODE_F1,SDL_SCANCODE_F2,SDL_SCANCODE_F3,SDL_SCANCODE_F4,SDL_SCANCODE_F5,SDL_SCANCODE_F6,SDL_SCANCODE_F7,SDL_SCANCODE_F8,SDL_SCANCODE_F9,SDL_SCANCODE_F10,SDL_SCANCODE_NUMLOCKCLEAR,SDL_SCANCODE_SCROLLLOCK,SDL_SCANCODE_HOME,SDL_SCANCODE_UP,SDL_SCANCODE_PAGEUP,SDL_SCANCODE_KP_MINUS,SDL_SCANCODE_LEFT,SDL_SCANCODE_KP_5,SDL_SCANCODE_RIGHT,SDL_SCANCODE_KP_PLUS,SDL_SCANCODE_END,SDL_SCANCODE_DOWN,SDL_SCANCODE_PAGEDOWN,SDL_SCANCODE_INSERT,SDL_SCANCODE_DELETE};if(code>=0&&code<int(std::size(codes)))return codes[code];switch(code){case 87:return SDL_SCANCODE_F11;case 88:return SDL_SCANCODE_F12;case 156:return SDL_SCANCODE_KP_ENTER;case 157:return SDL_SCANCODE_RCTRL;case 181:return SDL_SCANCODE_KP_DIVIDE;case 184:return SDL_SCANCODE_RALT;case 199:return SDL_SCANCODE_HOME;case 200:return SDL_SCANCODE_UP;case 201:return SDL_SCANCODE_PAGEUP;case 203:return SDL_SCANCODE_LEFT;case 205:return SDL_SCANCODE_RIGHT;case 207:return SDL_SCANCODE_END;case 208:return SDL_SCANCODE_DOWN;case 209:return SDL_SCANCODE_PAGEDOWN;case 210:return SDL_SCANCODE_INSERT;case 211:return SDL_SCANCODE_DELETE;default:return SDL_SCANCODE_UNKNOWN;}}
 static bool core_key_bits(const std::bitset<SDL_NUM_SCANCODES>& bits,int code){auto scan=legacy_scancode(code);bool result=scan!=SDL_SCANCODE_UNKNOWN&&bits[scan];int alias=SDL_SCANCODE_UNKNOWN;switch(code){case 28:alias=SDL_SCANCODE_KP_ENTER;break;case 29:alias=SDL_SCANCODE_RCTRL;break;case 56:alias=SDL_SCANCODE_RALT;break;case 53:alias=SDL_SCANCODE_KP_DIVIDE;break;case 71:alias=SDL_SCANCODE_KP_7;break;case 72:alias=SDL_SCANCODE_KP_8;break;case 73:alias=SDL_SCANCODE_KP_9;break;case 75:alias=SDL_SCANCODE_KP_4;break;case 77:alias=SDL_SCANCODE_KP_6;break;case 79:alias=SDL_SCANCODE_KP_1;break;case 80:alias=SDL_SCANCODE_KP_2;break;case 81:alias=SDL_SCANCODE_KP_3;break;case 82:alias=SDL_SCANCODE_KP_0;break;case 83:alias=SDL_SCANCODE_KP_PERIOD;break;case 86:alias=SDL_SCANCODE_NONUSBACKSLASH;break;default:break;}return result||(alias!=SDL_SCANCODE_UNKNOWN&&bits[alias]);}
 static int core_gamepad_key(int code){switch(code){case 28:return SDL_CONTROLLER_BUTTON_A;case 1:return SDL_CONTROLLER_BUTTON_B;case 72:return SDL_CONTROLLER_BUTTON_DPAD_UP;case 80:return SDL_CONTROLLER_BUTTON_DPAD_DOWN;case 75:return SDL_CONTROLLER_BUTTON_DPAD_LEFT;case 77:return SDL_CONTROLLER_BUTTON_DPAD_RIGHT;default:return -1;}}
@@ -776,9 +924,10 @@ void Engine::update_input(Runtime& runtime){auto edge=[&](Value fn,int code){if(
  set_global("num_joysticks",Value::from_int(int(input.joystickConnected[0])+int(input.joystickConnected[1])));set_vector(global_vector("joy_raw"),{input.joystickAxes[0][0]*100,input.joystickAxes[0][1]*100,input.joystickAxes[0][2]*100});set_vector(global_vector("joy2_raw"),{input.joystickAxes[1][0]*100,input.joystickAxes[1][1]*100,input.joystickAxes[1][2]*100});
  set_vector(global_vector("joy_force"),{input.controllerAxes[SDL_CONTROLLER_AXIS_LEFTX]*100,-input.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY]*100,input.controllerAxes[SDL_CONTROLLER_AXIS_TRIGGERLEFT]*100});set_vector(global_vector("joy_rot"),{input.controllerAxes[SDL_CONTROLLER_AXIS_RIGHTX]*100,input.controllerAxes[SDL_CONTROLLER_AXIS_RIGHTY]*100,input.controllerAxes[SDL_CONTROLLER_AXIS_TRIGGERRIGHT]*100});
  if(input.quit){auto close=global("on_close");if(close.kind==Value::Kind::Function)edge(close,0);else quit=true;}if(renderer&&state.profile==SemanticProfile::CampaignA6)renderer->set_mouse_mode(number("mouse_mode")!=0,number("mouse_mode")==0&&number("enable_mouse")!=0);}
-void Engine::tick(Runtime& runtime,const Input& in){input=in;if(!std::isfinite(in.dt))throw std::runtime_error("nonfinite native frame duration");auto seconds=std::clamp(in.dt,0.0,1.0);time_+=std::max(0.0,in.dt);auto frameRaw=std::max<std::int32_t>(1,Value::from_double(seconds*16).raw());set_global("time_frame",Value::from_raw(frameRaw));set_global("total_ticks",Value::from_raw(std::bit_cast<std::int32_t>(global("total_ticks").bits+std::uint32_t(frameRaw))));set_global("total_secs",Value::from_double(time_));set_global("total_frames",Value::from_int(global("total_frames").integer()+1));set_global("fps",Value::from_double(seconds?1/seconds:0));
+void Engine::tick(Runtime& runtime,const Input& in){ensure_font_palette(runtime.compiler_settings().entry);input=in;if(!std::isfinite(in.dt))throw std::runtime_error("nonfinite native frame duration");auto seconds=std::clamp(in.dt,0.0,1.0);time_+=std::max(0.0,in.dt);auto frameRaw=std::max<std::int32_t>(1,Value::from_double(seconds*16).raw());set_global("time_frame",Value::from_raw(frameRaw));set_global("total_ticks",Value::from_raw(std::bit_cast<std::int32_t>(global("total_ticks").bits+std::uint32_t(frameRaw))));set_global("total_secs",Value::from_double(time_));set_global("total_frames",Value::from_int(global("total_frames").integer()+1));set_global("fps",Value::from_double(seconds?1/seconds:0));
  auto timeRaw=number("fps_lock")!=0?Value::from_double(16/std::max(1.0,number("fps_max"))).raw():frameRaw;auto minfps=std::max(1.0,number("fps_min"));timeRaw=std::clamp(timeRaw,51,std::max(51,Value::from_double(16/minfps).raw()));auto mul=[](std::int32_t a,std::int32_t b){auto n=std::int64_t(a)*b+512;auto q=n>=0?n/1024:-((-n+1023)/1024);return std::bit_cast<std::int32_t>(std::uint32_t(q));};timeRaw=mul(timeRaw,global("time_factor").raw());auto prior=global("time").raw();auto diff=std::bit_cast<std::int32_t>(std::uint32_t(prior)-std::uint32_t(timeRaw));timeRaw=std::bit_cast<std::int32_t>(std::uint32_t(timeRaw)+std::uint32_t(mul(diff,global("time_smooth").raw())));set_global("time",Value::from_raw(timeRaw));set_global("time_fac",Value::from_raw(0x100000/std::max(51,timeRaw)));
  if(renderer){auto m=renderer->metrics();currentWidth_=m.width;currentHeight_=m.height;set_vector(global_vector("screen_size"),{float(m.width),float(m.height),0});}
+ if(nativeDisplay_&&(displayWidth_!=currentWidth_||displayHeight_!=currentHeight_))prepare_display();
  update_input(runtime);make_frame(state.profile!=SemanticProfile::BonusA7);if(renderer)for(auto& c:frame_.cameras)if(c.portalId&&!c.portalTarget)if(auto surface=Renderer::portal_surface(frame_,c,renderer->metrics())){set_field(c.sourceId,"portal_x",surface->position.x);set_field(c.sourceId,"portal_y",surface->position.y);set_field(c.sourceId,"portal_z",surface->position.z);set_field(c.sourceId,"pnormal_x",surface->normal.x);set_field(c.sourceId,"pnormal_y",surface->normal.y);set_field(c.sourceId,"pnormal_z",surface->normal.z);}
  if(state.profile==SemanticProfile::CampaignA6)update_ui(runtime);runtime.tick(timeRaw,global("freeze_mode").raw());if(!viewsPrepared_){prepare(runtime);viewsPrepared_=true;}
  if(global("freeze_mode").raw()<1&&global("debug_mode").raw()<1){const std::size_t particleCount=activeParticles.size();for(std::size_t i=0;i<particleCount&&i<activeParticles.size();++i){auto pd=activeParticles[i];auto* o=state.get(pd.object);if(!o||!o->alive)continue;
@@ -798,6 +947,8 @@ void Engine::tick(Runtime& runtime,const Input& in){input=in;if(!std::isfinite(i
 }
 void Engine::finish_frame(Runtime& runtime){if(state.profile==SemanticProfile::BonusA7)physics.step(runtime);}
 Value Engine::builtin(Runtime& runtime,ProcessContext& ctx,std::string_view name,std::span<const Argument> args){
+ ensure_font_palette(runtime.compiler_settings().entry);
+ display_admitted();
  if(state.profile==SemanticProfile::BonusA7){
   auto count=[&](std::size_t n){if(args.size()!=n)throw std::runtime_error(std::string(name)+": invalid argument count");};
   auto numeric=[&](std::size_t i){auto v=args[i].current();if(v.kind!=Value::Kind::Number)throw std::runtime_error(std::string(name)+": numeric argument required");return v.raw();};
@@ -1058,7 +1209,9 @@ std::optional<Value> Engine::service_builtin(Runtime&,ProcessContext&,std::strin
   constexpr std::array<std::string_view,24> joy{"joy_1","joy_2","joy_3","joy_4","joy_5","joy_6","joy_7","joy_8","joy_9","joy_10","joy_11","joy_12","joy2_1","joy2_2","joy2_3","joy2_4","joy2_5","joy2_6","joy2_7","joy2_8","joy2_9","joy2_10","joy2_11","joy2_12"};if(code>=256&&code<280)return global(joy[code-256]);if(code==280)return global("mouse_left");if(code==281)return global("mouse_right");if(code==282)return global("mouse_middle");return Value{};
  }
  if(name=="video_window"){count(4);Vec3 pos{};if(a[0].current())pos=vector(a[0]);if(a[1].current())throw std::runtime_error("non-NULL legacy video_window size not used by Kabus22");windowStyle=integer(2);if(windowStyle!=0&&windowStyle!=1&&windowStyle!=16)throw std::runtime_error("unsupported legacy window style");if(renderer){renderer->set_title(text(3));if(a[0].current())renderer->set_position(int(pos.x),int(pos.y));}else (void)text(3);return Value::from_int(1);}
+ if(nativeDisplay_&&name=="video_set"){count(4);int w=integer(0),h=integer(1),depth=integer(2),mode=integer(3);if(w<=0||h<=0||w>16384||h>16384||(depth!=16&&depth!=24&&depth!=32)||mode<0||mode>2)throw std::runtime_error("invalid video mode");prepare_display();return Value::from_int(1);}
  if(name=="video_set"){count(4);int w=integer(0),h=integer(1),depth=integer(2),mode=integer(3);if(w<=0||h<=0||w>16384||h>16384||(depth!=16&&depth!=24&&depth!=32)||mode<0||mode>2)throw std::runtime_error("invalid video mode");auto windowMode=mode==0?currentWindowMode:(mode==1?WindowMode::Fullscreen:(windowStyle==1?WindowMode::Borderless:WindowMode::Windowed));if(renderer)renderer->set_mode(w,h,windowMode);currentWindowMode=windowMode;set_global("video_screen",ret(windowMode==WindowMode::Fullscreen?1:2));auto screenSize=global_vector("screen_size");set_vector(screenSize,{float(w),float(h),vector(screenSize).z});currentWidth_=w;currentHeight_=h;return Value::from_int(1);}
+ if(nativeDisplay_&&name=="video_switch"){count(3);int mode=integer(0),depth=integer(1),screen=integer(2);if(mode<6||mode>10||(depth!=16&&depth!=24&&depth!=32)||screen<0||screen>2)throw std::runtime_error("unsupported video_switch mode");prepare_display();set_global("video_mode",ret(mode));return ret(mode);}
  if(name=="video_switch"){count(3);int mode=integer(0),depth=integer(1),screen=integer(2);constexpr std::array<std::array<int,2>,5> modes{{{640,480},{800,600},{1024,768},{1280,1024},{1600,1200}}};if(mode<6||mode>10||(depth!=16&&depth!=24&&depth!=32)||screen<0||screen>2)throw std::runtime_error("unsupported video_switch mode");auto dimensions=modes[mode-6];auto windowMode=screen==0?currentWindowMode:(screen==1?WindowMode::Fullscreen:WindowMode::Windowed);if(renderer)renderer->set_mode(dimensions[0],dimensions[1],windowMode);currentWindowMode=windowMode;currentWidth_=dimensions[0];currentHeight_=dimensions[1];auto screenSize=global_vector("screen_size");set_vector(screenSize,{float(currentWidth_),float(currentHeight_),vector(screenSize).z});set_global("video_mode",ret(mode));set_global("video_screen",ret(screen==0?(windowMode==WindowMode::Fullscreen?1:2):screen));return ret(mode);}
  if(name=="sys_metrics"){count(1);auto metric=integer(0);if(metric!=0&&metric!=1)throw std::runtime_error("unsupported system metric");SDL_DisplayMode display{};if(SDL_GetDesktopDisplayMode(0,&display)==0)return ret(metric?display.h:display.w);if(!renderer&&currentWidth_>0&&currentHeight_>0)return ret(metric?currentHeight_:currentWidth_);throw std::runtime_error(std::string("cannot query display metrics: ")+SDL_GetError());}
  if(name=="add_resource"){count(1);assets.mount(text(0));return Value::from_int(1);}
@@ -1067,7 +1220,9 @@ std::optional<Value> Engine::service_builtin(Runtime&,ProcessContext&,std::strin
  if(name=="error"){count(1);throw std::runtime_error(std::string(text(0)));}
  if(name=="vec_to_screen"){
   count(2);auto p=vector(a[0]);auto value=a[1].current();if(value.kind!=Value::Kind::Object)throw std::runtime_error("view required for vec_to_screen");auto& view=state.require(value.bits);if(view.kind!=Object::Kind::View)throw std::runtime_error("vec_to_screen requires view");auto setting=[&](std::string_view key,double fallback){auto it=view.fields.find(key);return it==view.fields.end()?fallback:it->second.value.real();};
+  if(nativeDisplay_&&view.id==global("camera").bits){set_field(view.id,"size_x",currentWidth_);set_field(view.id,"size_y",currentHeight_);}
   Camera camera;camera.position=position(view.id);camera.angles=angles(view.id);camera.horizontalFov=float(setting("arc",60));camera.pixelAspect=float(setting("aspect",1));camera.nearClip=float(std::max(.01,setting("clip_near",1)));camera.farClip=float(std::max(double(camera.nearClip)+.01,setting("clip_far",10000)));camera.viewport={float(setting("pos_x",0)),float(setting("pos_y",0)),float(setting("size_x",0)),float(setting("size_y",0))};camera.widescreen=false;
+  camera.pixelAspect=display_aspect(camera.pixelAspect);
   WindowMetrics metrics=renderer?renderer->metrics():WindowMetrics{currentWidth_,currentHeight_,currentWidth_,currentHeight_,1,1};auto result=Renderer::project(p,camera,metrics);set_vector(a[0],result);auto width=camera.viewport.width>0?camera.viewport.width:float(metrics.width),height=camera.viewport.height>0?camera.viewport.height:float(metrics.height);bool visible=setting("visible",1)!=0;auto storedFlags=view.fields.find("flags");if(storedFlags!=view.fields.end())visible=visible&&(std::uint32_t(storedFlags->second.value.integer())&0x4000)!=0;
   return Value::from_int(visible&&result.z>=camera.nearClip&&result.z<=camera.farClip&&result.x>=camera.viewport.x&&result.x<camera.viewport.x+width&&result.y>=camera.viewport.y&&result.y<camera.viewport.y+height);
  }
@@ -2005,6 +2160,11 @@ void Engine::load_level(Runtime& runtime,std::string_view filename) {
  set_global("time_level",Value{});
  if(level.empty())return;
  world=&assets.world(level);
+ if(!world->sections[0].empty()){
+  const auto& palette=world->sections[0];
+  if(palette.size()<16+fontPalette_.size())throw std::runtime_error("truncated world palette: "+level);
+  set_font_palette(std::span<const std::uint8_t>(palette).subspan(16,fontPalette_.size()));
+ }
  if(state.profile==SemanticProfile::CampaignA6&&world->legacyHullBoundsPublished){
   set_vector(global_vector("hull_narrowmin"),world->legacyHulls[1].lower);set_vector(global_vector("hull_narrowmax"),world->legacyHulls[1].upper);
   set_vector(global_vector("hull_fatmin"),world->legacyHulls[2].lower);set_vector(global_vector("hull_fatmax"),world->legacyHulls[2].upper);
@@ -2203,7 +2363,34 @@ std::uint32_t Engine::material_index(Value value){
  for(std::size_t i=0;i<skins.size();++i)if(auto skin=ui_value(*object,skins[i]))material.skins[i]=&svc_bitmap(*this,skin);
  entry={materialGeneration_,std::uint32_t(materials_.size())};materials_.push_back(material);return entry.index;
 }
+void Engine::ensure_font_palette(std::string_view entry){
+ if(fontPaletteSerial_)return;
+ // Original00455240: startup input basename, palette.raw, then RGB332.
+ entry=entry.substr(entry.find_last_of("/\\")==std::string_view::npos?0:entry.find_last_of("/\\")+1);
+ const auto extension=entry.find_last_of('.');std::string input(entry.substr(0,extension));input+=".raw";
+ auto load=[&](std::string_view name){const auto source=assets.read(name);if(source.size()<fontPalette_.size())throw std::runtime_error("truncated startup palette: "+std::string(name));set_font_palette(std::span<const std::uint8_t>(source).first(fontPalette_.size()));};
+ if(!entry.empty()&&assets.contains(input)){load(input);return;}
+ if(assets.contains("palette.raw")){load("palette.raw");return;}
+ std::array<std::uint8_t,768> palette{};
+ for(unsigned i=0;i<256;++i){palette[i*3]=std::uint8_t(i&0xe0);palette[i*3+1]=std::uint8_t((i&0xfc)<<3);palette[i*3+2]=std::uint8_t(i<<6);}
+ set_font_palette(palette);
+}
+void Engine::set_font_palette(std::span<const std::uint8_t> source){
+ if(source.size()!=fontPalette_.size())throw std::runtime_error("native active palette requires768 RGB bytes");
+ std::array<std::uint8_t,768> palette;std::copy(source.begin(),source.end(),palette.begin());
+ // Original004550e0/00425f20: normalized RGB triples, not index-as-alpha.
+ palette[0]=palette[1]=palette[2]=0;
+ for(unsigned i=1;i<256;++i){auto* p=palette.data()+i*3;if(p[0]<8&&p[1]<8&&p[2]<8)p[0]=p[1]=p[2]=8;}
+ palette[765]=palette[766]=palette[767]=255;
+ if(fontPaletteSerial_&&palette==fontPalette_)return;
+ fontPalette_=palette;++fontPaletteSerial_;
+ for(auto& [id,font]:bitmapFonts_)for(std::size_t i=0;i<font.indices.size();++i){
+  const auto* p=fontPalette_.data()+std::size_t(font.indices[i])*3;auto* rgba=font.atlas.image.rgba.data()+i*4;
+  rgba[0]=p[0];rgba[1]=p[1];rgba[2]=p[2];rgba[3]=(p[0]||p[1]||p[2])?255:0;
+ }
+}
 void Engine::make_frame(bool mouseOutput){
+ prepare_display();
  assets.set_native_alpha_depth(global("D3D_ALPHADEPTH").real());
  assets.set_native_shadow_depth(global("D3D_SHADOWDEPTH").real(),renderer!=nullptr);
  const bool bonusMouse=state.profile==SemanticProfile::BonusA7;
@@ -2238,12 +2425,14 @@ void Engine::make_frame(bool mouseOutput){
   Object* o=state.get(value.bits);if(!o||!o->alive)throw std::runtime_error("invalid FONT handle");if(ui_name(o->name,"_a4font"))resolve_builtin_font();std::string_view name=o->text;if(name.empty())throw std::runtime_error("FONT has no resource: "+o->name);
   bool image=o&&ui_number(*o,"style")>=4;
   if(!image){if(!renderer)return nullptr;auto cached=systemFonts_.find(o->id);if(cached!=systemFonts_.end())return cached->second;int size=int(ui_number(*o,"size"));int style=int(ui_number(*o,"style"));const FontAtlas* atlas=&renderer->font_atlas(name,size,style&1,style&2);systemFonts_.emplace(o->id,atlas);return atlas;}
-  if(!o)throw std::runtime_error("bitmap FONT requires an object handle");auto cached=bitmapFonts_.find(o->id);if(cached!=bitmapFonts_.end())return &cached->second;
-  FontAtlas atlas;auto builtinImage=bitmapImages.find(o->id);atlas.image=builtinImage==bitmapImages.end()?assets.image(name):*builtinImage->second;int cw=int(ui_number(*o,"style")),ch=int(ui_number(*o,"size"));if(cw<=0||ch<=0)throw std::runtime_error("bitmap FONT requires explicit native cell dimensions: "+o->name);
+  if(!o)throw std::runtime_error("bitmap FONT requires an object handle");auto cached=bitmapFonts_.find(o->id);if(cached!=bitmapFonts_.end())return &cached->second.atlas;
+  BitmapFont decoded;auto& atlas=decoded.atlas;auto builtinImage=bitmapImages.find(o->id);
+  if(builtinImage==bitmapImages.end()){auto source=decode_bitmap_font(assets.read(name),name,fontPalette_);atlas.image=std::move(source.image);decoded.indices=std::move(source.indices);}else atlas.image=*builtinImage->second;
+  int cw=int(ui_number(*o,"style")),ch=int(ui_number(*o,"size"));if(cw<=0||ch<=0)throw std::runtime_error("bitmap FONT requires explicit native cell dimensions: "+o->name);
   if(atlas.image.width%cw||atlas.image.height%ch)throw std::runtime_error("invalid bitmap FONT cells: "+o->name);unsigned columns=atlas.image.width/cw,rows=atlas.image.height/ch,count=columns*rows;if(!count||count>256)throw std::runtime_error("bitmap FONT glyph count exceeds native range: "+o->name);
   for(unsigned byte=0;byte<256;++byte){auto& g=atlas.glyphs[byte];g.advance=float(cw);g.bearing={0,float(ch)};int index=count<64?int(byte)-48:int(byte);if(index>=0&&unsigned(index)<count)g.pixels={float(unsigned(index)%columns*cw),float(unsigned(index)/columns*ch),float(cw),float(ch)};}
   for(std::size_t i=0;i<atlas.image.rgba.size();i+=4)if(!atlas.image.rgba[i]&&!atlas.image.rgba[i+1]&&!atlas.image.rgba[i+2])atlas.image.rgba[i+3]=0;
-  atlas.lineHeight=float(ch);atlas.ascent=float(ch);return &bitmapFonts_.emplace(o->id,std::move(atlas)).first->second;
+  atlas.lineHeight=float(ch);atlas.ascent=float(ch);return &bitmapFonts_.emplace(o->id,std::move(decoded)).first->second.atlas;
  };
  auto rgb=[&](const Object& o,float opacity){return Color{ui_number(o,"red",255)/255,ui_number(o,"green",255)/255,ui_number(o,"blue",255)/255,std::clamp(opacity,0.0f,1.0f)};};
  auto global_color=[&](std::string_view name,Color fallback){if(!state.numericGlobals.contains(name))return fallback;Vec3 c=vector(global_vector(name));return Color{c.z/255,c.y/255,c.x/255,ui_name(name,"sky_color")&&c.x==0&&c.y==0&&c.z==0?0.0f:1.0f};};
@@ -2259,6 +2448,7 @@ void Engine::make_frame(bool mouseOutput){
  Value cameraValue=global("camera");ObjectId mainCamera=cameraValue.bits;
  auto camera_for=[&](ObjectId id){
   const Object& o=state.require(id);Camera c;c.position=position(id);c.angles=angles(id);c.viewport={ui_number(o,"pos_x"),ui_number(o,"pos_y"),ui_number(o,"size_x"),ui_number(o,"size_y")};c.horizontalFov=ui_number(o,"arc",60);c.pixelAspect=ui_number(o,"aspect",1);c.widescreen=false;c.nearClip=std::max(.01f,ui_number(o,"clip_near",1));c.farClip=std::max(c.nearClip+.01f,ui_number(o,"clip_far",10000));c.layer=ui_number(o,"layer");c.layers=1;
+  c.pixelAspect=display_aspect(c.pixelAspect);
   c.alpha=field(id,"transparent")?std::clamp(ui_number(o,"alpha",100)/100,0.0f,1.0f):1;c.environmentOverride=true;c.ambient=frame_.ambient;c.nativeAmbient=float(std::clamp(ui_value(o,"ambient").raw()>>10,0,127));c.fogStart=ui_number(o,"fog_start",world?world->fogStart:0);c.fogEnd=ui_number(o,"fog_end",world?world->fogEnd:0);c.fogColor=world?world->fogColor:Color{};c.background=frame_.clearColor;
   const auto viewFlags=ui_value(o,"flags").bits;c.noShadow=(viewFlags&0x400000u)!=0;c.noEntities=(viewFlags&(bonusMouse?0x10000u:0x80000u))!=0;
   // Prepared view alpha is a packed integer for planar emission in both profiles.
@@ -2318,6 +2508,7 @@ void Engine::make_frame(bool mouseOutput){
   bool viewEntity=o->fields.contains("view");const bool surfaceVisible=viewEntity?field(id,"visible")!=0:!field(id,"invisible");
   if(!surfaceVisible&&(viewEntity||(flags(id)&0x40000u)==0))continue;
   if(!data.model&&!data.file.empty()){data.model=data.type==4?&assets.world(data.file).mesh:&assets.model(data.file);data.light.model=data.model;data.light.dirty=true;if(state.profile==SemanticProfile::BonusA7&&data.type==5)prepare_query_geometry(id,data);}DrawInstance d;d.model=data.model;if(!d.model)continue;d.position=position(id);d.angles=angles(id);d.scale={ui_number(*o,"scale_x",1),ui_number(*o,"scale_y",1),ui_number(*o,"scale_z",1)};
+  if(nativeDisplay_&&viewEntity&&core_equal(o->name,"SilahPanel")){d.position.y=-70;const bool crate=ui_number(*o,"z")==-32;d.position.z=crate?(currentWindowMode==WindowMode::Fullscreen?-40:-30):(currentWindowMode==WindowMode::Fullscreen?-52:-37.5f);}
   d.spriteFrames=unsigned(std::max(1.0f,ui_number(*o,"sprite_frames",1)));std::size_t frameCount=data.type==1?d.spriteFrames:std::max(std::size_t(1),d.model->frames.size());float frame=std::max(1.0f,ui_number(*o,"frame",1));d.frame=std::min(std::uint32_t(frame-1),std::uint32_t(frameCount-1));float next=ui_number(*o,"next_frame");d.nextFrame=next>0?std::min(std::uint32_t(std::max(0.0f,next-1)),std::uint32_t(frameCount-1)):std::min(d.frame+1,std::uint32_t(frameCount-1));d.interpolation=frame-std::floor(frame);
   if(auto modelMesh=meshOverrides.find(d.model);modelMesh!=meshOverrides.end()){if(auto mesh=modelMesh->second.find(d.frame);mesh!=modelMesh->second.end()){d.positions=mesh->second.mesh;d.normals=mesh->second.meshNormals;d.meshId=mesh->second.meshId;d.meshRevision=mesh->second.revision;}if(auto mesh=modelMesh->second.find(d.nextFrame);mesh!=modelMesh->second.end()){d.nextPositions=mesh->second.mesh;d.nextNormals=mesh->second.meshNormals;d.nextMeshId=mesh->second.meshId;d.nextMeshRevision=mesh->second.revision;}}if(model_has_entity_skins(*d.model)){auto skin=state.member(id,"skin");d.skinIndex=model_skin_index(*d.model,skin.get().raw()>>10);skin.set(Value::from_raw(std::int32_t(std::clamp<std::int64_t>(skin.get().raw(),1024,std::int64_t(d.model->materials.size())*1024))));}d.objectId=id;d.reflectivity=float(std::uint8_t(ui_value(*o,"albedo").raw()>>10))/50;
   d.translucent=field(id,"transparent");
@@ -2366,14 +2557,14 @@ void Engine::make_frame(bool mouseOutput){
   if(auto zero=text.find('\0');zero!=std::string_view::npos)text=text.substr(0,zero);
   if(!fontValue)fontValue=global("_a4font");
   const FontAtlas* atlas=font(fontValue);if(!atlas||text.empty())return;float sx=ui_number(o,"scale_x",1),sy=ui_number(o,"scale_y",1);Color color=rgb(o,field(o.id,"transparent")?ui_number(o,"alpha",100)/100:1);float layer=ui_number(o,"layer");int lines=1+int(std::count(text.begin(),text.end(),'\n'));
-  if(bitmapFonts_.contains(fontValue.bits)){
+  if(auto bitmapFont=bitmapFonts_.find(fontValue.bits);bitmapFont!=bitmapFonts_.end()){
    int height=int(atlas->lineHeight),advance=int(atlas->glyphs[0].advance)-(field(o.id,"condensed")?1:0)-(field(o.id,"narrow")?2:0);
    std::size_t start=0;for(std::size_t p=0;scroll>0&&p<text.size();++p)if(text[p]=='\n'){start=p+1;scroll-=height;}
    if(budget){*budget+=scroll-height;if(scroll>0||*budget<1)return;}
    text.remove_prefix(start);int dy=field(o.id,"center_y")?(int(std::count(text.begin(),text.end(),'\n'))-1)*(height/2):0;dy-=scroll;
    auto centered=[&](std::size_t p){auto end=text.find('\n',p);if(end==std::string_view::npos)end=text.size();return field(o.id,"center_x")?-int(end-p)*(advance/2):0;};int dx=centered(0);
    Vec3 screen=vector(global_vector("screen_size"));float screenWidth=screen.x,screenHeight=screen.y;
-   for(std::size_t p=0;p<text.size();++p){unsigned char byte=text[p];if(byte=='\n'){if(budget){*budget-=height;if(*budget<1)return;}dy+=height;dx=centered(p+1);continue;}const auto& glyph=atlas->glyphs[byte];if(glyph.pixels.width&&x+dx>=0&&y+dy>=0&&x+dx+advance<screenWidth&&y+dy+height<screenHeight){UICommand c;c.image=&atlas->image;c.rect={x+std::trunc(dx*sx),y+std::trunc(dy*sy),glyph.pixels.width*sx,glyph.pixels.height*sy};c.uv={glyph.pixels.x/atlas->image.width,glyph.pixels.y/atlas->image.height,glyph.pixels.width/atlas->image.width,glyph.pixels.height/atlas->image.height};c.color=color;c.layer=layer;c.overlay=true;c.filter=field(o.id,"filter");ui_.push_back(c);}dx+=advance;}
+   for(std::size_t p=0;p<text.size();++p){unsigned char byte=text[p];if(byte=='\n'){if(budget){*budget-=height;if(*budget<1)return;}dy+=height;dx=centered(p+1);continue;}const auto& glyph=atlas->glyphs[byte];const float gx=x+std::trunc(dx*sx),gy=y+std::trunc(dy*sy);const bool fits=nativeDisplay_?gx>=0&&gy>=0&&gx+glyph.pixels.width*sx<screenWidth&&gy+glyph.pixels.height*sy<screenHeight:x+dx>=0&&y+dy>=0&&x+dx+advance<screenWidth&&y+dy+height<screenHeight;if(glyph.pixels.width&&fits){UICommand c;c.image=&atlas->image;c.dynamicImage=!bitmapFont->second.indices.empty();c.imageSerial=fontPaletteSerial_;c.rect={gx,gy,glyph.pixels.width*sx,glyph.pixels.height*sy};c.uv={glyph.pixels.x/atlas->image.width,glyph.pixels.y/atlas->image.height,glyph.pixels.width/atlas->image.width,glyph.pixels.height/atlas->image.height};c.color=color;c.layer=layer;c.overlay=true;c.filter=field(o.id,"filter");ui_.push_back(c);}dx+=advance;}
    return;
   }
   // Native TTF path bypasses bitmap NARROW/CONDENSED, CENTER_Y and scroll/clipping.
@@ -2385,13 +2576,21 @@ void Engine::make_frame(bool mouseOutput){
   if(budget){const Object* nativeFont=state.get(fontValue.bits);*budget-=int(nativeFont?ui_number(*nativeFont,"size",atlas->lineHeight):atlas->lineHeight)*lines;}
  };
  for(ObjectId id:uiObjects_){Object& o=state.require(id);float x=ui_number(o,"pos_x"),y=ui_number(o,"pos_y"),sx=ui_number(o,"scale_x",1),sy=ui_number(o,"scale_y",1),opacity=field(id,"transparent")?ui_number(o,"alpha",100)/100:1;
+  if(nativeDisplay_&&core_equal(o.name,"CER_Cerceve")&&number("DM_Acik")!=0&&!field(global("CRMT_Credit").bits,"visible")&&!field(global("YUMP_Cursor").bits,"visible"))y+=16;
+  if(nativeDisplay_&&core_equal(o.name,"GMP_CozunurlukA")){text_command(o,displayLabel_.data(),global("_a4font"),x+5*sx,y+9*sy);continue;}
   if(o.kind==Object::Kind::Text){
-   Value fontValue=ui_value(o,"font");if(!fontValue)fontValue=global("_a4font");const FontAtlas* atlas=font(fontValue);if(!atlas)continue;const Object* nativeFont=state.get(fontValue.bits);int height=int(nativeFont?ui_number(*nativeFont,"size",atlas->lineHeight):atlas->lineHeight),initial=std::max(0,int(ui_number(o,"size_y",1000))),remaining=initial,offset=std::max(0,int(ui_number(o,"offset_y"))),covered=0,scroll=-1;
+   Value fontValue=ui_value(o,"font");if(!fontValue)fontValue=global("_a4font");const FontAtlas* atlas=font(fontValue);if(!atlas)continue;const Object* nativeFont=state.get(fontValue.bits);
+   float offsetValue=ui_number(o,"offset_y");
+   if(nativeDisplay_&&std::find(displayScrolls_.begin(),displayScrolls_.end(),id)!=displayScrolls_.end())offsetValue/=float(state.require(displayFont_).array[0].value.real());
+   if(nativeDisplay_&&id==global("YUMT_Liste").bits){offsetValue+=displayLoadScroll_;}
+   int height=int(nativeFont?ui_number(*nativeFont,"size",atlas->lineHeight):atlas->lineHeight),initial=std::max(0,int(ui_number(o,"size_y",1000))),offset=std::max(0,int(offsetValue)),covered=0,scroll=-1;
+   if(nativeDisplay_&&id==global("YUMT_Liste").bits&&displayLoadBudget_)initial=std::min(initial,displayLoadBudget_);
+   int remaining=initial;
    for(const auto& slot:o.array){if(!slot.value)continue;const Object* source=state.get(slot.value.bits);if(!source||!source->alive)continue;if(ui_value(*source,"flags").bits&2u)continue;std::string_view text=string(slot.value);if(auto zero=text.find('\0');zero!=std::string_view::npos)text=text.substr(0,zero);int end=covered+height*(1+int(std::count(text.begin(),text.end(),'\n')));if(scroll<0){if(offset>end){covered=end;continue;}scroll=offset-covered;}covered=end;float baseY=std::trunc(y+(initial-remaining)*sy);text_command(o,text,fontValue,std::trunc(x),baseY,&remaining,scroll);scroll=0;if(remaining<1)break;}
    continue;
   }
   auto image_command=[&](UIBitmap image,float px,float py,float width,float height){if(!image.image||width<=0||height<=0)return;UICommand c;c.rect={x+px*sx,y+py*sy,width*sx,height*sy};c.image=image.image;c.dynamicImage=image.dynamic;c.imageSerial=image.serial;c.uv={image.pixels.x/image.image->width,image.pixels.y/image.image->height,image.pixels.width/image.image->width,image.pixels.height/image.image->height};c.color=rgb(o,opacity);c.overlay=field(id,"overlay");c.filter=field(id,"filter");c.angle=ui_number(o,"angle");c.layer=ui_number(o,"layer");ui_.push_back(c);};
-  auto background=bitmap(ui_value(o,"bmap"));if(background.image)image_command(background,0,0,background.pixels.width,background.pixels.height);
+  auto background=bitmap(ui_value(o,"bmap"));if(background.image){if(nativeDisplay_&&displayFills_.contains(id)){x=0;y=0;sx=float(currentWidth_)/background.pixels.width;sy=float(currentHeight_)/background.pixels.height;}image_command(background,0,0,background.pixels.width,background.pixels.height);}
   FunctionId panelClick=callback(id,"on_click");if(panelClick&&background.image)buttons_.push_back({{x,y,background.pixels.width*sx,background.pixels.height*sy},panelClick,0,0,id,0,ui_number(o,"angle")});int buttonNumber=0;
   for(const auto& property:o.properties){const auto& a=property.arguments;auto require=[&](std::size_t n){if(a.size()!=n)throw std::runtime_error("invalid PANEL "+property.name+" argument count: "+o.name);};auto n=[&](std::size_t i){return float(a.at(i).current().real());};
    if(ui_name(property.name,"digits")){require(6);Value f=a[2].current(),value=a[5].current();if(uiTextUsed_==uiText_.size())uiText_.emplace_back();auto& rendered=uiText_[uiTextUsed_++];ui_digits(rendered,f,n(4)*value.real(),value.kind==Value::Kind::Object?string(value):std::string_view{},f.kind==Value::Kind::Object?string(f):std::string_view{});text_command(o,rendered,a[3].current(),x+n(0)*sx,y+n(1)*sy);}

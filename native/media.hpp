@@ -6,6 +6,7 @@
 #include <memory>
 #include <span>
 #include <string_view>
+#include <vector>
 
 namespace k22 {
 
@@ -13,6 +14,12 @@ namespace k22 {
 // Native alpha-format metadata follows source bitmap loaders/encoded-texture
 // upload selection, not decoded RGBA channels; Assets gates its use by profile.
 Image decode_image(std::span<const uint8_t> bytes, std::string_view name);
+
+// Indexed fonts retain their byte plane and use the caller's active 768-byte RGB
+// palette, not the embedded bitmap palette. Expanded pixels have opaque alpha.
+struct BitmapFontImage { Image image; std::vector<uint8_t> indices; };
+BitmapFontImage decode_bitmap_font(std::span<const uint8_t> bytes, std::string_view name,
+                                  std::span<const uint8_t> palette);
 
 class Media {
 public:

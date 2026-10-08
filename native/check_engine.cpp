@@ -54,6 +54,8 @@ struct SaveEnvironment {
 };
 void close(double actual, double expected, double tolerance = 0.00003) {
     assert(std::isfinite(actual));
+    if (std::abs(actual - expected) >= tolerance)
+        std::cerr << "close: actual=" << actual << " expected=" << expected << " tolerance=" << tolerance << '\n';
     assert(std::abs(actual - expected) < tolerance);
 }
 void close_vector(Vec3 actual, Vec3 expected, double tolerance = 0.00003) {
@@ -833,7 +835,7 @@ void campaign_persistence(const std::filesystem::path& data) {
     std::filesystem::permissions(runtimeDirectory, std::filesystem::perms::owner_all,
                                  std::filesystem::perm_options::replace);
     SaveEnvironment privateRuntime(runtimeDirectory, "XDG_RUNTIME_DIR");
-    std::string phase = "loading unchanged patched campaign program";
+    std::string phase = "loading unchanged supplied campaign program";
     auto require = [&](bool condition, std::string_view detail) {
         if (!condition) throw std::runtime_error(std::string(detail));
     };
@@ -851,15 +853,18 @@ void campaign_persistence(const std::filesystem::path& data) {
               }) {
             for (auto archive : {"K22.wrs", "Kaynak.k22", "K22Widescreen.wrs"})
                 if (assets.contains(archive)) assets.mount(archive);
-            if (!assets.contains("K22Widescreen.wdl"))
-                throw std::runtime_error("--campaign-data requires the supplied patched campaign");
+            const bool original = !assets.contains("K22Widescreen.wdl");
+            if (original && !assets.contains("K22.wdl"))
+                throw std::runtime_error("--campaign-data requires the supplied campaign");
             for (auto define : {"defiae_d3d", "defses_en", "defdil_en"})
                 state.compilerMacros.emplace(define, "1");
-            runtime.load("K22Widescreen.wdl",
+            runtime.load(original ? "K22.wdl" : "K22Widescreen.wdl",
                          [this](std::string_view name) { return assets.text(name); },
                          [this](std::string_view name) { assets.mount(name); });
             engine.initialize_plugins(runtime);
             engine.configure_language(runtime, "en", true);
+            if (original && !engine.configure_display(runtime, true, true, 2560, 1440, WindowMode::Windowed))
+                throw std::runtime_error("original campaign display graph was not admitted");
             runtime.bootstrap();
         }
         Value& element(std::string_view name, std::size_t index) {
@@ -913,6 +918,14 @@ void campaign_persistence(const std::filesystem::path& data) {
             return game.engine.number("DM_Acik") == 1 &&
                    bool(game.engine.global("AM_KernelTimer"));
         }, idle);
+        if (!game.runtime.function("dbg_screen_reset")) {
+            close_vector(game.engine.vector(game.engine.global_vector("screen_size")), {2560,1440,0});
+            close(game.engine.number("GA_Cozunurluk"),0);
+            close(game.element("GA_ScaleOranlari",0).real(),2);
+            close(game.element("GA_ScaleOranlari",1).real(),2);
+            close(game.engine.field(game.engine.global("camera").bits,"size_x"),2560);
+            close(game.engine.field(game.engine.global("camera").bits,"size_y"),1440);
+        }
     };
     auto bytes = [&](const std::filesystem::path& path) {
         std::ifstream input(path, std::ios::binary);
@@ -1117,13 +1130,459 @@ void campaign_persistence(const std::filesystem::path& data) {
         throw std::runtime_error("campaign SourceAPI [" + phase + "]: " + error.what());
     }
 }
+// Optional actual-surface check. Menu transitions use original held/released input;
+// subsequent presentation producers are deliberately not a campaign playthrough.
+void campaign_display(const std::filesystem::path& root,std::string_view backend,const std::filesystem::path& captures,std::string_view phase="all"){
+    std::cout<<std::unitbuf;
+    if(backend!="opengl"&&backend!="vulkan"&&backend!="vulkan-rt")
+        throw std::runtime_error("campaign display backend must be opengl, vulkan or vulkan-rt");
+    if(phase!="all"&&phase!="menus"&&phase!="presentation"&&phase!="projection")
+        throw std::runtime_error("campaign display phase must be all, menus, presentation or projection");
+    const bool menus=phase=="all"||phase=="menus",presentation=phase=="all"||phase=="presentation",projection=phase=="all"||phase=="projection";
+    TempDirectory temporary;SaveEnvironment saves(temporary.path/"data");
+    const auto privateRuntime=temporary.path/"runtime";std::filesystem::create_directory(privateRuntime);
+    std::filesystem::permissions(privateRuntime,std::filesystem::perms::owner_all,std::filesystem::perm_options::replace);
+    SaveEnvironment runtimeEnvironment(privateRuntime,"XDG_RUNTIME_DIR");
+    std::filesystem::create_directories(captures);
+    Assets assets(root);for(auto archive:{"K22.wrs","Kaynak.k22"})if(assets.contains(archive))assets.mount(archive);
+    if(!assets.contains("K22.wdl")||assets.contains("K22Widescreen.wdl"))
+        throw std::runtime_error("campaign display requires original ISO-only data");
+    RenderOptions options;options.width=1600;options.height=900;options.samples=0;options.vsync=false;
+    options.backend=backend=="opengl"?RendererBackend::OpenGL:RendererBackend::Vulkan;options.rayTracing=backend=="vulkan-rt";
+    Renderer renderer(options);Media media(assets,false);State state;Engine engine(assets,&renderer,media,state);
+    Runtime runtime(state,[&](auto& vm,auto& context,auto name,auto args){return engine.builtin(vm,context,name,args);});
+    for(auto define:{"defiae_d3d","defses_en","defdil_en"})state.compilerMacros.emplace(define,"1");
+    runtime.load("K22.wdl",[&](std::string_view name){return assets.text(name);},[&](std::string_view name){assets.mount(name);});
+    engine.initialize_plugins(runtime);
+    assert(engine.configure_display(runtime,true,true,2560,1440,WindowMode::Windowed));
+    runtime.bootstrap();
+    Input idle;idle.dt=1.0/60;
+    auto tick=[&](const Input& input){engine.tick(runtime,input);engine.finish_frame(runtime);if(engine.quit)throw std::runtime_error("original campaign exited during display check");};
+    auto until=[&](std::string_view label,int frames,auto ready){
+        for(int i=0;i<frames&&!ready();++i)tick(idle);
+        if(!ready())throw std::runtime_error("original menu did not settle: "+std::string(label));
+    };
+    auto key=[&](int scan){Input held=idle;held.keys.set(scan);held.pressed.set(scan);for(int i=0;i<8;++i){tick(held);held.pressed.reset(scan);}for(int i=0;i<8;++i)tick(idle);};
+    auto visible=[&](std::string_view name){return engine.field(engine.global(name).bits,"visible")!=0;};
+    // Independent22.10 expectations: truncation towardzero, never nearest rounding.
+    auto var=[](double value){return double(std::int64_t(value*1024))/1024;};
+    auto ratio=[](int extent,int basis){return double(std::int64_t(extent)*1024/basis)/1024;};
+    auto capture=[&](std::string_view name){
+        engine.prepare(runtime);renderer.draw(engine.frame());renderer.capture((captures/(std::string(name)+".ppm")).string());
+        const auto metrics=renderer.metrics();const auto screen=engine.vector(engine.global_vector("screen_size"));
+        close(screen.x,metrics.width);close(screen.y,metrics.height);
+        close(engine.field(engine.global("camera").bits,"size_x"),screen.x);
+        close(engine.field(engine.global("camera").bits,"size_y"),screen.y);
+        assert(!engine.frame().ui.empty());
+        std::cout<<"original-display "<<name<<" screen="<<screen.x<<'x'<<screen.y<<" ui="<<engine.frame().ui.size()
+                 <<" scale="<<state.require(engine.global("GA_ScaleOranlari").bits).array[0].value.real()<<','
+                 <<state.require(engine.global("GA_ScaleOranlari").bits).array[1].value.real()<<'\n';
+    };
+    auto full=[&](std::string_view name){
+        const auto id=engine.global(name).bits;const auto bitmap=state.require(id).field("bmap").value;
+        assert(bitmap&&visible(name));const auto& image=assets.image(state.require(bitmap.bits).text);
+        const auto metrics=renderer.metrics();
+        assert(std::any_of(engine.frame().ui.begin(),engine.frame().ui.end(),[&](const auto& command){
+            return command.image==&image&&command.rect.x==0&&command.rect.y==0&&
+                   std::abs(command.rect.width-metrics.width)<.01&&std::abs(command.rect.height-metrics.height)<.01;
+        }));
+    };
+    auto scrollGlyph=[&](std::string_view name){
+        const auto id=engine.global(name).bits;auto& text=state.require(id);const auto& font=state.require(text.field("font").value.bits);
+        const auto& bitmap=assets.image(font.text);const int cw=int(engine.field(font.id,"style")),ch=int(engine.field(font.id,"size"));
+        assert(cw>0&&ch>0);std::vector<std::string_view> rows;
+        for(const auto& slot:text.array)if(slot.value){auto bytes=engine.string(slot.value);for(std::size_t start=0;;){auto end=bytes.find('\n',start);rows.push_back(bytes.substr(start,end==std::string_view::npos?bytes.size()-start:end-start));if(end==std::string_view::npos)break;start=end+1;}}
+        const int offset=int(float(engine.field(id,"offset_y"))/float(state.require(engine.global("GA_FontOranlari").bits).array[0].value.real()));
+        std::size_t row=std::size_t((offset+ch-1)/ch);while(row<rows.size()&&rows[row].empty())++row;
+        const auto glyph=std::find_if(engine.frame().ui.begin(),engine.frame().ui.end(),[&](const auto& command){return command.layer==engine.field(id,"layer")&&command.image&&command.image->width==bitmap.width&&command.image->height==bitmap.height;});
+        if(row>=rows.size()||int(row*ch)-offset+ch>=engine.field(id,"size_y")){assert(glyph==engine.frame().ui.end());return;}
+        assert(glyph!=engine.frame().ui.end());const float sx=float(engine.field(id,"scale_x")),sy=float(engine.field(id,"scale_y"));
+        const int advance=cw-int(engine.field(id,"condensed")!=0)-2*int(engine.field(id,"narrow")!=0);
+        const int dx=engine.field(id,"center_x")?-int(rows[row].size())*(advance/2):0;
+        close(glyph->rect.x,std::trunc(engine.field(id,"pos_x"))+std::trunc(dx*sx),2);
+        close(glyph->rect.y,std::trunc(engine.field(id,"pos_y"))+std::trunc((int(row*ch)-offset)*sy),2);
+        const auto byte=static_cast<unsigned char>(rows[row].front());const int columns=bitmap.width/cw;
+        close(glyph->uv.x,float((byte%columns)*cw)/bitmap.width,.0001);
+        close(glyph->uv.y,float((byte/columns)*ch)/bitmap.height,.0001);
+    };
+    auto mapProducer=[&](bool produce,std::string_view captureName){
+        if(produce){tick(idle);for(int tile:{0,1}){const std::array args{Argument{Value::from_int(tile),{}},Argument{Value::from_int(0),{}}};runtime.start("haritanin_gosterilemsi",args);}
+            const std::array door{Argument{Value::from_int(0),{}},Argument{Value::from_int(0),{}}};runtime.start("kapilarin_gosterilemsi",door);
+            state.member(engine.global("player_noktasi").bits,"bmap").set(state.require(engine.global("harita_ok_yonleri").bits).array[0].value);
+        }
+        const std::array group{Argument{Value::from_int(0),{}}};runtime.start("panel_oklari",group);
+        for(auto name:{"genel_panel0","genel_panel1","kapi_panel0","player_noktasi","yon_oklari0","yon_oklari1","yon_oklari2","yon_oklari3","grid_fon_pnl","siyah_fon_pnl"})engine.set_field(engine.global(name).bits,"visible",1);
+        capture(captureName);full("siyah_fon_pnl");
+        for(auto name:{"genel_panel0","genel_panel1","kapi_panel0","player_noktasi","yon_oklari0","yon_oklari1","yon_oklari2","yon_oklari3"}){
+            const auto id=engine.global(name).bits;const auto bitmap=state.require(id).field("bmap").value;const auto& image=assets.image(state.require(bitmap.bits).text);
+            close(engine.field(id,"scale_x"),1);close(engine.field(id,"scale_y"),1);
+            const auto command=std::find_if(engine.frame().ui.begin(),engine.frame().ui.end(),[&](const auto& c){return c.image==&image&&c.layer==engine.field(id,"layer")&&c.rect.x==engine.field(id,"pos_x")&&c.rect.y==engine.field(id,"pos_y");});
+            assert(command!=engine.frame().ui.end());close(command->rect.width,image.width);close(command->rect.height,image.height);
+        }
+        const auto a=engine.global("genel_panel0").bits,b=engine.global("genel_panel1").bits,door=engine.global("kapi_panel0").bits;
+        close(engine.field(b,"pos_x")-engine.field(a,"pos_x"),123);close(engine.field(b,"pos_y")-engine.field(a,"pos_y"),176);
+        close(engine.field(door,"pos_x")-engine.field(a,"pos_x"),140);close(engine.field(door,"pos_y")-engine.field(a,"pos_y"),176);
+        const auto metrics=renderer.metrics();close(engine.field(engine.global("grid_fon_pnl").bits,"scale_x"),ratio(metrics.width,640));close(engine.field(engine.global("grid_fon_pnl").bits,"scale_y"),ratio(metrics.height,480));
+        const auto grid=engine.global("grid_fon_pnl").bits;const auto gridBitmap=state.require(grid).field("bmap").value;const auto& gridImage=assets.image(state.require(gridBitmap.bits).text);
+        const auto gridCommand=std::find_if(engine.frame().ui.begin(),engine.frame().ui.end(),[&](const auto& c){return c.image==&gridImage&&c.layer==engine.field(grid,"layer");});
+        assert(gridCommand!=engine.frame().ui.end());close(gridCommand->rect.width,gridImage.width*ratio(metrics.width,640),.01);close(gridCommand->rect.height,gridImage.height*ratio(metrics.height,480),.01);
+    };
+    auto mapClose=[&]{runtime.start("genel_panelleri_kapat");runtime.start("altgrup_oklarini_kapat");for(auto name:{"player_noktasi","grid_fon_pnl","siyah_fon_pnl"})engine.set_field(engine.global(name).bits,"visible",0);};
+    auto loadGeometry=[&](Engine& producer,Runtime& vm,State& values,Assets& resources,bool allRows){
+        producer.prepare(vm);
+        const auto screen=producer.vector(producer.global_vector("screen_size"));const float mx=ratio(int(screen.x),1280),my=ratio(int(screen.y),720);
+        const auto list=producer.global("YUMT_Liste").bits,cursor=producer.global("YUMP_Cursor").bits;auto& object=values.require(list);
+        const auto& font=values.require(object.field("font").value.bits);const auto& atlas=resources.image(font.text);const int cw=int(producer.field(font.id,"style")),ch=int(producer.field(font.id,"size"));
+        close(producer.field(list,"scale_y"),mx);close(producer.field(cursor,"scale_y"),mx);assert(ch==18&&object.array.size()==8&&producer.number("YUM_Kafa")==0);
+        const auto bitmap=values.require(cursor).field("bmap").value;const auto& image=resources.image(values.require(bitmap.bits).text);
+        const auto highlight=std::find_if(producer.frame().ui.begin(),producer.frame().ui.end(),[&](const auto& c){return c.image==&image&&c.layer==producer.field(cursor,"layer");});
+        assert(highlight!=producer.frame().ui.end());assert(highlight->rect.y>=0&&highlight->rect.y+highlight->rect.height<screen.y);
+        const int selected=int(producer.number("YUM_Cursor"));assert(selected>=0&&selected<8);
+        for(int row=allRows?0:selected;row<=(allRows?7:selected);++row){
+            const auto label=producer.string(object.array[row].value);assert(label.size()>2&&label[0]=='0'&&label[1]=='1'+row&&label[2]==')');
+            const float y=allRows?float(std::trunc(producer.field(list,"pos_y")+row*18*mx)):highlight->rect.y-my;
+            const float x=float(std::trunc(producer.field(list,"pos_x"))+std::trunc((cw-2)*mx));
+            const auto glyph=std::find_if(producer.frame().ui.begin(),producer.frame().ui.end(),[&](const auto& c){return c.image&&c.image->width==atlas.width&&c.image->height==atlas.height&&c.layer==producer.field(list,"layer")&&std::abs(c.rect.x-x)<.01&&std::abs(c.rect.y-y)<2;});
+            assert(glyph!=producer.frame().ui.end());assert(glyph->rect.y>=0&&glyph->rect.y+glyph->rect.height<screen.y);
+            const auto byte=static_cast<unsigned char>(label[1]);close(glyph->uv.x,float((byte%(atlas.width/cw))*cw)/atlas.width,.0001);close(glyph->uv.y,float((byte/(atlas.width/cw))*ch)/atlas.height,.0001);
+        }
+        close(producer.number("Cer_hY2"),screen.y-10*my,.01);
+        assert(producer.number("Cer_hY1")>=0&&highlight->rect.y>=producer.number("Cer_hY1")&&highlight->rect.y+highlight->rect.height<=producer.number("Cer_hY2"));
+    };
+    auto createSaveSlots=[&]{
+        for(int slot=0;slot<8;++slot){const std::array checkpoint{Argument{Value::from_int(1),{}}};runtime.start("LV_LevelKaydeta",checkpoint);
+            until("source save-slot publication",20,[&]{return engine.number("Aktif_SaveNo")==slot+1&&engine.files.empty();});
+            assert(std::filesystem::is_regular_file(engine.saveRoot/("kayit"+std::to_string(slot)+".sav")));
+        }
+        {std::ifstream index(engine.saveRoot/"kysd.sav",std::ios::binary);std::string bytes(std::istreambuf_iterator<char>(index),{});assert(bytes.starts_with("8 8 "));}
+    };
+    until("brightness/main",1800,[&]{return engine.number("ParlaklikMenuAcik")!=0||visible("AMP_YeniOyun");});
+    if(engine.number("ParlaklikMenuAcik")!=0){if(menus){capture("brightness");full("PMP_Arka");}key(SDL_SCANCODE_RETURN);}
+    until("main",120,[&]{return visible("AMP_YeniOyun")&&engine.number("DM_Acik")==1;});
+    if(menus){capture("main");full("DMP_Arka");}
+    const auto initialMetrics=renderer.metrics();
+    if(projection&&!menus)createSaveSlots();
+    if(menus){
+    const auto initialFontX=ratio(initialMetrics.width,1280),initialFontY=ratio(initialMetrics.height,720),initialGameX=ratio(initialMetrics.width,640);
+    close(engine.field(engine.global("AMP_YeniOyun").bits,"pos_y"),var(initialMetrics.height-5*32*initialFontY));
+    // Genuine panel and original callback producer, proving the same half-open physical
+    // rectangle drives draw and dispatch. No script source, assets or progression changes.
+    {
+        const auto panel=engine.global("AMP_YeniOyun").bits,item=engine.global("EMP_Nesne0").bits;
+        assert(state.require(engine.global("EML_Paneller").bits).array[7].value.bits==item);
+        runtime.start("EM_Ayarla");engine.prepare(runtime);close(engine.field(item,"pos_x"),var(270*initialGameX));
+        auto callback=state.member(panel,"on_click");const auto prior=callback.get();
+        callback.set(Value::function(runtime.function("EM_Ayarla")));
+        engine.prepare(runtime);
+        const auto packet=std::find_if(engine.frame().ui.begin(),engine.frame().ui.end(),[&](const auto& command){return command.image&&command.layer==engine.field(panel,"layer")&&command.rect.x==engine.field(panel,"pos_x")&&command.rect.y==engine.field(panel,"pos_y");});
+        assert(packet!=engine.frame().ui.end());const Rect rectangle=packet->rect;
+        Input click=idle;click.mouseY=rectangle.y+1;click.mouseX=rectangle.x+rectangle.width;click.mousePressed.set(SDL_BUTTON_LEFT);
+        engine.set_field(item,"pos_x",137);tick(click);close(engine.field(item,"pos_x"),137);
+        click.mouseX-=.25f;engine.set_field(item,"pos_x",137);tick(click);
+        close(engine.field(item,"pos_x"),var(270*initialGameX));
+        callback.set(prior);tick(idle);
+    }
+    key(SDL_SCANCODE_DOWN);key(SDL_SCANCODE_DOWN);assert(engine.number("AM_Cursor")==2);
+    key(SDL_SCANCODE_RETURN);until("settings",90,[&]{return visible("AYMP_Grafik");});capture("settings");
+    key(SDL_SCANCODE_RETURN);until("graphics",90,[&]{return visible("GMP_CozunurlukA");});
+    key(SDL_SCANCODE_RIGHT);assert(engine.number("GM_CursorCozunurluk")==0);capture("graphics-native-resolution");
+    {
+        const auto row=engine.global("GMP_CozunurlukA").bits;const float x=float(engine.field(row,"pos_x")+5*initialFontX),y=float(engine.field(row,"pos_y")+9*initialFontY);
+        const auto label=std::to_string(initialMetrics.width)+"x"+std::to_string(initialMetrics.height);
+        const auto glyphs=std::count_if(engine.frame().ui.begin(),engine.frame().ui.end(),[&](const auto& command){
+            return command.image&&command.image->width==192&&command.image->height==72&&
+                   command.rect.y==y&&command.rect.x>=x&&command.rect.x<x+label.size()*6*initialFontX;
+        });
+        assert(glyphs==std::ptrdiff_t(label.size())); // Original typed font cells spell the actual drawable dimensions.
+    }
+    key(SDL_SCANCODE_ESCAPE);until("graphics apply",90,[&]{return visible("AYMP_Grafik");});
+    close_vector(engine.vector(engine.global_vector("screen_size")),{float(initialMetrics.width),float(initialMetrics.height),0});capture("graphics-applied");
+    key(SDL_SCANCODE_DOWN);key(SDL_SCANCODE_RETURN);until("sound",90,[&]{return visible("SMP_Efekt");});capture("sound");
+    key(SDL_SCANCODE_ESCAPE);until("settings after sound",90,[&]{return visible("AYMP_Grafik");});
+    key(SDL_SCANCODE_DOWN);key(SDL_SCANCODE_DOWN);key(SDL_SCANCODE_RETURN);until("control selection",90,[&]{return visible("KSMP_Klavye");});capture("control-selection");
+    key(SDL_SCANCODE_RETURN);until("keyboard controls",90,[&]{return visible("KONMP_Ileri");});capture("keyboard-controls");
+    key(SDL_SCANCODE_ESCAPE);until("control selection after keyboard",90,[&]{return visible("KSMP_Klavye");});
+    key(SDL_SCANCODE_DOWN);key(SDL_SCANCODE_RETURN);until("joystick controls",90,[&]{return visible("JKONMP_Ileri");});capture("joystick-controls");
+    key(SDL_SCANCODE_ESCAPE);until("control selection after joystick",90,[&]{return visible("KSMP_Klavye");});
+    key(SDL_SCANCODE_ESCAPE);until("settings after controls",90,[&]{return visible("AYMP_Grafik");});
+    key(SDL_SCANCODE_ESCAPE);until("main after settings",90,[&]{return visible("AMP_YeniOyun");});
+    createSaveSlots();
+    key(SDL_SCANCODE_DOWN);key(SDL_SCANCODE_DOWN);key(SDL_SCANCODE_DOWN);key(SDL_SCANCODE_RETURN);
+    until("credits",90,[&]{return visible("CRMT_Credit");});capture("credits");close(engine.field(engine.global("CRMT_Credit").bits,"size_y"),290);
+    {
+        const auto credit=engine.global("CRMT_Credit").bits;const auto factor=state.require(engine.global("GA_FontOranlari").bits).array[0].value.real();
+        const double threshold=(engine.number("YeniDil_No")==0?3980:2740)*factor;
+        // GA_Kosma is original DEFINE6, not a runtime global. Read its live configured
+        // binding rather than querying the nonexistent VAR or assuming a host key.
+        const auto& bindings=state.require(engine.global("GA_Tuslar").bits).array;const int scan=legacy_scancode(bindings.at(6).value.integer());
+        assert(scan>=0&&scan<SDL_NUM_SCANCODES);Input run=idle;run.keys.set(scan);run.pressed.set(scan);
+        double previous=engine.field(credit,"offset_y"),largest=previous;bool reset=false;int samples=0;
+        for(int i=0;i<5000&&!reset;++i){tick(run);run.pressed.reset(scan);const double now=engine.field(credit,"offset_y");largest=std::max(largest,now);
+            if(now<previous){assert(now==0&&previous>threshold-8*factor);reset=true;capture("credits-full-cycle-reset");scrollGlyph("CRMT_Credit");}
+            else if(i%400==0){engine.prepare(runtime);scrollGlyph("CRMT_Credit");++samples;}
+            assert(now<=threshold);previous=now;
+        }
+        const auto runKey=engine.number("KEY_KOSMA");
+        std::cout<<"original credits source cycle reset="<<reset<<" threshold="<<threshold<<" largest="<<largest<<" samples="<<samples<<" runKey="<<runKey<<" scancode="<<scan<<'\n';
+        if(!reset||largest<=threshold*.9||runKey!=1)std::cerr<<"original credits failure: reset="<<reset<<" samples="<<samples<<" largest="<<largest<<" threshold="<<threshold<<" KEY_KOSMA="<<runKey<<'\n';
+        assert(reset);assert(largest>threshold*.9);assert(runKey==1);
+        tick(idle);
+    }
+    key(SDL_SCANCODE_ESCAPE);until("main after credits",90,[&]{return visible("AMP_YeniOyun");});close(engine.field(engine.global("CRMT_Credit").bits,"offset_y"),0);
+    key(SDL_SCANCODE_DOWN);key(SDL_SCANCODE_RETURN);until("load list",90,[&]{return visible("YUMT_Liste");});capture("load-list");
+    close(engine.field(engine.global("YUMT_Liste").bits,"scale_y"),initialFontX);close(engine.field(engine.global("YUMP_Cursor").bits,"scale_y"),initialFontX);
+    assert(engine.number("YUM_Cursor")==7);loadGeometry(engine,runtime,state,assets,true);
+    for(int row=6;row>=0;--row){key(SDL_SCANCODE_UP);assert(engine.number("YUM_Cursor")==row);loadGeometry(engine,runtime,state,assets,true);}
+    for(int row=1;row<8;++row){key(SDL_SCANCODE_DOWN);assert(engine.number("YUM_Cursor")==row);loadGeometry(engine,runtime,state,assets,true);}
+    capture("load-list-eight-genuine-slots");
+    {
+        const auto list=engine.global("YUMT_Liste").bits;const auto& font=state.require(state.require(list).field("font").value.bits);const auto& atlas=assets.image(font.text);
+        std::vector<UICommand> glyphs;for(const auto& command:engine.frame().ui)if(command.layer==engine.field(list,"layer")&&command.image&&command.image->width==atlas.width&&command.image->height==atlas.height)glyphs.push_back(command);
+        assert(!glyphs.empty());const auto& first=glyphs.front();
+        close(engine.field(list,"alpha"),50);close(first.color.a,.5);assert(first.dynamicImage);
+        std::cout<<"load-font font="<<font.text<<" glyphs="<<glyphs.size()<<" sourceAlpha="<<engine.field(list,"alpha")<<" opacity="<<first.color.a<<'\n';
+        struct CaptureRGB {int width{},height{};std::vector<unsigned char> pixels;};
+        auto readCapture=[&](std::string_view name){CaptureRGB result;std::ifstream file(captures/(std::string(name)+".ppm"),std::ios::binary);std::string magic;int maximum=0;
+            file>>magic>>result.width>>result.height>>maximum;assert(magic=="P6"&&maximum==255&&result.width>0&&result.height>0);file.get();
+            result.pixels.resize(std::size_t(result.width)*result.height*3);file.read(reinterpret_cast<char*>(result.pixels.data()),std::streamsize(result.pixels.size()));assert(file.gcount()==std::streamsize(result.pixels.size()));return result;};
+        auto shown=readCapture("load-list-eight-genuine-slots");engine.set_field(list,"visible",0);capture("load-list-font-hidden");auto hidden=readCapture("load-list-font-hidden");
+        assert(shown.width==hidden.width&&shown.height==hidden.height);engine.set_field(list,"visible",1);capture("load-list-font-restored");
+        const auto pixels=renderer.metrics();assert(shown.width==pixels.drawableWidth&&shown.height==pixels.drawableHeight);
+        std::array<std::size_t,8> nonblack{},rawPass{},changed{},brighter{};
+        const float top=first.rect.y,pitch=18*float(initialFontX);
+        for(const auto& glyph:glyphs){const int row=int((glyph.rect.y-top)/pitch+.5f);assert(row>=0&&row<8);
+            const auto& image=*glyph.image;const int x0=int(glyph.uv.x*image.width+.5f),y0=int(glyph.uv.y*image.height+.5f),cw=int(glyph.uv.width*image.width+.5f),ch=int(glyph.uv.height*image.height+.5f);
+            for(int y=0;y<ch;++y)for(int x=0;x<cw;++x){const auto index=(std::size_t(y0+y)*image.width+x0+x)*4;assert(index+3<image.rgba.size());
+                if(!(image.rgba[index]||image.rgba[index+1]||image.rgba[index+2]))continue;++nonblack[row];
+                if(image.rgba[index+3]/255.0f>=glyph.alphaRef)++rawPass[row];
+                const int px=int(std::floor((glyph.rect.x+(x+.5f)*glyph.rect.width/cw)*pixels.scaleX)),py=int(std::floor((glyph.rect.y+(y+.5f)*glyph.rect.height/ch)*pixels.scaleY));
+                assert(px>=0&&px<shown.width&&py>=0&&py<shown.height);const auto pixel=(std::size_t(py)*shown.width+px)*3;
+                const int before=hidden.pixels[pixel]+hidden.pixels[pixel+1]+hidden.pixels[pixel+2],after=shown.pixels[pixel]+shown.pixels[pixel+1]+shown.pixels[pixel+2];
+                if(shown.pixels[pixel]!=hidden.pixels[pixel]||shown.pixels[pixel+1]!=hidden.pixels[pixel+1]||shown.pixels[pixel+2]!=hidden.pixels[pixel+2])++changed[row];if(after>before)++brighter[row];
+            }
+        }
+        for(int row=0;row<8;++row){
+            std::cout<<"load-font pixels row="<<row<<" nonblack="<<nonblack[row]<<" rawAlphaPass="<<rawPass[row]<<" changed="<<changed[row]<<" brighter="<<brighter[row]<<'\n';
+            assert(nonblack[row]>0&&rawPass[row]>0&&changed[row]>0&&brighter[row]>0);
+        }
+    }
+    key(SDL_SCANCODE_ESCAPE);until("main after load list",90,[&]{return visible("AMP_YeniOyun");});
+    key(SDL_SCANCODE_ESCAPE);key(SDL_SCANCODE_RETURN);until("exit",90,[&]{return visible("CMP_Hayir");});capture("exit");
+    key(SDL_SCANCODE_ESCAPE);until("exit back",90,[&]{return visible("AMP_YeniOyun");});
+    }
+    // A real resize while the original menu is live, with no second original menu invocation.
+    auto resizedMetrics=initialMetrics;
+    if(presentation){mapProducer(true,"producer-map-before-resize");mapClose();}
+    if(presentation||projection){renderer.set_mode(1920,1080,WindowMode::Windowed);tick(idle);resizedMetrics=renderer.metrics();}
+    if(presentation){
+    capture("main-resized");full("DMP_Arka");
+    const auto fontX=ratio(resizedMetrics.width,1280),fontY=ratio(resizedMetrics.height,720),gameX=ratio(resizedMetrics.width,640),gameY=ratio(resizedMetrics.height,480);
+    close(engine.field(engine.global("AMP_YeniOyun").bits,"pos_y"),var(resizedMetrics.height-5*32*fontY));
+    close(engine.number("Cer_hY1")+16,engine.field(engine.global("AMP_YeniOyun").bits,"pos_y"));
+    close(engine.number("Cer_hY2")+16,resizedMetrics.height);
+    close(engine.number("Cer_hX1"),engine.field(engine.global("AMP_YeniOyun").bits,"pos_x"));
+    // Draw original presentation producers without claiming world/actor progression.
+    mapProducer(true,"producer-map-after-hidden-resize");mapClose();
+    runtime.start("AnaMenuKapat");
+    runtime.start("DisMenuKapat");
+    assert(engine.number("DM_Acik")==0&&engine.number("goz_panel_ok")==0&&engine.number("CER_Aktif")==0);
+    for(auto name:{"AMP_YeniOyun","DMP_Arka","DMP_GozSag","DMP_Gozsol","CER_Cerceve"})assert(!visible(name));
+    // Source-owned bitmap/coordinate palettes through the public panel producer API.
+    // No dummy player, story flags or world position are introduced to paint a HUD.
+    for(auto [panelName,paletteName,coordinateName,index]:{
+            std::tuple{"PEMP_Enerji","PEML_Enerji","PEME_KoseKorXY",20u},
+            std::tuple{"PEMP_Kalp","PEML_Kalp","PEMK_KoseKorXY",0u}}){
+        const auto id=engine.global(panelName).bits;
+        const auto& palette=state.require(engine.global(paletteName).bits).array;
+        const auto& coordinates=state.require(engine.global(coordinateName).bits).array;
+        state.member(id,"bmap").set(palette.at(index).value);
+        engine.set_field(id,"pos_x",coordinates[0].value.real()*fontX);
+        engine.set_field(id,"pos_y",coordinates[1].value.real()*fontY);
+        engine.set_field(id,"scale_x",fontX);engine.set_field(id,"scale_y",fontY);engine.set_field(id,"visible",1);
+    }
+    capture("producer-player-hud");
+    close(engine.field(engine.global("PEMP_Enerji").bits,"scale_x"),gameX);
+    close(engine.field(engine.global("PEMP_Enerji").bits,"scale_y"),gameY);
+    engine.set_field(engine.global("PEMP_Enerji").bits,"visible",0);
+    engine.set_field(engine.global("PEMP_Kalp").bits,"visible",0);
+    for(auto [panelName,bitmapName]:{std::pair{"BEP_Enerji","BEPI_Enerji"},std::pair{"BEP_Cam","BEPI_Cam"},std::pair{"BEP_Ust","BEPI_Ust"}}){
+        const auto id=engine.global(panelName).bits;state.member(id,"bmap").set(engine.global(bitmapName));
+        engine.set_field(id,"scale_x",fontX);engine.set_field(id,"scale_y",fontY);engine.set_field(id,"visible",1);
+    }
+    const auto bossEnergy=engine.global("BEP_Enerji").bits,bossCam=engine.global("BEP_Cam").bits;
+    const auto half=var(fontX*.5),quarter=var(fontX*.25);
+    const auto halfNative=var(float(half)*float(gameX)/float(fontX)),quarterNative=var(float(quarter)*float(gameX)/float(fontX));
+    engine.set_field(bossEnergy,"scale_x",half);capture("producer-boss-hud");
+    close(engine.field(bossEnergy,"scale_x"),halfNative);close(engine.field(bossCam,"scale_x"),gameX);
+    close(engine.field(bossEnergy,"pos_x"),engine.field(bossCam,"pos_x"));
+    engine.prepare(runtime);close(engine.field(bossEnergy,"scale_x"),halfNative);
+    engine.set_field(bossEnergy,"scale_x",quarter);engine.prepare(runtime);close(engine.field(bossEnergy,"scale_x"),quarterNative);
+    for(auto name:{"BEP_Enerji","BEP_Cam","BEP_Ust"})engine.set_field(engine.global(name).bits,"visible",0);
+    runtime.start("EM_Ayarla");runtime.start("EnvanterMenuAc");capture("producer-inventory");
+    close(engine.field(engine.global("EMP_Nesne0").bits,"pos_x"),var(270*gameX));
+    close(engine.field(engine.global("EMT_Cisim0").bits,"pos_y"),var((47+34)*gameY));
+    close(engine.field(engine.global("EMT_Cisim0").bits,"scale_x"),fontX);
+    runtime.start("EnvanterMenuKapat");runtime.start("SmartMenuAc");capture("producer-pause");full("STMP_Arka");
+    close(engine.field(engine.global("STMP_Devam").bits,"scale_x"),fontX);
+    runtime.start("SmartMenuKapat");
+    for(auto name:{"Son_yazi","CRMT_Oyunsonu"}){
+        const auto id=engine.global(name).bits;auto& object=state.require(id);const auto font=object.field("font").value;
+        const std::array old{engine.field(id,"visible"),engine.field(id,"offset_y"),engine.field(id,"pos_x"),engine.field(id,"pos_y"),engine.field(id,"size_y")};
+        engine.set_field(id,"visible",1);engine.set_field(id,"pos_x",name==std::string_view("Son_yazi")?25*fontX:resizedMetrics.width/2.0);engine.set_field(id,"pos_y",0);engine.set_field(id,"size_y",resizedMetrics.height);
+        for(double offset:{72.0,360.0,1080.0}){engine.set_field(id,"offset_y",offset*fontX);engine.prepare(runtime);scrollGlyph(name);close(engine.field(id,"offset_y"),var(offset*fontX));}
+        capture(std::string("producer-scroll-")+name);
+        for(auto [field,value]:{std::pair{"visible",old[0]},std::pair{"offset_y",old[1]},std::pair{"pos_x",old[2]},std::pair{"pos_y",old[3]},std::pair{"size_y",old[4]}})engine.set_field(id,field,value);object.field("font").value=font;
+    }
+    for(auto name:{"kararma_fon_pnl","videokara_fon_pnl","siyah_fon_pnl","LYP_Fade","KBP_Fade"}){
+        const auto id=engine.global(name).bits;const bool wasVisible=visible(name);
+        engine.set_field(id,"visible",1);capture(std::string("producer-")+std::string(name));full(name);engine.set_field(id,"visible",wasVisible);
+    }
+    const std::array barArgs{Argument{Value::from_int(1),{}}};runtime.start("acil_syh_ctrl",barArgs);
+    for(int i=0;i<20;++i)tick(idle);
+    capture("producer-cinematic-bars");
+    close(engine.field(engine.global("oy_syh_pan1").bits,"scale_x"),gameX);
+    close(engine.field(engine.global("oy_syh_pan2").bits,"scale_y"),gameY);
+    }
+    // Recovered mode/ASPECT preparation remains shared with source projection; a
+    // subviewport is NOT forced to the physical main-camera window.
+    if(projection){
+        auto& subview=state.create(Object::Kind::View,"display-test-subviewport");
+        for(auto [name,value]:{std::pair{"pos_x",73.0},{"pos_y",41.0},{"size_x",700.0},{"size_y",300.0},{"arc",-60.0},{"aspect",-2.0},{"clip_near",1.0},{"clip_far",1000.0},{"visible",1.0}})engine.set_field(subview.id,name,value);
+        auto& point=state.create(Object::Kind::Vector,"display-test-project");
+        const auto originalMode=engine.currentWindowMode;
+        for(auto mode:{WindowMode::Windowed,WindowMode::Borderless,WindowMode::Fullscreen})for(float aspect:{1.0f,2.0f,-2.0f})for(float arc:{60.0f,-60.0f}){
+            engine.currentWindowMode=mode;engine.set_field(subview.id,"aspect",aspect);engine.set_field(subview.id,"arc",arc);engine.prepare(runtime);
+            auto prepared=std::find_if(engine.frame().cameras.begin(),engine.frame().cameras.end(),[&](const auto& camera){return camera.sourceId==subview.id;});
+            assert(prepared!=engine.frame().cameras.end());close(prepared->viewport.width,700);close(prepared->viewport.height,300);
+            const float q=mode==WindowMode::Fullscreen?float(resizedMetrics.height)*320/(float(resizedMetrics.width)*240):1;
+            close(prepared->pixelAspect,1/(aspect*q));close(prepared->horizontalFov,arc);assert(!prepared->widescreen);
+            assert(engine.number("video_screen")==(mode==WindowMode::Fullscreen?1:2));
+            engine.set_position(point.id,{100,10,5});const auto expected=Renderer::project({100,10,5},*prepared,renderer.metrics());
+            ProcessContext context;const std::array args{Argument{Value::object(point.id),{}},Argument{Value::object(subview.id),{}}};
+            engine.builtin(runtime,context,"vec_to_screen",args);close_vector(engine.position(point.id),expected,.001);
+        }
+        engine.currentWindowMode=originalMode;
+        engine.set_field(subview.id,"aspect",0);engine.prepare(runtime);
+        const auto zero=std::find_if(engine.frame().cameras.begin(),engine.frame().cameras.end(),[&](const auto& camera){return camera.sourceId==subview.id;});
+        assert(zero!=engine.frame().cameras.end());bool invalid=false;try{Renderer::project({100,10,5},*zero,renderer.metrics());}catch(const std::exception&){invalid=true;}assert(invalid);
+        engine.set_field(subview.id,"visible",0);
+    }
+    if(presentation){mapProducer(true,"producer-map-visible-before-resize");renderer.set_mode(initialMetrics.width,initialMetrics.height,WindowMode::Windowed);tick(idle);mapProducer(false,"producer-map-visible-after-resize");mapClose();}
+    if(projection){
+    assert(!engine.configure_display(runtime,true,false));
+    ProcessContext context;const std::array preset{Argument{Value::from_int(6),{}},Argument{Value::from_int(32),{}},Argument{Value::from_int(2),{}}};
+    assert(engine.builtin(runtime,context,"video_switch",preset).integer()==6);
+    close_vector(engine.vector(engine.global_vector("screen_size")),{640,480,0});
+    // Producer/API geometry at dimensions the host window manager need not admit.
+    // These use another genuine original program and the eight source-created saves,
+    // not a WSI bypass, replacement script, fabricated labels or a played campaign.
+    {
+        Assets geometryAssets(root);for(auto archive:{"K22.wrs","Kaynak.k22"})if(geometryAssets.contains(archive))geometryAssets.mount(archive);
+        Media geometryMedia(geometryAssets,false);State geometryState;Engine geometryEngine(geometryAssets,nullptr,geometryMedia,geometryState);
+        Runtime geometryRuntime(geometryState,[&](auto& vm,auto& context,auto name,auto args){return geometryEngine.builtin(vm,context,name,args);});
+        for(auto define:{"defiae_d3d","defses_en","defdil_en"})geometryState.compilerMacros.emplace(define,"1");
+        geometryRuntime.load("K22.wdl",[&](std::string_view name){return geometryAssets.text(name);},[&](std::string_view name){geometryAssets.mount(name);});
+        geometryEngine.initialize_plugins(geometryRuntime);
+        assert(geometryEngine.configure_display(geometryRuntime,true,true,1366,768,WindowMode::Windowed));
+        close(geometryState.require(geometryEngine.global("GA_FontOranlari").bits).array[0].value.real(),ratio(1366,1280));
+        assert(geometryEngine.configure_display(geometryRuntime,true,true,5120,1440,WindowMode::Windowed));geometryRuntime.bootstrap();
+        auto geometryTick=[&](const Input& in){geometryEngine.tick(geometryRuntime,in);geometryEngine.finish_frame(geometryRuntime);assert(!geometryEngine.quit);};
+        auto geometryVisible=[&](std::string_view name){return geometryEngine.field(geometryEngine.global(name).bits,"visible")!=0;};
+        for(int i=0;i<1800&&!geometryVisible("AMP_YeniOyun");++i){geometryTick(idle);if(geometryEngine.number("ParlaklikMenuAcik")){Input enter=idle;enter.keys.set(SDL_SCANCODE_RETURN);enter.pressed.set(SDL_SCANCODE_RETURN);geometryTick(enter);geometryTick(idle);}}
+        assert(geometryVisible("AMP_YeniOyun"));geometryRuntime.start("SLG_Yukle");geometryRuntime.start("AnaMenuKapat");geometryRuntime.start("YukleMenuAc");geometryTick(idle);
+        assert(geometryVisible("YUMT_Liste")&&geometryEngine.number("YUM_Cursor")==7);
+        auto geometryKey=[&](int scan){Input held=idle;held.keys.set(scan);held.pressed.set(scan);for(int i=0;i<8;++i){geometryTick(held);held.pressed.reset(scan);}for(int i=0;i<8;++i)geometryTick(idle);};
+        for(int i=0;i<120;++i)geometryTick(idle);loadGeometry(geometryEngine,geometryRuntime,geometryState,geometryAssets,true);
+        for(int row=6;row>=0;--row){geometryKey(SDL_SCANCODE_UP);assert(geometryEngine.number("YUM_Cursor")==row);loadGeometry(geometryEngine,geometryRuntime,geometryState,geometryAssets,true);}
+        for(int row=1;row<8;++row){geometryKey(SDL_SCANCODE_DOWN);assert(geometryEngine.number("YUM_Cursor")==row);loadGeometry(geometryEngine,geometryRuntime,geometryState,geometryAssets,true);}
+        close(geometryEngine.number("Cer_aY1"),geometryEngine.number("Cer_hY1"),.01);close(geometryEngine.number("Cer_aY2"),geometryEngine.number("Cer_hY2"),.01);
+        assert(geometryEngine.configure_display(geometryRuntime,true,true,16384,720,WindowMode::Windowed));
+        for(int i=0;i<120;++i)geometryTick(idle);loadGeometry(geometryEngine,geometryRuntime,geometryState,geometryAssets,false);
+        for(int row=6;row>=0;--row){geometryKey(SDL_SCANCODE_UP);assert(geometryEngine.number("YUM_Cursor")==row);loadGeometry(geometryEngine,geometryRuntime,geometryState,geometryAssets,false);}
+        for(int row=1;row<8;++row){geometryKey(SDL_SCANCODE_DOWN);assert(geometryEngine.number("YUM_Cursor")==row);loadGeometry(geometryEngine,geometryRuntime,geometryState,geometryAssets,false);}
+        std::cout<<"original load producer/API:5120x1440 all8slots,16384x720 selected0–7 clipped viewport; no WSI/playthrough claim\n";
+    }
+    }
+    std::cout<<"original campaign display phase="<<phase<<" passed; source-menu bootstrap and selected menu/producer/API assertions; no NewGame/playthrough claim\n";
+}
 }
 
 int main(int argc, char** argv) {
+    if((argc==7||argc==8)&&std::string_view(argv[3])=="--campaign-display"){
+        campaign_display(argv[4],argv[5],argv[6],argc==8?std::string_view(argv[7]):"all");return 0;
+    }
     if (argc != 3 && !(argc == 5 && std::string_view(argv[3]) == "--campaign-data"))
-        throw std::runtime_error("Usage: check_engine <recovered FX directory> <genuine HMP file> [--campaign-data PATCHED_GAME_ROOT]");
+        throw std::runtime_error("Usage: check_engine FX_DIR HMP [--campaign-data GAME_ROOT | --campaign-display ORIGINAL_GAME_ROOT opengl|vulkan|vulkan-rt CAPTURE_DIR [all|menus|presentation|projection]]");
     k22::Renderer::boundary_check();
     graphics_consumers();
+    {
+        TempDirectory temporary;
+        SaveEnvironment saves(temporary.path);
+        Assets assets(temporary.path); Media media(assets, false); State state;
+        Engine engine(assets, nullptr, media, state);
+        Runtime runtime(state, [&engine](auto& vm, auto& ctx, auto name, auto args) {
+            return engine.builtin(vm, ctx, name, args);
+        });
+        runtime.load_text("custom-display.wdl", "function main() {}");
+        assert(!engine.configure_display(runtime, true, true, 2560, 1440, WindowMode::Windowed));
+        ProcessContext context;
+        const std::array preset{Argument{Value::from_int(6),{}},
+            Argument{Value::from_int(32),{}},Argument{Value::from_int(2),{}}};
+        assert(engine.builtin(runtime, context, "video_switch", preset).integer()==6);
+        close_vector(engine.vector(engine.global_vector("screen_size")), {640,480,0});
+        // A behavioral graph fixture, not campaign progression or a replacement script.
+        const std::string graph=R"(
+            VAR GA_Cozunurlukler[10]=640,480,800,600,1024,768,1280,1024,1600,1200;
+            VAR GA_ScaleOranlari[10]=1,1,1.25,1.25,1.6,1.6,2,2.133,2.5,2.5;
+            VAR GA_ScaleOranlari2[10]=1,1,1.25,1.25,1,1,1.25,1.334,1.563,1.563;
+            VAR GA_FontOranlari[4]=1,1.166,1.611,2;
+            VAR EM_Kordinat[54]; VAR EML_Paneller[27]; VAR GA_Cozunurluk=0;
+            VAR LY_AktifLevelID=0; VAR level_yuklendi_ok=0; VAR game_over_start=0; VAR STM_Acik=0;
+            FUNCTION GA_AyarlariYukle(){} FUNCTION Menu_AcilisEkrani(){} FUNCTION AnaMenuAc(){}
+            FUNCTION EM_Ayarla(){} FUNCTION GrafikMenuKapat(){} FUNCTION SmartMenuAc(){} FUNCTION main(){}
+        )";
+        runtime.load_text("display-graph-fixture.wdl",graph);
+        assert(!engine.configure_display(runtime,false,true,2560,1440,WindowMode::Windowed));
+        assert(engine.configure_display(runtime,true,true,2560,1440,WindowMode::Windowed));
+        auto scales=[&](double x,double y){
+            engine.prepare(runtime);
+            for(auto name:{"GA_ScaleOranlari","GA_ScaleOranlari2"}){
+                const auto& table=state.require(engine.global(name).bits).array;
+                close(table[0].value.real(),x);close(table[1].value.real(),y);
+            }
+            const auto& fonts=state.require(engine.global("GA_FontOranlari").bits).array;
+            close(fonts[0].value.real(),2);close(fonts[1].value.real(),2);
+        };
+        scales(2,2);
+        engine.set_global("LY_AktifLevelID",Value::from_int(18));scales(2,2);
+        engine.set_global("level_yuklendi_ok",Value::from_int(1));scales(4,3);
+        engine.set_global("STM_Acik",Value::from_int(1));scales(2,2);
+        engine.set_global("STM_Acik",{});scales(4,3);
+        engine.set_global("game_over_start",Value::from_int(1));scales(2,2);
+        assert(engine.builtin(runtime,context,"video_switch",preset).integer()==6);
+        close_vector(engine.vector(engine.global_vector("screen_size")),{2560,1440,0});
+        for(bool prepareFirst:{false,true}){
+            runtime.load_text("direct-custom-replacement.wdl","FUNCTION main(){}");
+            auto& view=state.create(Object::Kind::View,"withdrawn-native-custom-view");
+            for(auto [name,value]:{std::pair{"size_x",700.0},{"size_y",300.0},{"arc",60.0},{"aspect",2.0},{"clip_near",1.0},{"clip_far",1000.0},{"visible",1.0}})engine.set_field(view.id,name,value);
+            if(prepareFirst)engine.prepare(runtime);
+            assert(engine.builtin(runtime,context,"video_switch",preset).integer()==6);
+            close_vector(engine.vector(engine.global_vector("screen_size")),{640,480,0});
+            engine.prepare(runtime);
+            const auto camera=std::find_if(engine.frame().cameras.begin(),engine.frame().cameras.end(),[&](const auto& c){return c.sourceId==view.id;});
+            assert(camera!=engine.frame().cameras.end());close(camera->pixelAspect,2);
+            runtime.load_text("display-graph-readmission.wdl",graph);
+            assert(engine.configure_display(runtime,true,true,2560,1440,WindowMode::Windowed));
+        }
+        runtime.load_text("patched-graph-fixture.wdl",graph+" FUNCTION dbg_screen_reset(){}");
+        assert(!engine.configure_display(runtime,true,true,2560,1440,WindowMode::Windowed));
+        runtime.load_text("modified-display-graph-fixture.wdl",graph);
+        state.require(engine.global("GA_FontOranlari").bits).array[3].value=Value::from_double(3);
+        assert(!engine.configure_display(runtime,true,true,2560,1440,WindowMode::Windowed));
+        runtime.load_text("custom-display-reload.wdl","FUNCTION main(){}");
+        assert(engine.builtin(runtime,context,"video_switch",preset).integer()==6);
+        close_vector(engine.vector(engine.global_vector("screen_size")),{640,480,0});
+    }
     legacy_trace_consumers();
     {
         TempDirectory temporary;
@@ -3746,6 +4205,64 @@ int main(int argc, char** argv) {
                 }
             }
         }
+    }
+    {
+        TempDirectory temporary;
+        auto write=[&](std::string_view name,const auto& bytes){std::ofstream file(temporary.path/std::string(name),std::ios::binary);assert(file.write(reinterpret_cast<const char*>(bytes.data()),std::streamsize(bytes.size())).good());};
+        // Indexed PCX deliberately has a black embedded BMAP palette. FONT uses
+        // the independently selected/normalized active RGB palette, not alpha=index.
+        std::vector<std::uint8_t> pcx(128,0);pcx[0]=10;pcx[1]=5;pcx[2]=1;pcx[3]=8;pcx[8]=7;pcx[10]=3;pcx[65]=1;pcx[66]=8;pcx[68]=1;
+        for(int y=0;y<4;++y)for(int x=0;x<8;++x){const auto index=std::array<std::uint8_t,4>{0,1,2,255}[x%4];if(index>=192)pcx.push_back(193);pcx.push_back(index);}
+        pcx.push_back(12);pcx.resize(pcx.size()+768);write("indexed.pcx",pcx);
+        std::array<std::uint8_t,768> inputPalette{};inputPalette[3]=64;inputPalette[4]=128;inputPalette[5]=192;inputPalette[6]=1;inputPalette[7]=2;inputPalette[8]=3;
+        write("custom.raw",inputPalette);auto fallback=inputPalette;fallback[3]=190;write("palette.raw",fallback);
+        auto worldPalette=inputPalette;worldPalette[3]=200;worldPalette[4]=40;worldPalette[5]=60;
+        std::vector<std::uint8_t> worldBytes(140+16+768,0);std::memcpy(worldBytes.data(),"WMB6",4);
+        for(unsigned shift=0;shift<32;shift+=8){worldBytes[4+shift/8]=std::uint8_t(140u>>shift);worldBytes[8+shift/8]=std::uint8_t(784u>>shift);}
+        std::copy(worldPalette.begin(),worldPalette.end(),worldBytes.begin()+156);write("palette.wmb",worldBytes);
+        std::vector<std::uint8_t> noPalette(140,0);std::memcpy(noPalette.data(),"WMB6",4);write("retained.wmb",noPalette);
+        Assets assets(temporary.path);Media media(assets,false);State state;Engine engine(assets,nullptr,media,state);
+        Runtime runtime(state,[&](Runtime& vm,ProcessContext& context,std::string_view name,std::span<const Argument> args){return engine.builtin(vm,context,name,args);});
+        runtime.load_text("dir/custom.wdl",R"wdl(
+            BMAP ordinary=<indexed.pcx>;FONT font=<indexed.pcx>,4,4;
+            PANEL bitmap {LAYER=10;BMAP=ordinary;VISIBLE=ON;}
+            TEXT label {LAYER=11;FONT=font;STRING="01";ALPHA=50;FLAGS=TRANSPARENT;VISIBLE=ON;}
+            function palette_world(){level_load("palette.wmb");}
+            function retained_world(){level_load("retained.wmb");}
+        )wdl");
+        assert(runtime.compiler_settings().entry=="dir/custom.wdl");engine.prepare(runtime);
+        auto commands=[&](float layer){std::vector<UICommand> result;for(const auto& command:engine.frame().ui)if(command.layer==layer)result.push_back(command);return result;};
+        const auto bmap=commands(10);auto glyphs=commands(11);assert(bmap.size()==1&&glyphs.size()==2);
+        for(std::size_t p=0;p<bmap[0].image->rgba.size();p+=4){const auto& bytes=bmap[0].image->rgba;assert(bytes[p]==0&&bytes[p+1]==0&&bytes[p+2]==0&&bytes[p+3]==255);}
+        const Image* atlas=glyphs[0].image;const auto serial=glyphs[0].imageSerial;
+        auto color=[&](std::size_t pixel,std::array<std::uint8_t,4> expected){
+            const auto* rgba=atlas->rgba.data()+pixel*4;
+            if(!std::equal(expected.begin(),expected.end(),rgba)){
+                std::cerr<<"FONT color pixel="<<pixel<<" actual="<<int(rgba[0])<<','<<int(rgba[1])<<','<<int(rgba[2])<<','<<int(rgba[3])<<" expected="<<int(expected[0])<<','<<int(expected[1])<<','<<int(expected[2])<<','<<int(expected[3])<<'\n';
+            }
+            assert(std::equal(expected.begin(),expected.end(),rgba));
+        };
+        color(0,{0,0,0,0});color(1,{64,128,192,255});color(2,{8,8,8,255});color(3,{255,255,255,255});
+        assert(atlas->sourceDepth==8&&atlas->nativeStorageBytes==1&&!atlas->nativeTextureAlpha);
+        for(const auto& glyph:glyphs){assert(glyph.dynamicImage&&glyph.image==atlas);close(glyph.color.a,.5);close(glyph.rect.width,4);close(glyph.rect.height,4);}
+        close(glyphs[0].uv.x,0);close(glyphs[1].uv.x,.5);close(glyphs[0].uv.width,.5);
+        auto paletteDraw=[&](std::string_view stage,std::uint64_t previous,bool changed){
+            glyphs=commands(11);
+            if(glyphs.size()!=2||glyphs[0].image!=atlas||(changed?glyphs[0].imageSerial<=previous:glyphs[0].imageSerial!=previous)){
+                std::cerr<<"FONT palette stage="<<stage<<" glyphs="<<glyphs.size()<<" atlas="<<atlas<<" emitted="<<(glyphs.empty()?nullptr:glyphs[0].image)<<" serial="<<(glyphs.empty()?0:glyphs[0].imageSerial)<<" previous="<<previous<<" world="<<engine.world<<" section0="<<(engine.world?engine.world->sections[0].size():0)<<'\n';
+                if(engine.world&&engine.world->sections[0].size()>=784){const auto* p=engine.world->sections[0].data()+19;std::cerr<<"FONT world palette index1 RGB="<<int(p[0])<<','<<int(p[1])<<','<<int(p[2])<<'\n';}
+                const auto* p=atlas->rgba.data()+4;std::cerr<<"FONT CPU ink index1 RGBA="<<int(p[0])<<','<<int(p[1])<<','<<int(p[2])<<','<<int(p[3])<<'\n';
+            }
+            assert(glyphs.size()==2);color(1,{200,40,60,255});
+            assert(glyphs[0].image==atlas);
+            assert(changed?glyphs[0].imageSerial>previous:glyphs[0].imageSerial==previous);
+        };
+        Input idle;
+        runtime.start("palette_world");engine.tick(runtime,idle);paletteDraw("changed",serial,true);
+        const auto worldSerial=glyphs[0].imageSerial;
+        runtime.start("retained_world");engine.tick(runtime,idle);paletteDraw("retained",worldSerial,false);
+        const auto ordinary=commands(10);assert(ordinary.size()==1&&ordinary[0].image==bmap[0].image);
+        for(std::size_t p=0;p<ordinary[0].image->rgba.size();p+=4)assert(ordinary[0].image->rgba[p]==0&&ordinary[0].image->rgba[p+1]==0&&ordinary[0].image->rgba[p+2]==0);
     }
     {
         TempDirectory temporary;

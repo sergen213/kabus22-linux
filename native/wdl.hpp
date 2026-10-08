@@ -6,7 +6,7 @@ namespace k22 {
 struct ParseMetrics {std::size_t files=0,lines=0,tokens=0,declarations=0,functions=0,statements=0,expressions=0,directives=0;};
 class Runtime {
 public:
- struct CompilerSettings {std::string plugin_directory;std::vector<std::string> bindings,levels;};
+ struct CompilerSettings {std::string entry;std::string plugin_directory;std::vector<std::string> bindings,levels;};
  using Source=std::function<std::string(std::string_view)>;
  using Builtin=std::function<Value(Runtime&,ProcessContext&,std::string_view,std::span<const Argument>)>;
  using Resource=std::function<void(std::string_view)>;

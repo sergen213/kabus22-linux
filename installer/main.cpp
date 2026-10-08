@@ -250,7 +250,7 @@ class Installer {
     void report(const std::string& message) { labelText(errors_, message); }
     void choose(GtkWidget* entry, GtkFileChooserAction action, bool source, bool parent = false) {
         auto* dialog = gtk_file_chooser_native_new(source ? "Select original Kabus22 media" :
-                parent ? "Select parent for the new kabus22 directory" : "Select optional Kabus22 patch folder",
+                parent ? "Select parent for the new kabus22 directory" : "Select optional Kabus22Patch community extras",
                 GTK_WINDOW(window_), action, "Select", "Cancel");
         chooser_ = dialog;
         if (source) {
@@ -436,10 +436,10 @@ public:
         destination_ = field(fields_, 1, "_Install directory:", request_.installRoot,
             "A new directory is required. Browse selects a parent and adds kabus22; edit the path to choose another name.",
             G_CALLBACK(+[](GtkButton*, gpointer data) { auto* self = static_cast<Installer*>(data); self->choose(self->destination_, GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, false, true); }));
-        patch_ = field(fields_, 2, "_Patch folder (optional):", request_.optionalPatch,
-            "Optional user-supplied Kabus22Patch directory. Leave empty to install the original game data.",
+        patch_ = field(fields_, 2, "_Community extras (optional):", request_.optionalPatch,
+            "Optional, separately obtained Kabus22Patch directory for its extras. Not required for native original-campaign widescreen; leave empty for original ISO data.",
             G_CALLBACK(+[](GtkButton*, gpointer data) { auto* self = static_cast<Installer*>(data); self->choose(self->patch_, GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, false); }));
-        auto* note = gtk_label_new("Installs for your user only. Existing installations are not overwritten.\nWindows executables are never launched; the installed game runs natively.");
+        auto* note = gtk_label_new("Original-campaign widescreen is included natively; no patch folder is needed.\nInstalls for your user only. Existing installations are not overwritten.\nWindows executables are never launched; original ISO artwork is retained without extras.");
         gtk_label_set_line_wrap(GTK_LABEL(note), TRUE);
         gtk_box_pack_start(GTK_BOX(content), note, FALSE, FALSE, 0);
         progress_ = gtk_progress_bar_new();
@@ -501,6 +501,8 @@ int main(int argc, char** argv) {
                 "                     [--patch PATCH_DIRECTORY] [--engine NATIVE_ELF]\n"
                 "                     [--extractor INNOEXTRACT] [--unattended]\n"
                 "Developer media: --setup ORIGINAL_setup.exe (with original sibling setup-1.bin), instead of --iso.\n"
+                "Original-campaign widescreen is included in the native engine; no patch folder is required.\n"
+                "--patch optionally installs separately obtained Kabus22Patch extras; none are bundled or auto-discovered.\n"
                 "--unattended installs without a window; SIGINT/SIGTERM cancel safely.\n"
                 "--engine and --extractor override trusted bundled siblings for development.\n"
                 "--self-check runs CLI/core security regression checks without installing.\n";

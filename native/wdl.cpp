@@ -427,7 +427,7 @@ struct Runtime::Impl {
  void load(std::string_view entry,std::string_view text,Source s,Resource r){
   for(auto& p:queued)if(p)release(*p);
   clear_layouts();
-  source=std::move(s);resource=std::move(r);metrics={};tokens.clear();macros.clear();declarations.clear();initializers.clear();functions.clear();functions.emplace_back();names.clear();queued.clear();diagnostics.clear();pos=0;includeDepth=0;compactExpressions=false;compilerSettings={};suppressContinuations=false;
+  source=std::move(s);resource=std::move(r);metrics={};tokens.clear();macros.clear();declarations.clear();initializers.clear();functions.clear();functions.emplace_back();names.clear();queued.clear();diagnostics.clear();pos=0;includeDepth=0;compactExpressions=false;compilerSettings={};compilerSettings.entry=entry;suppressContinuations=false;
   for(auto& [name,value]:state.compilerMacros){ParseMetrics scratch;auto ts=lex(value,"<compiler DEFINE "+name+">",scratch);ts.pop_back();macros.emplace(name,std::move(ts));}
   ++metrics.files;preprocess(entry,text);tokens.push_back({Token::End,"",{std::string(entry),metrics.lines,1}});parse();initialize();
  }

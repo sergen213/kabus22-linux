@@ -15,6 +15,7 @@ extern "C" {
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -232,20 +233,42 @@ public:
     }
 };
 
-void pixels(AVFrame* frame, Image& image, std::unique_ptr<SwsContext, SwsFree>& scale) {
+bool pixels(AVFrame* frame, Image& image, std::unique_ptr<SwsContext, SwsFree>& scale,
+            std::vector<uint8_t>* indices = nullptr, std::span<const uint8_t> palette = {}) {
     if (frame->width <= 0 || frame->height <= 0 || frame->width > 16384 || frame->height > 16384)
         throw std::runtime_error("Invalid decoded image dimensions");
+    image.width = static_cast<uint32_t>(frame->width);
+    image.height = static_cast<uint32_t>(frame->height);
+    image.rgba.resize(static_cast<size_t>(image.width) * image.height * 4);
+    if (indices && frame->format == AV_PIX_FMT_PAL8) {
+        indices->resize(static_cast<size_t>(image.width) * image.height);
+        for (uint32_t y = 0; y < image.height; ++y) {
+            const uint8_t* row = frame->data[0] + static_cast<std::ptrdiff_t>(y) * frame->linesize[0];
+            size_t offset = static_cast<size_t>(y) * image.width;
+            std::memcpy(indices->data() + offset, row, image.width);
+            uint8_t* rgba = image.rgba.data() + offset * 4;
+            for (uint32_t x = 0; x < image.width; ++x) {
+                size_t color = static_cast<size_t>(row[x]) * 3;
+                rgba[x * 4] = palette[color];
+                rgba[x * 4 + 1] = palette[color + 1];
+                rgba[x * 4 + 2] = palette[color + 2];
+                rgba[x * 4 + 3] = 255;
+            }
+        }
+        image.sourceDepth = 8;
+        image.nativeStorageBytes = 1;
+        image.nativeTextureAlpha = false;
+        return true;
+    }
     scale.reset(sws_getCachedContext(scale.release(), frame->width, frame->height,
                                     static_cast<AVPixelFormat>(frame->format), frame->width,
                                     frame->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr));
     if (!scale) throw std::runtime_error("Unable to convert image pixels");
-    image.width = static_cast<uint32_t>(frame->width);
-    image.height = static_cast<uint32_t>(frame->height);
-    image.rgba.resize(static_cast<size_t>(image.width) * image.height * 4);
     uint8_t* destinations[4] = {image.rgba.data(), nullptr, nullptr, nullptr};
     int strides[4] = {frame->width * 4, 0, 0, 0};
     check(sws_scale(scale.get(), frame->data, frame->linesize, 0, frame->height, destinations, strides),
           "Converting decoded pixels");
+    return false;
 }
 uint32_t image_depth(std::span<const uint8_t> bytes, AVCodecID codec, const AVFrame* frame,
                      bool* nativeTextureAlpha = nullptr, AVCodecID nativeLoader = AV_CODEC_ID_NONE) {
@@ -409,9 +432,9 @@ void mix_voices(std::span<Voice> voices, std::span<float> out,
     for (float& sample : out) sample = std::clamp(sample, -1.0f, 1.0f);
 }
 
-} // namespace
 
-Image decode_image(std::span<const uint8_t> bytes, std::string_view name) {
+Image decode_bitmap(std::span<const uint8_t> bytes, std::string_view name,
+                    std::vector<uint8_t>* indices = nullptr, std::span<const uint8_t> palette = {}) {
     auto key = cache_key(name);
     auto dot = key.find_last_of('.');
     std::string_view extension = dot == std::string::npos ? std::string_view{} : std::string_view(key).substr(dot);
@@ -426,9 +449,9 @@ Image decode_image(std::span<const uint8_t> bytes, std::string_view name) {
     if (id == AV_CODEC_ID_NONE) {
         Decoder decoder(bytes, name, AVMEDIA_TYPE_VIDEO);
         if (!decoder.has_stream() || !decoder.next()) throw std::runtime_error("Image contains no frame: " + std::string(name));
-        pixels(decoder.frame(), image, scale);
-        image.sourceDepth = image_depth(bytes, decoder.codec()->codec_id, decoder.frame(),
-                                        &image.nativeTextureAlpha);
+        if (!pixels(decoder.frame(), image, scale, indices, palette))
+            image.sourceDepth = image_depth(bytes, decoder.codec()->codec_id, decoder.frame(),
+                                            &image.nativeTextureAlpha);
         return image;
     }
     if (bytes.empty() || bytes.size() > INT_MAX - AV_INPUT_BUFFER_PADDING_SIZE)
@@ -445,9 +468,22 @@ Image decode_image(std::span<const uint8_t> bytes, std::string_view name) {
     std::memcpy(packet->data, bytes.data(), bytes.size());
     check(avcodec_send_packet(codec.get(), packet.get()), "Submitting image");
     check(avcodec_receive_frame(codec.get(), frame.get()), "Decoding image");
-    pixels(frame.get(), image, scale);
-    image.sourceDepth = image_depth(bytes, id, frame.get(), &image.nativeTextureAlpha, id);
+    if (!pixels(frame.get(), image, scale, indices, palette))
+        image.sourceDepth = image_depth(bytes, id, frame.get(), &image.nativeTextureAlpha, id);
     return image;
+}
+} // namespace
+
+Image decode_image(std::span<const uint8_t> bytes, std::string_view name) {
+    return decode_bitmap(bytes, name);
+}
+
+BitmapFontImage decode_bitmap_font(std::span<const uint8_t> bytes, std::string_view name,
+                                  std::span<const uint8_t> palette) {
+    if (palette.size() != 768) throw std::runtime_error("Bitmap font palette must contain 768 RGB bytes");
+    BitmapFontImage font;
+    font.image = decode_bitmap(bytes, name, &font.indices, palette);
+    return font;
 }
 
 struct Media::Impl {

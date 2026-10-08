@@ -6,6 +6,61 @@ Windows game/setup program, or include original game data, scripts, proprietary
 SDKs, mod archives or game artwork. The generic SVG icon is packaging artwork;
 the installer obtains original game artwork only from user-supplied media.
 
+Current-source original-campaign widescreen correction (v0.1.1 release target):
+  The native engine, not installer flags or copied WDL, owns the default for
+  an automatically selected, recognized original K22.wdl campaign. ISO-only
+  installation includes recovered resolution and state-dependent menu/HUD/text
+  geometry with original media artwork, including its illustration/eye animation.
+  No proprietary community-patch scripts, replacement artwork or Windows DLLs
+  are redistributed. --patch remains an explicit choice for separately obtained
+  extras; the installer neither discovers nor bundles a patch and does not
+  rewrite the original scripts. Shortcuts retain bin/kabus22 --data game.
+  OpenGL, Vulkan raster and Vulkan RT consume the same engine-prepared camera,
+  UI and hit geometry. Authored signed ARC/ASPECT is retained; this is not an
+  inferred Hor+ conversion, exact patch restyling or a Bonus widescreen algorithm.
+  Already-patched K22Widescreen.wdl and custom --script behavior are unchanged.
+
+  Ghidra-recovered indexed PCX FONT semantics retain indices and use the
+  normalized active RGB palette, not the embedded PCX palette or index-as-alpha.
+  Palette selection is inputbasename.raw, then palette.raw, then RGB332 fallback;
+  index 0 is black, index 255 white, and dark nonzero entries are lifted to 8.
+  World palette events refresh cached FONT images; ordinary BMAP embedded-palette
+  decoding is unchanged. Fonts and patch assets are not redistributed: user media
+  supplies the game fonts. All eight genuine original Font0 load-menu rows have
+  OpenGL/Vulkan raster/RT glyph-pixel evidence at the WM-clamped 2560x1377 window,
+  with authored spacing and source text alpha 50 unchanged. At 5120x1440, evidence
+  is headless producer/API geometry only. The extreme 16384x720 selected-slot
+  viewport clipping is API-only evidence, not GPU/WSI or all eight rows at once.
+
+  Current-source standalone qualification (supplied parent evidence): fresh
+  shipping-library original-ISO OpenGL/Vulkan raster/RT consumers exercised
+  source-input menus/FONT rows and HUD/pause/map/fades/projection/extreme API;
+  all six native CTests and installer CTests passed. This does not qualify a
+  corrected AppImage, complete NewGame/playthrough, steady CPU performance,
+  older-CPU execution or Windows parity. Freeze this source before release
+  assembly; corrected v0.1.1 build/qualification/publication remain pending.
+
+  --display native|authored selects native adaptation or original scripted
+  display services/presets. Native defaults to desktop-sized borderless;
+  --resolution WIDTHxHEIGHT selects windowed/fullscreen dimensions from
+  1280x720 up to16384 per dimension; unset/either zero uses desktop for both.
+  --window-mode windowed|fullscreen|borderless selects the native window mode;
+  borderless always uses desktop dimensions. Headless/custom incidental defaults
+  are unchanged. Saves/configuration remain in the existing private XDG location.
+
+  Published v0.1.0 predates this correction:
+    https://github.com/sergen213/kabus22-linux/releases/tag/v0.1.0
+  Intended corrected release destination, pending actual build/qualification
+  and publication by the release owner:
+    https://github.com/sergen213/kabus22-linux/releases/tag/v0.1.1
+  This source-policy description is not a corrected artifact or verification
+  receipt. Release assets must include a fresh AppImage, matching dependency
+  source sidecar, exact tagged native-source archive and SHA256SUMS, retaining
+  the helper/runtime source locations, licenses and replacement routes below.
+  All historical hashes/receipts below describe their stated earlier artifacts.
+  Full campaign/Bonus playthrough, steady campaign CPU performance, older-CPU
+  execution and complete original-Windows parity remain unestablished.
+
 Bundle layout:
   AppRun                         cwd-independent native installer argv forwarding
   usr/bin/kabus22-setup           actual native GTK installer
@@ -119,7 +174,7 @@ dynamic-library replacement/source compliance review, not a public release.
 It freezes OpenGL before subsequent Vulkan work and includes no Vulkan/hardware
 RT backend. No full campaign/Bonus playthrough or older-CPU execution is claimed.
 
-ISO alone and optional patch:
+Historical frozen OpenGL artifact: ISO alone and optional patch:
   The same frozen OpenGL AppImage completed default-runtime CLI installation
   with the supplied ISO and no --patch: exit0 in110.37s. Private iso-only
   integrity-result.json records532 files,137 archive/game files, zero size/hash
@@ -128,10 +183,10 @@ ISO alone and optional patch:
   Original native600-frame startup exited0 in9.21534108s within20s on actual
   AMD OpenGL4.6/swap1, showing authentic FIP PUBLISHING bitmap PANEL at1024x768.
   Receipts are in the release cache's iso-only/ directory; see CONTRACT44.
-  Original scripts retain authored legacy resolution modes. Explicit optional
-  Kabus22Patch selection provides its desktop-resolution/borderless/menu/HUD
-  layout; it is not auto-discovered or bundled. Native GPU improvements and
-  pacing are patch-independent, but this authored widescreen UI needs the patch.
+  In that earlier artifact, original scripts retain authored legacy resolution
+  modes. Explicit optional Kabus22Patch supplies its desktop-resolution/
+  borderless/menu/HUD layout; it is not auto-discovered or bundled. Those
+  receipts predate the current-source native ISO-only correction above.
   Script camera.widescreen=false remains intact; no automatic Hor+ is claimed.
   Startup proof is not full original-menu/New Game/campaign acceptance.
 

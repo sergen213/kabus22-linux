@@ -9,6 +9,7 @@
 #include <random>
 #include <unordered_map>
 #include <optional>
+#include <unordered_set>
 namespace k22 {
 class Runtime;
 struct TextureSample;
@@ -35,6 +36,8 @@ public:
  void prepare(Runtime&);
  EntityData& register_entity(ObjectId);
  void configure_language(Runtime&,std::string_view,bool explicitChoice);
+ // Only an auto-selected original campaign graph is eligible; custom/patch/Bonus retain authored services.
+ bool configure_display(Runtime&,bool originalCampaignEntry,bool native=true,int width=0,int height=0,WindowMode mode=WindowMode::Borderless);
  void resolve_builtin_font();
  Value builtin(Runtime&,ProcessContext&,std::string_view,std::span<const Argument>);
  std::optional<Value> service_builtin(Runtime&,ProcessContext&,std::string_view,std::span<const Argument>);
@@ -98,6 +101,16 @@ private:
  friend class Physics;
  friend std::optional<Value> worldModelBuiltin(Engine&,Runtime&,ProcessContext&,std::string_view,std::span<const Argument>);
  void initialize_globals();void make_frame(bool mouseOutput=true);void update_input(Runtime&);void update_ui(Runtime&);
+ bool display_admitted();void prepare_display();float display_aspect(float authored)const;
+ bool nativeDisplay_=false;int displayWidth_=0,displayHeight_=0;
+ ObjectId displayResolution_=0,displayScale_=0,displayScale2_=0,displayFont_=0;
+ enum class DisplayRole { Ordinary,MapPixel,Grid,Fill,IntroTitle,EyeRight,EyeLeft,Text,LoadList,LoadCursor,Credit,CreditFrame,InventoryLabel,Document,Bar,Boss,BossEnergy,Pause,Menu,Gameplay };
+ struct DisplayObject {ObjectId id;DisplayRole role;int index=0;float menuY=0;bool menuPrepared=false;ObjectId bitmap=0;Vec2 bitmapSize{};float bossScaleX=0;};
+ std::vector<DisplayObject> displayObjects_;
+ std::array<char,32> displayLabel_{};
+ std::array<ObjectId,3> displayScrolls_{};
+ int displayLoadScroll_=0,displayLoadBudget_=0;
+ std::unordered_set<ObjectId> displayFills_;
  void level_progress(Runtime&,std::int64_t stage);
  float levelPercent_=0,levelQuantum_=0;double levelCallbackTime_=0;
  bool pendingExit_=false;Value exitMessage_;
@@ -153,7 +166,11 @@ private:
  std::array<int,7> a6LegacyTextureTemps_{},a7LegacyTextureTemps_{};
  bool a7WorldQueryRoute_=false; // 1005af0a latches global-WMB info bit4; not a network/CONNECTION flag.
  struct Button {Rect rect;FunctionId callback=0,leaveCallback=0,overCallback=0;ObjectId owner=0;int declaration=0;float angle=0;};std::vector<Button> buttons_;
- std::deque<std::string> uiText_;std::size_t uiTextUsed_=0;std::unordered_map<ObjectId,FontAtlas> bitmapFonts_;std::vector<ObjectId> uiObjects_;
+ struct BitmapFont {FontAtlas atlas;std::vector<std::uint8_t> indices;};
+ std::deque<std::string> uiText_;std::size_t uiTextUsed_=0;std::unordered_map<ObjectId,BitmapFont> bitmapFonts_;std::vector<ObjectId> uiObjects_;
+ std::array<std::uint8_t,768> fontPalette_{};std::uint64_t fontPaletteSerial_=0;
+ void ensure_font_palette(std::string_view entry);
+ void set_font_palette(std::span<const std::uint8_t>);
  std::unordered_map<ObjectId,const FontAtlas*> systemFonts_;
  std::array<Slot*,128> keyboard_{},keyboardCallbacks_{};
  std::array<std::array<Slot*,12>,2> joystick_{},joystickCallbacks_{};
