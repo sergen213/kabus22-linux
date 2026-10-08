@@ -1,0 +1,354 @@
+Kabus22 native installer packaging notice
+
+The packager tools/package_kabus_appimage.py assembles a genuine x86-64 Type-2
+ELF AppImage with a SquashFS payload. It does not build the engine, execute any
+Windows game/setup program, or include original game data, scripts, proprietary
+SDKs, mod archives or game artwork. The generic SVG icon is packaging artwork;
+the installer obtains original game artwork only from user-supplied media.
+
+Bundle layout:
+  AppRun                         cwd-independent native installer argv forwarding
+  usr/bin/kabus22-setup           actual native GTK installer
+  usr/bin/kabus22                 actual native game engine
+  usr/bin/innoextract             signed upstream native amd64 Inno helper
+  usr/lib/*.so[.N]               native non-host dependency closure
+  usr/share/glib-2.0/schemas      required GTK3 chooser/settings schemas
+  usr/share/licenses/kabus22     runtime/helper/dependency notices and provenance
+  usr/share/kabus22/packaging.json exact build input and ABI provenance
+
+Executables use $ORIGIN/../lib, shared libraries use $ORIGIN, and AppRun never
+sets LD_LIBRARY_PATH. glibc, GPU drivers and GL/Vulkan loader interfaces remain
+host-owned. The exact required GNU symbol versions, ELF GNU ISA properties and
+installed distro library CPU architectures are reported. Missing ISA properties
+do not establish baseline CPU compatibility. The verified Ubuntu24-baseline
+image requires GLIBC2.38 by its actual imported symbol versions. Generic x86-64
+compilation and ISA-property checks are not runtime proof on older CPUs.
+
+The upstream innoextract 1.9 amd64 binary, official author key, detached archive
+signature, verified corresponding source and original third-party notices are
+retained in helper-innoextract. Its original binary SHA256 is
+7a8ad941deeb0de8d1f804830f339fd17e27cfbce473615d79d1d65c106884e9.
+The private CachyOS x86_64_v3 helper under reverse/tools is not a release input.
+
+uruntime v0.8.1 is the pinned fully static upstream ELF runtime:
+https://github.com/VHSgunzo/uruntime/releases/download/v0.8.1/uruntime-appimage-squashfs-lite-x86_64
+Original SHA256: 32c6024a14ff375749ee3bed3330c1586a6dd2bfeddbbd7ceacc053aec2b27a3
+The documented fixed-width URUNTIME_EXTRACT=3 -> 2 policy patch enables FUSE
+first with unconditional extraction fallback; upstream extraction cleanup stays
+active. runtime-uruntime retains pinned corresponding runtime/helper source,
+build scripts/patches, GPL/LGPL texts, permissive notices and Cargo attribution.
+The assembled image records original and modified runtime checksums.
+
+Distribution-library licenses/package versions/CPU architecture are collected
+from the exact build environment package database. Authenticated corresponding
+Ubuntu source packages, dependency recipes, custom FFmpeg source/signature and
+the hash-checked ODE source/patch recipes are published in the source sidecar.
+Installed dependency notices/provenance include its receipt; keep that archive
+beside the image when distributing. This is not legal certification or a grant
+of the native project's license. Extracting the AppImage permits replacement
+of shared libraries; installed notices remain with the native runtime.
+
+Verified baseline build/assembly path with the pinned toolchain image:
+  tools/build_kabus_baseline.sh "$PWD/build-baseline" kabus22-ubuntu24-toolchain
+The driver mounts source read-only, builds as the current user and publishes
+offline after authenticated source acquisition. No ISO/assets/user data enter
+the toolchain image or AppImage. Output/report/source-sidecar paths must be new.
+Build-time Python3.11+, readelf, patchelf, ldconfig, mksquashfs, unsquashfs,
+glib-compile-schemas and the supported dpkg/apt or pacman package evidence are
+required. Private patchelf is only a build tool, not application payload.
+The packager's --self-check exercises policy without accepting dummy binaries.
+
+An assembled and inventory-checked image is not full acceptance. The parent
+must exercise actual AppImage native GTK launch, automatic FUSE fallback,
+original ISO installation, original artwork, cancellation/source preservation,
+quoted desktop shortcuts/private saves and actual native OpenGL gameplay before
+claiming success. The packaging tool never uploads releases.
+
+Current OpenGL closure evidence (2026-10-08):
+  reverse/decompiled/runtime/CONTRACT.txt sections41-42 records the native-name
+  dispatch correction and current graphics/fixture fixes. Parent receipts in
+  the private OpenGL closure cache record all6 checks passing
+  in4.3403s and actual RX7900XTX OpenGL consumer success in0.6437s.
+  Original SourceAPI private Save/Load menus and the Start6 actor consumer passed
+  in22.6953s using authentic ISO+patch assets; this is not a manually walked
+  campaign or complete checkpoint/gameplay acceptance.
+  The current real graphical asset-free11-frame pacing check passed, including
+  live20->40FPS changes and zero/negative cap handling.
+  A bounded420-frame current-native run exited0 in10.8094s and captured the
+  authentic FIP PUBLISHING bitmap PANEL at5120x2880, not a publisher movie.
+  Original source timing plus actual postdraw239 empty UI/movies and its sleep
+  state explains black240; the separate black600 source phase is unclassified.
+
+The previously published OpenGL AppImage SHA256
+e04565fbf9987182f4d85ff09ed2758d44f5e5f6c90e4e3f62798224de78e7dd
+and its corresponding-source sidecar predate the closure changes. The frozen
+local refresh and actual installed startup are identified below; this does not
+establish authorization for public redistribution. Original assets remain
+user-supplied.
+Full campaign/Bonus playthrough, older-CPU runtime compatibility, Vulkan and
+hardware ray tracing are not established by these OpenGL closure receipts.
+
+Frozen local OpenGL artifact and installed-runtime evidence:
+  build-opengl-verified/Kabus22-Linux-Installer-x86_64.AppImage
+  SHA256925735cc13dce28e0cb989cacb112f9d5e482786c16dfdab6d81bc3022704e85
+  Size53380585 bytes; pinned Ubuntu24 baseline builder exit0 in289.63s.
+  Corresponding .AppImage.sources.tar.gz:
+  SHA256a942725c856ae4e01b97413aee80b8b420a9179414fad6c8eba2dafc19808d64
+  Size412521531 bytes. Actual imported GLIBC maximum2.38; asset-free payload,
+  host-owned GPU/loader policy unchanged.
+  Actual packaged native ELF:
+  SHA256a4ab9f254beeb094fc2e0cc7bf192892641ccdf80842e36f254e7463843e938a
+  This differs from the raw build input after patchelf finalization. Installer
+  identityc6e46bdfe7a0945e9e8002a381480b5ed725d2b1299f07f68b5c900db6c53df5
+  is unchanged,579048 bytes.
+  Default AppImage --help exit0 in6.2179s; fresh default-runtime CLI ISO+patch
+  installation exit0 in111.93s without engine/extractor/library overrides.
+  Actual private desktop Exec/Path target the installed native ELF/game root;
+  private HOME/data/runtime isolate user saves and desktop. Completed integrity
+  audit2.0438s:965 files,570 game assets,96 libraries, zero size/hash mismatches;
+  all570 assets exactly match the prior authentic ISO+patch installation.
+  Installed native ELF matches the packaged inventory; private applications/
+  Desktop shortcuts are byte-identical, mode0700. PPM header confirms5120x2880.
+  Installed native600-frame startup exit0 in8.681452566s within20s captured
+  authentic FIP PUBLISHING bitmap PANEL at5120x2880 on AMD RX7900XTX OpenGL.
+  No input/game-state/source modifications; exact-owned children were reaped.
+  Receipts: the private OpenGL release cache and CONTRACT43.
+
+This is a private local artifact pending redistribution authorization and LGPL
+dynamic-library replacement/source compliance review, not a public release.
+It freezes OpenGL before subsequent Vulkan work and includes no Vulkan/hardware
+RT backend. No full campaign/Bonus playthrough or older-CPU execution is claimed.
+
+ISO alone and optional patch:
+  The same frozen OpenGL AppImage completed default-runtime CLI installation
+  with the supplied ISO and no --patch: exit0 in110.37s. Private iso-only
+  integrity-result.json records532 files,137 archive/game files, zero size/hash
+  mismatches, original archive present and K22Widescreen.wrs absent; installed
+  native ELF matches the frozen package and private shortcuts match, mode0700.
+  Original native600-frame startup exited0 in9.21534108s within20s on actual
+  AMD OpenGL4.6/swap1, showing authentic FIP PUBLISHING bitmap PANEL at1024x768.
+  Receipts are in the release cache's iso-only/ directory; see CONTRACT44.
+  Original scripts retain authored legacy resolution modes. Explicit optional
+  Kabus22Patch selection provides its desktop-resolution/borderless/menu/HUD
+  layout; it is not auto-discovered or bundled. Native GPU improvements and
+  pacing are patch-independent, but this authored widescreen UI needs the patch.
+  Script camera.widescreen=false remains intact; no automatic Hor+ is claimed.
+  Startup proof is not full original-menu/New Game/campaign acceptance.
+
+Native Vulkan development qualification (not the frozen OpenGL artifact above):
+  --renderer vulkan enables hardware ray tracing; --ray-tracing off selects
+  raster only. Default remains OpenGL. Vulkan1.3 and required GPU features are
+  checked explicitly; unsupported requests fail without silent fallback.
+  RT needs ray queries/acceleration structures/BDA/descriptor indexing/int64;
+  the RT texture table has an explicit1024-entry ceiling. Host Vulkan loader/
+  ICD remains host-owned; embedded SPIR-V needs no runtime shader compiler.
+  Corrected actual GL/Vulkan raster/RT consumers passed on AMD RX7900XTX in
+  1.465s/2.249s/0.953s. Vulkan synchronization validation reported zero errors.
+  Real pixels exercise native materials/lighting/alpha/turbulence, GPU animated
+  geometry, ray visibility and layered real-geometry reflections. All six
+  native checks passed in2.33s; scoped source review found no blocker.
+  Native patched-game Vulkan RT420-frame startup exited0 in13.702s within20s;
+  actual5120x2880 capture shows authentic FIP PUBLISHING bitmap PANEL.
+  This is startup/UI proof, not3D gameplay or full campaign/Bonus acceptance.
+  No input/script/state hacks; owned game child exited and was reaped.
+  See CONTRACT45 and native-vulkan-rt-420-result.json in the release cache.
+  Updated installer source offers explicit Vulkan RT/raster desktop actions,
+  but the frozen925735 AppImage above does not contain these newer features.
+  Unrecovered nondefault stencil/software-world-light/VIEW render-to-bitmap
+  routes remain unsupported; public redistribution authorization is unchanged.
+  Current development CPU receipts use sequential180-frame empty-asset runs
+  with generated FPS_MAX=60/wait loop, zero actors and no input. All exited0:
+  OpenGL wall4.475727s/CPU0.375467s (8.38896 percent of one core);
+  Vulkan raster wall3.426399s/CPU0.353340s (10.3123 percent);
+  Vulkan RT wall3.800422s/CPU0.907551s (23.8803 percent).
+  Whole-child ratios include startup and Vulkan private synchronization
+  validation overhead, not steady original-campaign CPU/FPS/world benchmarks.
+  Owned20-second deadlines applied; children reaped, no background game remains.
+  Current11-frame pacing passed in4.6394s:20FPS50.049ms,40FPS28.564/29.602ms,
+  zero/-10 cap1000ms, dynamic20->40 speedup checked. Actual readelf has no
+  libvulkan DT_NEEDED entry; Vulkan remains an explicitly selected loader path.
+  Receipts: steady-cpu-result.json, current-pacing-result.json and
+  current-dynamic-result.json in the release cache; see CONTRACT45.
+  Subsequent authentic-world consumer and packaged-runtime evidence is recorded
+  below and in CONTRACT46-47; the frozen OpenGL artifact remains distinct.
+
+Authentic Vulkan world consumer (CONTRACT46):
+  Original SourceAPI private level18/Start6 save/load and actor/morph paths
+  produce an authored world packet retaining the main/attached portal graph.
+  Original entry0/WMB player birth is preserved; save files do not store XYZ.
+  Actual RT three-draw960x540 consumer passed including purge/reupload/release:
+  11 posed actors,119 instances,57 models,81 textures,19938 world triangles,
+  24 lightmaps/23 bound. Total33.16187s includes headless setup; GPU phase has
+  a20-second alarm, zero VUID/SYNC errors. Parent inspected authentic corridor/
+  player capture, not a valid walked/restored spatial checkpoint. The level18
+  Start6 entry0 fixture preserves authored WMB birth;131 genuine gravity calls
+  leave XYZ unchanged. authentic-start6-grounding-result.json exited0 in25.87049s
+  including headless setup, with a separate20-second GPU alarm.
+  Source-recovered original A6 BSP replay (not Windows execution) selects narrow
+  root2015/section14, startingContent=-128, status0x12, no contact plane/Normal0,
+  rejected rawresult=-1024; observed native plain TRACE returns raw0 and
+  NormalRaw(-694,752,10). Neither can lift invalid entry0 via NormalZ==1.
+  This is the pre-cutover discrepancy; current source-qualified shared-kernel
+  acceptance is below/CONTRACT48, not in the earlier06c81... package.
+
+Corrected host-Wayland Vulkan artifact (CONTRACT47):
+  First image5543ee97... built/installed but failed installed Vulkan: bundled
+  Wayland1.22 collided with host RADV's wl_display_create_queue_with_name.
+  It is not an accepted Vulkan runtime or shipping recommendation. Its help/
+  self-check6.32/6.30s results are not assigned to the corrected image.
+  Existing HOST policy now excludes the narrow Wayland client/cursor/egl/server
+  family from bundling; parent policy self-check passed. Offline repackage40.57594s:
+  build-vulkan-verified/Kabus22-Linux-Installer-HostWayland-x86_64.AppImage
+  SHA25606c81bbc94a447d0d5d12f37a953abd13e8e1af15a69ce6fd9e53ce2600443db
+  Size53545620 bytes. Corresponding source sidecar:
+  SHA256c88066236d3151e4149e27bbb54da023766d8c9f3008927cc6d4326e562d9a31
+  Size412140895 bytes. Native ELF443963f6... and installerbd185111... unchanged
+  through repackaging; full identities in CONTRACT47. GLIBC maximum2.38;
+  Wayland remains host-owned, native DT_NEEDED has no libvulkan.
+  Fresh default-runtime install112.28s; installed600-frame RT/raster/GL each
+  exit0 within20s in9.248464/8.944885/8.326853s, zero VUID/SYNC errors. Parent
+  inspected all three authentic FIP PUBLISHING bitmap PANEL captures2560x1440,
+  confirmed by native PPM headers; no cause of the dimension change is inferred.
+  Earlier20-second OpenGL comparison was censored, not a confirmed renderer bug.
+  Corrected integrity audit:953 files,570 game files,93 libraries, zero size/hash
+  mismatches;570 assets match authentic data, packaged ELF matches, two shortcuts
+  identical0700, no Wayland bundled, actual image/source hashes match above.
+  Corrected installed desktop action Exec values parsed from the actual file
+  ran with --frames12: RTexit0 in1.3992s, rasterexit0 in.8486s, no VUID/SYNC/
+  undefined-symbol errors,27 original processes/3 entities, private save root.
+  host-wayland-verification/desktop-actions-result.json proves bounded command
+  execution, not desktop-shell/GUI clicks.
+  Desktop RT/raster actions were verified in the first installation. Corrected
+  06c81... default --help exited0 in6.744941s and --self-check exited0 in6.232327s,
+  distinct from first5543... CLI evidence. Corrected GTK surface shows native
+  controls and the exact user-supplied Kabus 22.iso. At6.8959s the worker was
+  still inspecting ISO9660 media; no ready
+  artwork, GUI install or launch-click proof, and no UI input/install click.
+  Corrected helper acceptance remains pending; no new final package acceptance.
+  Additional installer-preview-qualified-result.json/PNG shows actual client
+  PID818918/XID20971523, supplied ISO/native controls, and "Extracting and testing
+  source members", not ready artwork. No input/Install/Launch click. Owned worker
+  received watchdog SIGTERM at20s and was reaped exit0; total22.1174s includes
+  post-exit capture/receipt, not within20-second wall-time preview acceptance.
+  Receipts: release cache host-wayland-verification/ and
+  kabus22-vulkan-release-v1aby5fz/. All games reaped; user state untouched.
+  Local/private artifact only; redistribution/LGPL, older-CPU and full campaign/
+  Bonus acceptance remain unestablished. Frozen OpenGL image is unchanged.
+
+Source-qualified A6 query cutover (CONTRACT48; in final39a122..., not06c81...):
+  Immutable WMB sections5/9/10/14 and original point-BSP metadata feed the shared
+  allocation-free legacy kernel, signed ordinary correction and status/TARGET/
+  Normal publication; VIEW-bound presentation entities are excluded physically.
+  Private floor prepared outputs no longer overwrite public scratch; genuine
+  trace_hit700 isolation passes without save/restore.
+  A6 c_trace USE_BOX+MY preparation recovered from00472030/00470a50 covers public
+  bounds/XOR hull globals/MOVE_BUFFER, zero-length51/1024, nonpositive-span1,
+  rotated midpoint/no SCALE; c_move actor origin is applied once. A7/ODE unchanged.
+  Genuine distance4/asymmetric-noScale2 tests remain, no Bonus-profile workaround.
+  Review scope is input preparation, not complete oriented-solver bit parity.
+  a6-modern-hull-ctest-result.json: all6PASS, exit0,4.861s. Final authentic A6
+  helper compile2.604s/runtime29.173s exit0,131 original TRACE calls raw-1024,
+  Normal0/TARGETsource with unchanged authored XYZ, matching static original
+  BSP replay, not Windows execution. Three960x540 Vulkan RT submissions with
+  purge/reupload/release pass, no VUID/SYNC; GPU own20s alarm. Entry0 remains
+  invalid spatial-checkpoint admission; no actor-offset/rendering hack.
+  Fresh authentic-start6-final-a6-opengl-result.json exit0,27.764s, actual AMD
+  OpenGL4.6, three960x540 draws/purge/reupload/release with own20s GPU alarm;
+  same131 TRACE results/authored XYZ. Parent inspected final OpenGL/RT PNGs.
+  This authentic-world success does not erase the host GL suite failure below.
+  Consumer-only WSI oracle now checks actual admission/retirement/pending deltas,
+  not submission/filled queue per draw attempt; no production renderer change.
+  Corrected raster2.564s/later2.6869s and RT.9303s pass. Prior GL1.2241s/authentic
+  world GL28.998s passed, but preceding host GL transition ladder failed1.0155s
+  with X11 BadMatch/X_SetInputFocus. SDL2-compat/SDL3 focus remapping is plausible,
+  not exact-phase proof. Subsequent classic SDL2.30 shipping-baseline qualification
+  below passes; historical host failure retained, no suppression/retry hack.
+  Receipts in release cache: authentic-start6-final-a6-result.json,
+  legacy-bsp-{authentic-assets,pacing,final-gpu}-result.json and
+  vulkan-presentation-{diagnostic,corrected}-result.json; full scope in CONTRACT48.
+  Earlier06c81.../native443963f6... does not contain this cutover; final39a122...
+  does. Earlier artifact/startup receipts remain historical, not final acceptance.
+
+Final frozen private baseline delivery (postassembly qualification,2026-10-08):
+  build-legacy-bsp-verified/Kabus22-Linux-Installer-x86_64.AppImage
+  SHA25639a122dd67f85ab9919fba5e5326d32aba462d3377cfd72a0d617a85ae86ff5a
+  Size53570448 bytes; asset-free627-member Ubuntu24 x86-64 Type-2 payload.
+  Matching .AppImage.sources.tar.gz, size412140658 bytes:
+  SHA256d025f9ae657f776d7674b0f7c759d255bc8bed5a44a61d431cd203a34af10365
+  Packaged/installed native ELF, size2978905 bytes:
+  SHA256824d3cd5641614edbe150392f3eef0dcf7ef0e2dcfa9bea03266c94cd4b13d03
+  Packaged setup ELF, size579216 bytes:
+  SHA256bd185111d7497c4063583e99351fb6c2ca03164cf90a0612b59abec2c68c9a96
+  These are patchelf-final identities, distinct from raw build inputs; installed
+  inventory retains the native game ELF, not an installed setup ELF.
+  GLIBC maximum2.38; older-CPU runtime compatibility remains unproved.
+  GL/Vulkan loaders, GPU drivers and narrow Wayland SONAME family stay host-owned;
+  native RPATH=$ORIGIN/../lib, no libvulkan DT_NEEDED. Dependency sidecar covers
+  exact Ubuntu dependencies, selected ODE and approved LGPL FFmpeg build evidence,
+  not native-project corresponding source, a public source offer or permission
+  to redistribute. The private/public-release gate remains unchanged.
+
+  Final package supports default OpenGL; --renderer vulkan selects hardware RT,
+  --renderer vulkan --ray-tracing off selects raster. Vulkan1.3/required-feature
+  gates fail explicitly without silent fallback; RT retains1024-texture ceiling.
+  Embedded SPIR-V needs no runtime shader compiler. Nondefault stencil/software-
+  world-light/VIEW render-to-bitmap remain unsupported. ISO alone works; explicitly
+  selected user-supplied Kabus22Patch provides its authored widescreen/borderless
+  UI, not automatic Hor+ or bundled/auto-discovered patch data.
+
+  Final receipts: the private OpenGL release cache's final-qualification folder;
+  full evidence/limitations in CONTRACT48.
+  Default AppImage help/self-check exit0 in6.302764/6.313584s; fresh default-runtime
+  CLI ISO+patch install exit0 in150.487871s without engine/extractor overrides.
+  Integrity953 files/570 game files/93 libraries, zero hash/size mismatches;
+  authentic570-asset inventory equal, native matches above, no bundled Wayland,
+  applications/Desktop shortcuts byte-identical0700 with quoted native/data
+  paths and RT/raster actions. Actual image/dependency-sidecar hashes match above.
+  Shipping-baseline consumers with all93 shipping libraries passed real RX7900XTX
+  GL full window-transition ladder.987453s/Vulkan raster2.359757s/RT.680225s,
+  no VUID/SYNC errors (baseline-gpu-correct-root-result.json). This qualifies the
+  packaged classic SDL closure without erasing the host SDL2-compat failure.
+  baseline-gpu-result.json retains the earlier invalid data-root invocation,
+  rejected before GPU admission; corrected caller prerequisite, not source hack.
+  baseline-world-{opengl,vulkan}-result.json: shipping-baseline core/authentic
+  installed assets, exit0 in4.140872/5.454424s, three960x540 draws, purge/reupload/
+  release under20s, captures parent-inspected. SourceAPI Start6 entry0 authored
+  spawn intersects the floor/startsolid hull;131 TRACE calls preserve XYZ,
+  raw-1024/Normal0/TARGETsource matching static A6 recovery. It is not a played/
+  restored spatial checkpoint, fixed grounding or original Windows-runtime proof.
+  Final installed patched600-frame GL/raster/RT startup exit0 within20s in
+  11.492595/9.994490/10.477496s; parent inspected2560x1440 FIP bitmap PANELs.
+  Actual desktop Exec values parsed/executed with --frames12: RT1.783235s/
+  raster.919786s exit0, no VUID/SYNC; not desktop-shell action-click proof.
+  Fresh ISO-only final install121.05s (artifact3010, iso-only-q57hsim5/):
+  520 files/137 game/archive files/93 libraries, zero mismatches,137 authentic
+  original assets equal, same native824d... and no widescreen assets.
+  Original unpatched GL600 frames exit0 in9.692267s within20s; parent inspected
+  authentic FIP bitmap PANEL1024x768, not campaign gameplay.
+  Installed11-frame pacing passed6.186469s:20FPS50.476/51.941ms,40FPS28.564/
+  25.024ms, dynamic20->40 speedup and zero/-10 cap TIME_FRAME1000ms. Earlier
+  .171555s failure "x11 not available" omitted DISPLAY/XAUTHORITY in restored
+  environment; only prerequisite corrected, no source fix/warning suppression.
+  Sequential empty-asset180-frame cap60 GL/raster/RT exit0 in3.271523/3.254611/
+  3.240432s, CPU4.47/6.42/12.07 percent of one core. Startup/Vulkan validation
+  included; not steady campaign CPU/FPS/world benchmarks.
+  final-installer-gui-result.json/final-installer-window.png: actual final39 GTK
+  with exact ISO selected,4 percent "Staging original ISO setup slices".
+  Computer session-closed error preceded owned-XID23068675 ffmpeg capture exit0,
+  parent-inspected. No ready artwork, GUI Install or Launch interaction proved.
+  Owned installer killed/reaped(-9) in1.039684s within20s; preview proof only.
+  Graphical children sequential/owned20s/reaped, private HOME/XDG saves/runtime/
+  desktop; no background game remains. Startup/UI/API/GPU evidence is not a full
+  campaign/Bonus playthrough, older-CPU execution or original Windows parity.
+
+The frozen image's installed dependencies/NOTICE.txt is the preassembly snapshot:
+SHA25629da87cfc9782e7a502a4d0dd3f124c4a5b83aa4d145a8df06005a6e474ea6f2.
+Its pending wording predates these postassembly receipts. Repository NOTICE/
+CONTRACT carry final qualification externally; no circular rebuild/repackage to
+embed the image's own hash was performed. Final artifact remains local/private,
+not a public release; redistribution authorization and LGPL dynamic-library
+replacement/source-compliance review remain unresolved.
+Final cleanup-result.json records no remaining native game/installer processes;
+temporary helper source/CPU fixture/consumer executables removed, receipts and
+captures retained. Parent's postproof hashes still match39a122.../d025f9...;
+no further runtime or reassembly followed.

@@ -1,0 +1,139 @@
+# Toolchain only: build with Dockerfile on stdin, without a repository context.
+# Sources, ISO, assets and user files enter only through runtime bind mounts.
+FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive \
+    CC=/usr/bin/gcc-13 CXX=/usr/bin/g++-13 \
+    CFLAGS="-march=x86-64 -mtune=generic" \
+    CXXFLAGS="-march=x86-64 -mtune=generic" \
+    PKG_CONFIG_PATH=/opt/kabus22-ffmpeg/lib/pkgconfig
+# BuildKit downloads the exact official package with host TLS, before the minimal
+# image has CA trust. SHA256 comes from the authenticated pinned Ubuntu index.
+ADD --checksum=sha256:6bac2a01979e210d9eac1d4d56747ec709ea60654744d66705dc3c36e7629e50 https://snapshot.ubuntu.com/ubuntu/20261007T000000Z/pool/main/c/ca-certificates/ca-certificates_20260601~24.04.1_all.deb /opt/kabus22-baseline/bootstrap/ca-certificates_20260601~24.04.1_all.deb
+RUN <<'PROVISION'
+set -eu
+mkdir -p /opt/kabus22-baseline /work
+printf '%s\n' 'ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55' > /opt/kabus22-baseline/base-image.txt
+printf '%s\n' '20261007T000000Z' > /opt/kabus22-baseline/snapshot.txt
+# Snapshot HTTP redirects to HTTPS. Bootstrap only from the authenticated
+# package's Mozilla PEM payload, without disabling either TLS or APT checks.
+bootstrap=/opt/kabus22-baseline/bootstrap
+# Only the public archive changes mode; ADD --chmod also affects created parents.
+chmod 0644 "$bootstrap/ca-certificates_20260601~24.04.1_all.deb"
+printf '%s\n' '6bac2a01979e210d9eac1d4d56747ec709ea60654744d66705dc3c36e7629e50  /opt/kabus22-baseline/bootstrap/ca-certificates_20260601~24.04.1_all.deb' | sha256sum --check
+dpkg-deb --extract "$bootstrap/ca-certificates_20260601~24.04.1_all.deb" "$bootstrap/payload"
+cat "$bootstrap"/payload/usr/share/ca-certificates/mozilla/*.crt > "$bootstrap/ca-bundle.pem"
+test -s "$bootstrap/ca-bundle.pem"
+printf '%s\n' 'Acquire::https::CaInfo "/opt/kabus22-baseline/bootstrap/ca-bundle.pem";' > /etc/apt/apt.conf.d/99kabus22-bootstrap-ca
+cp /etc/apt/apt.conf.d/99kabus22-bootstrap-ca "$bootstrap/apt-ca-bootstrap.conf"
+cat > "$bootstrap/provenance.txt" <<'CA_PROVENANCE'
+Snapshot: 20261007T000000Z
+Suite: noble-updates (same package also in noble-security)
+Signed-InRelease-SHA256: 1ba35ee59c0c7c430601e8715ad6379c9e0bbd77960d4246175abc2eb132da42
+InRelease-Signer: F6ECB3762474EDA9D21B7022871920D1991BC93C
+Index: main/binary-amd64/Packages.xz
+Signed-Index-SHA256: c3e6f3736d8103235a48d0a322576662b80bedb5b37ed71a4d7c71fa499c6383
+Package: ca-certificates
+Architecture: all
+Version: 20260601~24.04.1
+Filename: pool/main/c/ca-certificates/ca-certificates_20260601~24.04.1_all.deb
+Size: 139430
+SHA256: 6bac2a01979e210d9eac1d4d56747ec709ea60654744d66705dc3c36e7629e50
+CA_PROVENANCE
+rm -f /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources
+cat > /etc/apt/sources.list.d/ubuntu.sources <<'SOURCES'
+Types: deb deb-src
+URIs: https://snapshot.ubuntu.com/ubuntu/20261007T000000Z/
+Suites: noble noble-updates noble-security
+Components: main universe
+Architectures: amd64
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+SOURCES
+apt-get update --error-on=any 2>&1 | tee /opt/kabus22-baseline/apt-update.txt
+printf '%s\n' \
+ 'cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0  /var/lib/apt/lists/snapshot.ubuntu.com_ubuntu_20261007T000000Z_dists_noble_InRelease' \
+ '1ba35ee59c0c7c430601e8715ad6379c9e0bbd77960d4246175abc2eb132da42  /var/lib/apt/lists/snapshot.ubuntu.com_ubuntu_20261007T000000Z_dists_noble-updates_InRelease' \
+ '27b649589af352e3c6980b1e88431b5555209191fc52a02decf8f4bab74f1aff  /var/lib/apt/lists/snapshot.ubuntu.com_ubuntu_20261007T000000Z_dists_noble-security_InRelease' \
+ | sha256sum --check
+apt-get install -y --no-install-recommends \
+ gcc-13 g++-13 cmake ninja-build pkg-config python3 binutils patchelf \
+ squashfs-tools ca-certificates=20260601~24.04.1 libglib2.0-bin libsdl2-dev libepoxy-dev \
+ libvulkan-dev glslang-tools \
+ curl gnupg nasm make xz-utils zlib1g-dev \
+ libfreetype6-dev libfontconfig1-dev libgtk-3-dev libarchive-dev \
+ 2>&1 | tee /opt/kabus22-baseline/apt-install.txt
+# ca-certificates postinst now supplies the normal system trust store.
+# Keep the bootstrap package/PEM/notice/evidence, not the temporary APT override.
+rm /etc/apt/apt.conf.d/99kabus22-bootstrap-ca
+cp -a /etc/apt /opt/kabus22-baseline/apt-config
+cp /etc/os-release /opt/kabus22-baseline/os-release
+cp /var/lib/dpkg/status /opt/kabus22-baseline/dpkg-status
+# Preserve authenticated indexes (including deb-src) for exact source acquisition,
+# package versions, signed Release evidence and offline packaging. Do not clean lists.
+dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\t${source:Package}\t${source:Version}\t${db:Status-Status}\n' \
+ > /opt/kabus22-baseline/installed-packages.tsv
+apt-get indextargets > /opt/kabus22-baseline/apt-indextargets.txt
+if ! getent passwd 1000 >/dev/null; then useradd --create-home --uid 1000 builder; fi
+chmod 0777 /work
+PROVISION
+RUN <<'FFMPEG'
+set -eu
+root=/opt/kabus22-ffmpeg
+evidence=$root/share/kabus22-ffmpeg
+mkdir -p "$evidence" /tmp/ffmpeg-build
+cd "$evidence"
+curl --fail --location --proto '=https' --tlsv1.2 -O https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz
+curl --fail --location --proto '=https' --tlsv1.2 -O https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz.asc
+curl --fail --location --proto '=https' --tlsv1.2 -O https://ffmpeg.org/ffmpeg-devel.asc
+printf '%s\n' \
+ '8684f4b00f94b85461884c3719382f1261f0d9eb3d59640a1f4ac0873616f968  ffmpeg-6.1.1.tar.xz' \
+ 'e1aa97244d6d61b508ae06a71c7b8362b3b1733459a3fc1f2efa5d85456135d3  ffmpeg-6.1.1.tar.xz.asc' \
+ '397b3becedcd5a98769967ff1ff8501ddc89f8368b8f766e4701377d7dbaabe5  ffmpeg-devel.asc' | sha256sum --check
+export GNUPGHOME=/tmp/ffmpeg-build/keyring
+mkdir -m 0700 "$GNUPGHOME"
+gpg --batch --import ffmpeg-devel.asc
+gpg --batch --status-fd 1 --verify ffmpeg-6.1.1.tar.xz.asc ffmpeg-6.1.1.tar.xz > signature-status.txt
+tar -xJf ffmpeg-6.1.1.tar.xz -C /tmp/ffmpeg-build
+cd /tmp/ffmpeg-build/ffmpeg-6.1.1
+# Default internal codecs/demuxers remain enabled. Only GPL, nonfree and
+# implicit external libraries are forbidden; zlib is explicitly LGPL-compatible.
+./configure --prefix="$root" --cc=/usr/bin/gcc-13 --cxx=/usr/bin/g++-13 \
+ --cpu=x86-64 --extra-cflags='-march=x86-64 -mtune=generic' \
+ --enable-shared --disable-static --disable-programs --disable-doc \
+ --disable-gpl --disable-nonfree --disable-autodetect --enable-zlib \
+ 2>&1 | tee "$evidence/configure-output.txt"
+make -j2 2>&1 | tee "$evidence/build-output.txt"
+make install 2>&1 | tee "$evidence/install-output.txt"
+cp config.h config_components.h ffbuild/config.mak ffbuild/config.log "$evidence/"
+cp LICENSE.md COPYING.LGPLv2.1 COPYING.LGPLv3 COPYING.GPLv2 COPYING.GPLv3 "$evidence/"
+cp libavcodec/jfdctfst.c libavcodec/jfdctint_template.c libavcodec/jrevdct.c "$evidence/"
+printf '%s\n' 'This software is based in part on the work of the Independent JPEG Group. The bundled FFmpeg 6.1.1 source files jfdctfst.c, jfdctint_template.c and jrevdct.c are unmodified.' > "$evidence/IJG-NOTICE.txt"
+python3 - <<'MANIFEST'
+import hashlib, json
+from pathlib import Path
+root = Path("/opt/kabus22-ffmpeg")
+evidence = root / "share/kabus22-ffmpeg"
+config = (evidence / "config.h").read_text()
+for option in ("GPL", "NONFREE", "VERSION3"):
+    assert f"#define CONFIG_{option} 0" in config, option
+assert "VALIDSIG FCF986EA15E6E293A5644F10B4322F04D67658D8 " in (evidence / "signature-status.txt").read_text()
+versions = {"avformat": "60.16.100", "avcodec": "60.31.102", "avutil": "58.29.100", "swscale": "7.5.100", "swresample": "4.12.100"}
+files = list(evidence.iterdir())
+for name, version in versions.items():
+    files.append(root / f"lib/lib{name}.so.{version}")
+    files.append(root / f"lib/pkgconfig/lib{name}.pc")
+    files.extend((root / "include" / ("lib" + name)).rglob("*.h"))
+inventory = {}
+for path in sorted(files):
+    assert path.is_file() and not path.is_symlink(), path
+    data = path.read_bytes()
+    inventory[str(path.relative_to(root))] = {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+(evidence / "inventory.json").write_text(json.dumps({"version": "6.1.1", "license": "LGPL-2.1-or-later", "library_versions": versions, "files": inventory}, indent=2, sort_keys=True) + "\n")
+MANIFEST
+printf '%s\n' /opt/kabus22-ffmpeg/lib > /etc/ld.so.conf.d/kabus22-ffmpeg.conf
+ldconfig
+rm -rf /tmp/ffmpeg-build
+FFMPEG
+USER 1000:1000
+WORKDIR /work
+CMD ["/bin/bash"]
