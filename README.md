@@ -18,9 +18,11 @@ Download the **v0.1.0 experimental prerelease** from [GitHub Releases](https://g
 Download these assets together:
 
 - `Kabus22-Linux-Installer-x86_64.AppImage` — native installer, engine and bundled non-host libraries.
-- `Kabus22-Linux-Installer-x86_64.AppImage.sources.tar.gz` — matching dependency/helper/runtime corresponding sources, build recipes and notices.
-- `native-source.tar.gz` — native project/build/test sources from the exact Git commit tagged `v0.1.0`, also available through the release's Git source links.
+- `Kabus22-Linux-Installer-x86_64.AppImage.sources.tar.gz` — matching distribution-library/FFmpeg/ODE corresponding sources, dependency build recipes and notices.
+- `native-source.tar.gz` — native project/build/test sources and the reviewed `packaging/helper-innoextract/` and `packaging/runtime-uruntime/` source/notice inventories from the exact Git commit tagged `v0.1.0`, also available through the release's Git source links.
 - `SHA256SUMS` — checksums of the three release assets above.
+
+Helper/runtime corresponding sources are in those `packaging/` paths of `native-source.tar.gz`, and inside the extracted AppImage at `usr/share/licenses/kabus22/innoextract` and `usr/share/licenses/kabus22/uruntime`; they are **not** in the dependency sidecar. Uruntime's MIT license is distinct from its separately executed GPL-containing squashfuse/unsquashfs helpers (including GPL LZO and, in squashfuse, LGPL libfuse). Their complete retained sources/static build recipes provide the rebuild/relink route; the [packaging notice](packaging/NOTICE.txt) identifies these boundaries and the preserved component attributions.
 
 From the download directory, verify the files before execution:
 

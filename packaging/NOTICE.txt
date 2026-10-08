@@ -366,18 +366,24 @@ Planned public v0.1.0 prerelease policy (2026-10-08):
   .AppImage.sources.tar.gz dependency source sidecar, native-source.tar.gz
   from the exact tagged native-project Git commit, and SHA256SUMS covering
   those three assets. The dependency sidecar supplies exact authenticated
-  distribution sources, helper/runtime sources, selected ODE sources and
-  custom FFmpeg/SDL build recipes/notices; it is not a substitute for the
-  separately published native-project sources. Preserve both archives and
-  installed notices with redistribution. No project-wide license is assigned;
-  existing file/component licenses remain applicable, including libgamestudio
-  MIT attribution, ODE/OU BSD and the runtime/dependency license texts.
+  distribution-library sources, selected ODE sources and custom FFmpeg sources,
+  plus dependency build recipes/notices; it is not a substitute for the
+  separately published native-project sources. Helper/runtime corresponding
+  sources and notices are in packaging/helper-innoextract/ and
+  packaging/runtime-uruntime/ of native-source.tar.gz, and in the extracted
+  AppImage's usr/share/licenses/kabus22/{innoextract,uruntime} directories.
+  They are not in the dependency sidecar. Preserve both archives and installed
+  notices with redistribution. No project-wide license is assigned; existing
+  file/component licenses remain applicable, including the complete
+  libgamestudio MIT notice and OPCODE BSD attribution below, ODE/OU BSD and
+  the separately inventoried runtime/dependency license texts.
 
-  Dynamic-library replacement uses the extracted AppImage payload or installed
-  native tree: usr/lib in the payload, lib beside bin in the installation.
-  The existing relative ELF RPATHs resolve these libraries without a forced
-  LD_LIBRARY_PATH. ABI-compatible rebuilt shared libraries may replace bundled
-  libraries in those writable trees; retain the applicable sources/notices.
+  For dynamic-library replacement, extract in a writable directory:
+    ./Kabus22-Linux-Installer-x86_64.AppImage --appimage-extract
+  Replace ABI-compatible regular shared-library ELF files in squashfs-root/usr/lib
+  and launch ./squashfs-root/AppRun, or replace INSTALL_ROOT/lib beside the
+  installed INSTALL_ROOT/bin/kabus22. Existing relative ELF RPATHs resolve
+  these libraries without a forced LD_LIBRARY_PATH; retain sources/notices.
   glibc, GL/Vulkan loaders, GPU drivers and the narrow Wayland library family
   remain host-owned. Source inventories, build recipes and packaging.json
   identify the actual dependency/build closure; they are technical compliance
@@ -393,3 +399,57 @@ Planned public v0.1.0 prerelease policy (2026-10-08):
   Windows parity remain unproved; nondefault stencil/software-world-light/
   VIEW render-to-bitmap routes remain unsupported. Public user authorization
   does not remove these technical limitations or certify legal compliance.
+
+Embedded runtime helper license boundaries:
+  The Rust uruntime program is MIT-licensed; that does not relicense its
+  embedded helper executables. It executes squashfuse and unsquashfs as
+  separate executables through memfd (or a temporary executable fallback).
+  The retained squashfuse-static recipe statically links GPL LZO and LGPL-2.1
+  libfuse into squashfuse. The retained squashfs-tools-static recipe enables
+  LZO in the GPL unsquashfs executable. These are GPL-containing helper
+  combinations, distinct from the native engine/installer and the shared
+  LGPL dependency libraries.
+  Complete helper/library sources, static build wrappers/patches and GPL/LGPL
+  texts are retained in packaging/runtime-uruntime/ of native-source.tar.gz
+  and usr/share/licenses/kabus22/uruntime in the extracted AppImage. Its
+  sources/{squashfuse-static,squashfs-tools-static,uruntime}.tar.gz recipes
+  and the accompanying libfuse/LZO/compression-library sources provide the
+  static rebuild/relink route, including rebuilding with modified libraries.
+  This is not a claim of bit-reproducible historical upstream helper builds.
+  The separate innoextract helper's sources/provenance and bundled-library
+  notices (including GPLv3 and GCC Runtime Library Exception texts) are in
+  packaging/helper-innoextract/ of native-source.tar.gz and
+  usr/share/licenses/kabus22/innoextract in the extracted AppImage.
+
+libgamestudio notice (preserved from native/assets.cpp):
+Format descriptions and normal table adapted from libgamestudio:
+Copyright (c) 2022 Felix "xq" Queißner
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+OPCODE - Optimized Collision Detection:
+Copyright (C) 2001 Pierre Terdiman
+Homepage: http://www.codercorner.com/Opcode.htm
+  The pinned ODE source archive's OPCODE/COPYING states:
+    The OPCODE library distributed as part of ODE is licensed under
+    the same terms as ODE (LGPLv2.1+ and BSD).
+  This build selects the BSD alternative for ODE and its enabled OPCODE
+  component. The complete selected BSD terms are retained in
+  usr/share/licenses/kabus22/dependencies/ode/ode-LICENSE-BSD.TXT in the
+  AppImage (source checkout: third_party/ode-LICENSE-BSD.TXT); the pinned
+  source archive retains the
+  original OPCODE/COPYING and author notices. This selection does not assign
+  a license to unrelated native-project code.
