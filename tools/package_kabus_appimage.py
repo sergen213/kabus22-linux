@@ -746,7 +746,7 @@ def build(args) -> None:
                   "cpu_policy": "Reject GNU ISA-needed properties above x86-64-baseline and GLIBC imports above 2.39. Absence of an ISA note is not proof of baseline CPU compatibility; amd64 is package architecture, not CPU proof. No portable-release assertion.",
                   "runtime": runtime_report, "licenses": license_report,
                   "ubuntu": distro, "corresponding_source": source_report,
-                  "public_release_gate": "Private artifact only pending redistribution authorization and LGPL dynamic-library replacement/source compliance review. This packager assigns no license to the native project. Ubuntu GPL FFmpeg binaries are not permitted in this closure.",
+                  "public_release_gate": "Publication requires project-owner authorization, matching corresponding sources/notices, LGPL replacement/relink access and separate runtime qualification. This packager assigns no native-project license and does not publish or certify legal compliance. Ubuntu GPL FFmpeg binaries are not permitted in this closure.",
                   "patchelf": {"path": str(patcher), "sha256": digest(patcher), "version": patch_version},
                   "acceptance": "Assembly/integrity checks only. Parent must exercise actual AppImage GTK launch, original ISO installation, native game, shortcuts, cancellation and private saves; ELF identities cannot prove gameplay."}
         internal_report = appdir / "usr/share/licenses/kabus22/dependencies/packaging.json"
