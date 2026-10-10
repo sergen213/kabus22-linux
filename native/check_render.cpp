@@ -1846,6 +1846,16 @@ void graphics_policy_checks() {
     for(auto t:tangents)require(std::abs(t.x-1)<1e-6f&&std::abs(t.y)<1e-6f&&std::abs(t.z)<1e-6f,"tangent follows +U");
     Model flat=quad;for(auto&v:flat.vertices)v.uv={0.5f,0.5f};derive_tangents(flat,{},{},tangents);
     for(auto t:tangents)require(t.x==0&&t.y==0&&t.z==0,"UV-degenerate tangent stays zero");
+    // Smooth normals: position-welded, corner-angle weighted, crease-limited (60 degrees), oriented like the authored normals.
+    Model fold;const std::array<Vec3,9>corners{{{0,0,0},{1,0,0},{0,1,0},{0,0,0},{0,1,0},{-1,0,0},{0,0,0},{0,1,0},{0,1,1}}};
+    for(auto p:corners)fold.vertices.push_back({p,{0,0,1},{},{}});fold.triangles={{{0,1,2},0,0},{{3,4,5},0,0},{{6,7,8},0,0}};
+    auto near=[](Vec3 a,Vec3 b){return std::abs(a.x-b.x)<1e-5f&&std::abs(a.y-b.y)<1e-5f&&std::abs(a.z-b.z)<1e-5f;};
+    std::vector<Vec3>smooth(9,Vec3{0,0,1});std::vector<float>pn(9);smooth_normals(fold,{},smoothCrease,smooth,pn);
+    require(near(smooth[0],{0,0,1})&&near(smooth[3],smooth[0])&&near(smooth[6],smooth[0]),"crease drops the perpendicular face from the welded corner");
+    require(near(smooth[8],{1,0,0})&&near(smooth[2],{0.70710678f,0,0.70710678f})&&near(smooth[7],smooth[2]),"faces within the crease average by corner angle");
+    require(pn[0]==0&&pn[6]==0&&pn[1]==1&&pn[2]>0&&pn[2]<1&&pn[7]==pn[2],"PN weight flattens corners whose shared normal misses an adjacent face");
+    std::fill(smooth.begin(),smooth.end(),Vec3{0,0,-1});smooth_normals(fold,{},smoothCrease,smooth);
+    require(near(smooth[0],{0,0,-1})&&near(smooth[8],{-1,0,0}),"smoothed normals keep the authored orientation");
     // Tone curve: identity through the knee (dark scenes unchanged), strictly monotonic, bounded, exact 8-bit inverse.
     float last=-1;for(int i=0;i<=4000;++i){float x=i/1000.f,y=tone_map(x);require(y>last&&y<1,"tone map monotonic and bounded");last=y;}
     for(int v=0;v<=202;++v)require(std::abs(tone_map(v/255.f)-v/255.f)<1e-6f,"tone map preserves values below the knee");

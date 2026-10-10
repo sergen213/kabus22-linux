@@ -294,6 +294,8 @@
 !/native/shaders/raster_uniform.glsl
 !/native/shaders/ray_query.glsl
 !/native/shaders/scene.frag
+!/native/shaders/scene.tesc
+!/native/shaders/scene.tese
 !/native/shaders/scene.vert
 !/native/shaders/shadow.frag
 !/native/shaders/shadow.geom

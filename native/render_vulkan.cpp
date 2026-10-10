@@ -139,7 +139,7 @@ VulkanBackend::State::State(SDL_Window* w,const RenderOptions& o):window(w),opti
         if(!SDL_Vulkan_CreateSurface(window,instance,&surface)) throw std::runtime_error(SDL_GetError());
         require(vkEnumeratePhysicalDevices(instance,&count,nullptr),"Enumerating Vulkan devices"); std::vector<VkPhysicalDevice> devices(count);
         require(vkEnumeratePhysicalDevices(instance,&count,devices.data()),"Reading Vulkan devices");
-        std::string failures; int best=-1;
+        std::string failures; int best=-1; bool tessellation{};
         for(auto candidate:devices) {
             VkPhysicalDeviceProperties p{}; vkGetPhysicalDeviceProperties(candidate,&p);
             std::uint32_t n{}; require(vkEnumerateDeviceExtensionProperties(candidate,nullptr,&n,nullptr),"Querying Vulkan device extensions"); std::vector<VkExtensionProperties> ext(n); require(vkEnumerateDeviceExtensionProperties(candidate,nullptr,&n,ext.data()),"Reading Vulkan device extensions");
@@ -160,7 +160,7 @@ VulkanBackend::State::State(SDL_Window* w,const RenderOptions& o):window(w),opti
             if(family==UINT32_MAX) missing="combined graphics/compute/present queue";
             if(!missing.empty()) { failures+=std::string(p.deviceName)+": unsupported "+missing+"; "; continue; }
             int score=p.deviceType==VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU?3:p.deviceType==VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU?2:1;
-            if(score>best) {physical=candidate; properties=p; queueFamily=family; bufferAddressEnabled=f12.bufferDeviceAddress; best=score;}
+            if(score>best) {physical=candidate; properties=p; queueFamily=family; bufferAddressEnabled=f12.bufferDeviceAddress; tessellation=features.features.tessellationShader; best=score;}
         }
         if(!physical) throw std::runtime_error("No suitable Vulkan device: "+failures+(o.rayTracing?"select --ray-tracing off for raster-only rendering":""));
         vkGetPhysicalDeviceMemoryProperties(physical,&memoryProperties); rayEnabled=o.rayTracing;
@@ -168,7 +168,9 @@ VulkanBackend::State::State(SDL_Window* w,const RenderOptions& o):window(w),opti
         VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR}; acceleration.accelerationStructure=rayEnabled; acceleration.pNext=rayEnabled?&ray:nullptr;
         VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES}; f13.dynamicRendering=VK_TRUE; f13.synchronization2=VK_TRUE; f13.pNext=rayEnabled?&acceleration:nullptr;
         VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES}; f12.bufferDeviceAddress=bufferAddressEnabled; f12.runtimeDescriptorArray=rayEnabled; f12.shaderSampledImageArrayNonUniformIndexing=rayEnabled; f12.pNext=&f13;
-        VkPhysicalDeviceFeatures features{}; features.geometryShader=VK_TRUE; features.shaderClipDistance=VK_TRUE; features.samplerAnisotropy=VK_TRUE; features.shaderInt64=rayEnabled; features.shaderSampledImageArrayDynamicIndexing=rayEnabled;
+        // tessellation is optional: an unsupported request is dropped with a notice instead of failing device selection.
+        if(options.features.tessellation&&!tessellation){std::fprintf(stderr,"kabus22: graphics: tessellation unsupported by %s; disabling it\n",properties.deviceName);options.features.tessellation=false;}
+        VkPhysicalDeviceFeatures features{}; features.geometryShader=VK_TRUE; features.shaderClipDistance=VK_TRUE; features.samplerAnisotropy=VK_TRUE; features.shaderInt64=rayEnabled; features.shaderSampledImageArrayDynamicIndexing=rayEnabled; features.tessellationShader=options.features.tessellation;
         const float priority=1; VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}; queueInfo.queueFamilyIndex=queueFamily; queueInfo.queueCount=1; queueInfo.pQueuePriorities=&priority;
         std::vector<const char*> deviceExtensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
         if(rayEnabled) deviceExtensions.insert(deviceExtensions.end(),{VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,VK_KHR_RAY_QUERY_EXTENSION_NAME});

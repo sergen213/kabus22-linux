@@ -62,10 +62,15 @@ vec3 shadowMappedNativeDynamic(vec3 p,vec3 n){
     result=clamp(result,0,1);unshadowed=clamp(unshadowed,0,1);
     return vertexDynamicLight*vec3(unshadowed.x>0?result.x/unshadowed.x:1,unshadowed.y>0?result.y/unshadowed.y:1,unshadowed.z>0?result.z/unshadowed.z:1);
 }
+// smooth_normals/tessellation (pipeline specialization): a smooth normal may face away from the camera near silhouettes
+// although its facet faces it, so the G-buffer orients it by the camera-facing facet normal (computed in main).
+layout(constant_id=0) const bool k22SmoothNormals=false;
+vec3 facet=vec3(0);
 // Primary-view fragments whose depth equals the G-buffer prepass sample use the screen-space RT signals.
 bool onSignalPixel(){return (k22RtSignals&7)!=0&&abs(texelFetch(gbufferDepth,ivec2(gl_FragCoord.xy),0).r-gl_FragCoord.z)<=1e-5;}
 vec4 gbufferData(vec2 coord){
     vec3 n=normalize(worldNormal);if(dot(n,cameraPosition-worldPosition)<0.0)n=-n;
+    if(k22SmoothNormals){n=normalize(worldNormal);if(dot(n,facet)<0.0)n=-n;}
     vec2 o=n.xy/(abs(n.x)+abs(n.y)+abs(n.z));if(n.z<0.0)o=(1.0-abs(o.yx))*vec2(o.x>=0.0?1.0:-1.0,o.y>=0.0?1.0:-1.0);
     float flags=(hasLightmap?1.0:0.0)+(worldVertexLighting?2.0:0.0)+((unlit||explicitMaterial||effectKind!=0)?4.0:0.0)+(!portalEnabled&&reflectionWeight>0.0?8.0:0.0);
     return vec4(o,k22PbrOn&&k22RoughnessMap?texture(pbrOrm,coord).g:0.0,flags);
@@ -130,6 +135,7 @@ vec3 enhancedBaked(vec3 p,vec3 n){
 }
 void main(){
     if(skyMask){color=vec4(1);return;}
+    if(k22SmoothNormals&&k22Pass==2){facet=cross(dFdx(worldPosition),dFdy(worldPosition));if(dot(facet,cameraPosition-worldPosition)<0.0)facet=-facet;}
     vec2 coord=uv*uvScale+uvOffset;vec4 texel;
     // Sprite frame f sits at cell (f mod cols, f div cols); cols=1/uvScale.x (one row for an ordinary strip, engine.cpp load_entity_asset).
     if(spriteFrames>1){float cols=floor(1.0/uvScale.x+0.5),f0=float(frame0),f1=float(frame1);texel=mix(texture(skin,coord+vec2(mod(f0,cols)/cols,floor(f0/cols)*uvScale.y)),texture(skin,coord+vec2(mod(f1,cols)/cols,floor(f1/cols)*uvScale.y)),interpolation);}else texel=texture(skin,coord);
