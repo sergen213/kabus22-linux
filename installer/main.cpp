@@ -531,7 +531,7 @@ int main(int argc, char** argv) {
     try {
         auto options = arguments(argc, argv);
         if (options.help) {
-            std::cout << Version << "\nUsage: kabus22-setup [--source GAME.iso|setup.exe|WINDOWS_GAME_FOLDER] [--install-dir NEW_DIRECTORY]\n"
+            std::cout << Version << "\nUsage: kabus22-setup [--source GAME.iso|setup.exe|WINDOWS_GAME_FOLDER] [--install-dir DIRECTORY]\n"
                 "                     [--patch PATCH_DIRECTORY] [--engine NATIVE_ELF] [--launcher SETTINGS_ELF]\n"
                 "                     [--updater UPDATER_ELF] [--extractor INNOEXTRACT] [--unattended]\n"
                 "       kabus22-setup --verify [--install-dir ROOT] [--json]\n"
