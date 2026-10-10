@@ -62,11 +62,31 @@ add_custom_command(OUTPUT "${K22_SHADER_HEADER}"
   DEPENDS ${K22_SHADER_OUTPUTS} "${CMAKE_CURRENT_SOURCE_DIR}/native/embed_spirv.py"
   VERBATIM)
 include(cmake/KabusODE.cmake)
+# AMD FidelityFX SDK v1.1.4 / FSR 3.1.4 upscaler + Vulkan backend (MIT; third_party/FidelityFX-SDK/KABUS-PROVENANCE.txt).
+# tools/k22_fsr3_blobs.py replaces the SDK's Windows-only FidelityFX_SC: SPIR-V + descriptor reflection.
+set(K22_FFX "${CMAKE_CURRENT_SOURCE_DIR}/third_party/FidelityFX-SDK")
+set(K22_FFX_BLOBS "${CMAKE_CURRENT_BINARY_DIR}/k22_fsr3_blobs.h")
+file(GLOB_RECURSE K22_FFX_GPU CONFIGURE_DEPENDS "${K22_FFX}/sdk/include/FidelityFX/gpu/*.h" "${K22_FFX}/sdk/src/backends/vk/shaders/*.glsl")
+add_custom_command(OUTPUT "${K22_FFX_BLOBS}"
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/k22_fsr3_blobs.py" --glslang "${K22_GLSLANG_VALIDATOR}"
+    --sdk "${K22_FFX}" --output "${K22_FFX_BLOBS}"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/k22_fsr3_blobs.py" ${K22_FFX_GPU}
+  VERBATIM)
+set(K22_FFX_SOURCES "${K22_FFX}/sdk/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp" "${K22_FFX}/sdk/src/backends/vk/ffx_vk.cpp"
+  "${K22_FFX}/sdk/src/shared/ffx_assert.cpp" "${K22_FFX}/sdk/src/shared/ffx_message.cpp"
+  "${K22_FFX}/sdk/src/shared/ffx_object_management.cpp" "${K22_FFX}/sdk/src/shared/ffx_breadcrumbs_list.cpp")
+add_library(kabus22_fsr3 STATIC ${K22_FFX_SOURCES} native/fsr_vk.cpp "${K22_FFX_BLOBS}")
+set_source_files_properties(${K22_FFX_SOURCES} PROPERTIES COMPILE_OPTIONS "-w") # upstream sources (local patches: KABUS-PROVENANCE.txt)
+target_include_directories(kabus22_fsr3 SYSTEM PRIVATE "${K22_FFX}/sdk/include" "${K22_FFX}/sdk/src/shared"
+  "${K22_FFX}/sdk/src/backends/shared" "${K22_FFX}/sdk/src/components" "${CMAKE_CURRENT_BINARY_DIR}" ${Vulkan_INCLUDE_DIRS})
+target_include_directories(kabus22_fsr3 PRIVATE native)
+target_compile_options(kabus22_fsr3 PRIVATE -include "${CMAKE_CURRENT_SOURCE_DIR}/third_party/k22-ffx-posix/k22_ffx_posix.h")
+install(FILES "${K22_FFX}/LICENSE.txt" DESTINATION share/doc/kabus22/third_party RENAME FidelityFX-SDK-LICENSE.txt)
 add_library(kabus22_core native/engine.cpp native/wdl.cpp native/assets.cpp native/render.cpp
   native/render_gl.cpp native/render_vulkan.cpp native/render_vulkan_raster.cpp native/render_vulkan_rt.cpp native/vulkan_loader.cpp
   native/media.cpp native/physics.cpp native/texture_pack.cpp native/controller.cpp native/saves.cpp "${K22_SHADER_HEADER}")
 target_include_directories(kabus22_core PUBLIC native PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${Vulkan_INCLUDE_DIRS})
-target_link_libraries(kabus22_core PUBLIC PkgConfig::SDL2 PkgConfig::EPOXY PkgConfig::AV PkgConfig::FREETYPE PkgConfig::FONTCONFIG Threads::Threads ODE ${CMAKE_DL_LIBS})
+target_link_libraries(kabus22_core PUBLIC PkgConfig::SDL2 PkgConfig::EPOXY PkgConfig::AV PkgConfig::FREETYPE PkgConfig::FONTCONFIG Threads::Threads ODE ${CMAKE_DL_LIBS} PRIVATE kabus22_fsr3)
 target_compile_options(kabus22_core PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(kabus22 native/main.cpp native/scenario.cpp)
 target_link_libraries(kabus22 PRIVATE kabus22_core)

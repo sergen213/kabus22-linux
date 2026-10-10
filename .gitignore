@@ -619,3 +619,9 @@
 !/native/shaders/tonemap.frag
 !/native/texture_pack.cpp
 !/native/texture_pack.hpp
+# AMD FidelityFX SDK v1.1.4 FSR 3.1.4 upscaler subset (MIT, third_party/FidelityFX-SDK/KABUS-PROVENANCE.txt).
+!/native/fsr_vk.cpp
+!/native/fsr_vk.hpp
+!/tools/k22_fsr3_blobs.py
+!/third_party/FidelityFX-SDK/
+!/third_party/k22-ffx-posix/

@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
@@ -32,9 +34,12 @@ void garbage(VulkanBackend::State& s,VulkanBackend::State::Slot& slot) {
 void retire_slot(VulkanBackend::State& s,unsigned index,bool account=true) {
     auto& slot=s.slots[index];
     if(!slot.pending) return;
+    const auto start=std::chrono::steady_clock::now();
     require(vkWaitForFences(s.device,1,&slot.fence,VK_TRUE,UINT64_MAX),"Waiting for Vulkan frame");
+    s.timing.fence+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
     slot.pending=false; --s.pending;
     if(account) ++s.waits;
+    s.account(slot);
     garbage(s,slot);
 }
 void destroy_target(VulkanBackend::State& s,vk22::Target& t) {
@@ -49,7 +54,7 @@ void destroy_swapchain(VulkanBackend::State& s) {
 void cleanup(VulkanBackend::State& s) {
     if(s.device) {
         vkDeviceWaitIdle(s.device);
-        s.raster.reset(); s.rays.reset();
+        s.raster.reset(); s.rays.reset(); s.fsr.reset();
         destroy_target(s,s.scene); destroy_target(s,s.alpha); destroy_target(s,s.portal); destroy_target(s,s.hdr); s.destroy(s.finalImage);
         for(auto& slot:s.slots) {
             garbage(s,slot);
@@ -57,6 +62,7 @@ void cleanup(VulkanBackend::State& s) {
             if(slot.acquired) vkDestroySemaphore(s.device,slot.acquired,nullptr);
             if(slot.rendered) vkDestroySemaphore(s.device,slot.rendered,nullptr);
             if(slot.pool) vkDestroyCommandPool(s.device,slot.pool,nullptr);
+            if(slot.queries) vkDestroyQueryPool(s.device,slot.queries,nullptr);
         }
         destroy_swapchain(s); vkDestroyDevice(s.device,nullptr); s.device=VK_NULL_HANDLE;
     }
@@ -119,7 +125,7 @@ void create_swapchain(VulkanBackend::State& s,WindowMetrics metrics) {
     require(vkGetSwapchainImagesKHR(s.device,s.swapchain,&count,s.swapImages.data()),"Reading Vulkan swapchain images"); s.swapLayouts.assign(count,VK_IMAGE_LAYOUT_UNDEFINED); s.swapRendered.resize(count);
     VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO}; for(auto& handle:s.swapRendered) require(vkCreateSemaphore(s.device,&semaphore,nullptr,&handle),"Creating Vulkan present semaphore");
     if(s.extent.width!=size.width||s.extent.height!=size.height) {
-        destroy_target(s,s.scene); destroy_target(s,s.alpha); destroy_target(s,s.portal); destroy_target(s,s.hdr); s.destroy(s.finalImage);
+        destroy_target(s,s.scene); destroy_target(s,s.alpha); destroy_target(s,s.portal); destroy_target(s,s.hdr); s.destroy(s.finalImage); s.fsr.reset();
         s.retainedColorValid=s.portalColorValid=s.finalValid=false;
     }
     s.extent=size; s.swapDirty=false;
@@ -158,6 +164,7 @@ VulkanBackend::State::State(SDL_Window* w,const RenderOptions& o):window(w),opti
             unsigned family=UINT32_MAX;
             for(unsigned i=0;i<n;++i) { VkBool32 present{}; require(vkGetPhysicalDeviceSurfaceSupportKHR(candidate,i,surface,&present),"Querying Vulkan queue presentation"); if(present&&(queues[i].queueFlags&(VK_QUEUE_GRAPHICS_BIT|VK_QUEUE_COMPUTE_BIT))==(VK_QUEUE_GRAPHICS_BIT|VK_QUEUE_COMPUTE_BIT)){family=i;break;} }
             if(family==UINT32_MAX) missing="combined graphics/compute/present queue";
+            else if(o.features.fsr&&missing.empty()) if(auto reason=vk22::Fsr3::unsupported(candidate)) missing=std::string("FSR 3.1 (")+reason+"; select --graphics fsr=off)";
             if(!missing.empty()) { failures+=std::string(p.deviceName)+": unsupported "+missing+"; "; continue; }
             int score=p.deviceType==VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU?3:p.deviceType==VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU?2:1;
             if(score>best) {physical=candidate; properties=p; queueFamily=family; bufferAddressEnabled=f12.bufferDeviceAddress; tessellation=features.features.tessellationShader; best=score;}
@@ -171,6 +178,7 @@ VulkanBackend::State::State(SDL_Window* w,const RenderOptions& o):window(w),opti
         // tessellation is optional: an unsupported request is dropped with a notice instead of failing device selection.
         if(options.features.tessellation&&!tessellation){std::fprintf(stderr,"kabus22: graphics: tessellation unsupported by %s; disabling it\n",properties.deviceName);options.features.tessellation=false;}
         VkPhysicalDeviceFeatures features{}; features.geometryShader=VK_TRUE; features.shaderClipDistance=VK_TRUE; features.samplerAnisotropy=VK_TRUE; features.shaderInt64=rayEnabled; features.shaderSampledImageArrayDynamicIndexing=rayEnabled; features.tessellationShader=options.features.tessellation;
+        if(options.features.fsr){vk22::Fsr3::enable_features(features);options.features.taa=false;} // FSR replaces TAA.
         const float priority=1; VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}; queueInfo.queueFamilyIndex=queueFamily; queueInfo.queueCount=1; queueInfo.pQueuePriorities=&priority;
         std::vector<const char*> deviceExtensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
         if(rayEnabled) deviceExtensions.insert(deviceExtensions.end(),{VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,VK_KHR_RAY_QUERY_EXTENSION_NAME});
@@ -194,6 +202,7 @@ VulkanBackend::State::State(SDL_Window* w,const RenderOptions& o):window(w),opti
             VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO}; allocation.commandPool=slot.pool; allocation.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY; allocation.commandBufferCount=1;
             require(vkAllocateCommandBuffers(device,&allocation,&slot.command),"Allocating Vulkan frame command");
             VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}; fence.flags=VK_FENCE_CREATE_SIGNALED_BIT; require(vkCreateFence(device,&fence,nullptr,&slot.fence),"Creating Vulkan frame fence");
+            if(const char* t=std::getenv("K22_GPU_TIMING");t&&*t=='1'){VkQueryPoolCreateInfo q{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};q.queryType=VK_QUERY_TYPE_TIMESTAMP;q.queryCount=64;require(vkCreateQueryPool(device,&q,nullptr,&slot.queries),"Creating Vulkan timestamp queries");timing.enabled=true;timing.period=properties.limits.timestampPeriod;}
             VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO}; require(vkCreateSemaphore(device,&semaphore,nullptr,&slot.acquired),"Creating Vulkan acquisition semaphore");
         }
         requestedInterval=options.vsync?1:0;
@@ -334,11 +343,16 @@ void VulkanBackend::State::ensure_targets(WindowMetrics metrics){
     if(metrics.drawableWidth<=0||metrics.drawableHeight<=0)return;
     if(swapDirty||!swapchain||extent.width!=static_cast<unsigned>(metrics.drawableWidth)||extent.height!=static_cast<unsigned>(metrics.drawableHeight))create_swapchain(*this,metrics);
     if(!extent.width||!extent.height||swapDirty)return;
-    if(!scene.color.handle){const bool composite=render_policy::composite_enabled(options.pbr,options.features),depthEffects=options.features.ssao||options.features.fog||options.features.taa;auto usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;scene.color=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,usage,1,1,samples);scene.depth=image(extent.width,extent.height,depthFormat,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|(composite?VK_IMAGE_USAGE_TRANSFER_DST_BIT:0)|(depthEffects?VK_IMAGE_USAGE_TRANSFER_SRC_BIT:0),1,1,samples);if(samples!=VK_SAMPLE_COUNT_1_BIT)scene.resolve=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,usage);finalImage=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,usage);
-        if(composite){hdr.color=image(extent.width,extent.height,VK_FORMAT_R16G16B16A16_SFLOAT,usage,1,1,samples);hdr.depth=image(extent.width,extent.height,depthFormat,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT,1,1,samples);if(samples!=VK_SAMPLE_COUNT_1_BIT)hdr.resolve=image(extent.width,extent.height,VK_FORMAT_R16G16B16A16_SFLOAT,usage);}}
+    if(!scene.color.handle){
+        // FSR: background (HDR) views, their effects and ray-traced signals render at the quality mode's render size.
+        render=options.features.fsr?vk22::Fsr3::render_extent(extent,options.features.fsr):extent;
+        if(options.features.fsr)fsr=std::make_unique<vk22::Fsr3>(physical,device,render,extent);
+        const bool composite=render_policy::composite_enabled(options.pbr,options.features),depthEffects=options.features.ssao||options.features.fog||options.features.taa||options.features.fsr;auto usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;scene.color=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,usage,1,1,samples);scene.depth=image(extent.width,extent.height,depthFormat,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|(composite?VK_IMAGE_USAGE_TRANSFER_DST_BIT:0)|(depthEffects?VK_IMAGE_USAGE_TRANSFER_SRC_BIT:0),1,1,samples);if(samples!=VK_SAMPLE_COUNT_1_BIT)scene.resolve=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,usage);finalImage=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,usage);
+        if(composite){hdr.color=image(render.width,render.height,VK_FORMAT_R16G16B16A16_SFLOAT,usage,1,1,samples);hdr.depth=image(render.width,render.height,depthFormat,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT,1,1,samples);if(samples!=VK_SAMPLE_COUNT_1_BIT)hdr.resolve=image(render.width,render.height,VK_FORMAT_R16G16B16A16_SFLOAT,usage);}}
 }
 // Composited (PBR/post) translucent views blend into the HDR target, so their auxiliary color must keep HDR range too.
-void VulkanBackend::State::ensure_auxiliary(vk22::Target& target){if(target.color.handle)return;target.color=image(extent.width,extent.height,render_policy::composite_enabled(options.pbr,options.features)&&&target==&alpha?VK_FORMAT_R16G16B16A16_SFLOAT:VK_FORMAT_R8G8B8A8_UNORM,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);target.depth=image(extent.width,extent.height,depthFormat,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);}
+// Sized like the view's destination (render size for FSR background views, else the display).
+void VulkanBackend::State::ensure_auxiliary(vk22::Target& target,VkExtent2D size){if(target.color.handle&&target.color.width==size.width&&target.color.height==size.height)return;retire(target.color);retire(target.depth);if(&target==&portal)portalColorValid=false;target.color=image(size.width,size.height,render_policy::composite_enabled(options.pbr,options.features)&&&target==&alpha?VK_FORMAT_R16G16B16A16_SFLOAT:VK_FORMAT_R8G8B8A8_UNORM,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);target.depth=image(size.width,size.height,depthFormat,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);}
 void VulkanBackend::State::begin(WindowMetrics metrics,std::int32_t tripleBufferRaw,bool bonus){
     command=VK_NULL_HANDLE;
     if(metrics.drawableWidth<=0||metrics.drawableHeight<=0){finalValid=false;return;}
@@ -346,15 +360,20 @@ void VulkanBackend::State::begin(WindowMetrics metrics,std::int32_t tripleBuffer
     unsigned desired=exclusive&&tripleBufferRaw!=0?2:1;
     int interval=options.vsync&&!(exclusive&&!bonus&&tripleBufferRaw!=0)?1:0;
     if(requestedInterval!=interval){requestedInterval=interval;swapDirty=true;}
-    limit=desired;while(pending>=limit){retire_slot(*this,front);front=(front+1)%slots.size();}
+    // The frame-latency limit bounds GPU submissions (finish); recording into the other, idle slot overlaps the
+    // in-flight frame instead of serializing CPU recording behind the previous frame's GPU work.
+    limit=desired;
     ensure_targets(metrics);if(swapDirty||!swapchain)return;
     auto& slot=slots[slotIndex];if(slot.pending)retire_slot(*this,slotIndex);
     garbage(*this,slot);
+    const auto acquireStart=std::chrono::steady_clock::now();
     VkResult acquired=vkAcquireNextImageKHR(device,swapchain,UINT64_MAX,slot.acquired,VK_NULL_HANDLE,&acquiredIndex);
+    timing.acquire+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-acquireStart).count();
     if(acquired==VK_ERROR_OUT_OF_DATE_KHR){swapDirty=true;ensure_targets(metrics);if(swapDirty)return;acquired=vkAcquireNextImageKHR(device,swapchain,UINT64_MAX,slot.acquired,VK_NULL_HANDLE,&acquiredIndex);}
     if(acquired==VK_ERROR_OUT_OF_DATE_KHR){swapDirty=true;return;}
     if(acquired==VK_SUBOPTIMAL_KHR)swapDirty=true;else require(acquired,"Acquiring Vulkan frame");
     require(vkResetCommandPool(device,slot.pool,0),"Resetting Vulkan frame commands");VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};beginInfo.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;require(vkBeginCommandBuffer(slot.command,&beginInfo),"Beginning Vulkan frame");command=slot.command;
+    if(timing.enabled){vkCmdResetQueryPool(command,slot.queries,0,64);slot.marks.clear();mark("start");}
 }
 void VulkanBackend::State::finish(){
     if(!command)return;auto& slot=slots[slotIndex];
@@ -370,6 +389,7 @@ void VulkanBackend::State::finish(){
     VkDependencyInfo swapDependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};swapDependency.imageMemoryBarrierCount=1;swapDependency.pImageMemoryBarriers=&swapBarrier;
     vkCmdPipelineBarrier2(command,&swapDependency);
     VkImageBlit blit{};blit.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};blit.dstSubresource=blit.srcSubresource;blit.srcOffsets[1]={static_cast<int>(extent.width),static_cast<int>(extent.height),1};blit.dstOffsets[1]=blit.srcOffsets[1];vkCmdBlitImage(command,finalImage.handle,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,swapImages[acquiredIndex],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,VK_FILTER_NEAREST);
+    mark("present_blit");
     // Keep the final layout write in the ALL_COMMANDS signal's execution scope.
     swapBarrier.srcStageMask=VK_PIPELINE_STAGE_2_TRANSFER_BIT;swapBarrier.srcAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
     swapBarrier.dstStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;swapBarrier.dstAccessMask=VK_ACCESS_2_NONE;
@@ -379,8 +399,30 @@ void VulkanBackend::State::finish(){
     VkSemaphoreSubmitInfo wait{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};wait.semaphore=slot.acquired;wait.stageMask=VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     VkSemaphoreSubmitInfo signal{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};signal.semaphore=swapRendered[acquiredIndex];signal.stageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     VkCommandBufferSubmitInfo commands{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};commands.commandBuffer=command;VkSubmitInfo2 submit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};submit.waitSemaphoreInfoCount=1;submit.pWaitSemaphoreInfos=&wait;submit.commandBufferInfoCount=1;submit.pCommandBufferInfos=&commands;submit.signalSemaphoreInfoCount=1;submit.pSignalSemaphoreInfos=&signal;
+    while(pending>=limit){retire_slot(*this,front);front=(front+1)%slots.size();}
     require(vkQueueSubmit2(queue,1,&submit,slot.fence),"Submitting Vulkan frame");if(!pending)front=slotIndex;slot.pending=true;++pending;++submissions;finalSlot=slotIndex;finalSubmission=submissions;finalValid=true;command=VK_NULL_HANDLE;
-    VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};present.waitSemaphoreCount=1;present.pWaitSemaphores=&swapRendered[acquiredIndex];present.swapchainCount=1;present.pSwapchains=&swapchain;present.pImageIndices=&acquiredIndex;auto result=vkQueuePresentKHR(queue,&present);if(result==VK_ERROR_OUT_OF_DATE_KHR||result==VK_SUBOPTIMAL_KHR)swapDirty=true;else require(result,"Presenting Vulkan frame");slotIndex=(slotIndex+1)%slots.size();
+    VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};present.waitSemaphoreCount=1;present.pWaitSemaphores=&swapRendered[acquiredIndex];present.swapchainCount=1;present.pSwapchains=&swapchain;present.pImageIndices=&acquiredIndex;const auto presentStart=std::chrono::steady_clock::now();auto result=vkQueuePresentKHR(queue,&present);timing.present+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-presentStart).count();if(result==VK_ERROR_OUT_OF_DATE_KHR||result==VK_SUBOPTIMAL_KHR)swapDirty=true;else require(result,"Presenting Vulkan frame");slotIndex=(slotIndex+1)%slots.size();
+}
+void VulkanBackend::State::mark(const char* label){
+    if(!timing.enabled||!command)return;auto& slot=slots[slotIndex];if(slot.marks.size()>=64)return;
+    vkCmdWriteTimestamp2(command,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,slot.queries,static_cast<std::uint32_t>(slot.marks.size()));
+    slot.marks.push_back(label);
+}
+void VulkanBackend::State::account(Slot& slot){
+    if(!timing.enabled||slot.marks.size()<2)return;
+    std::array<std::uint64_t,64> t{};
+    require(vkGetQueryPoolResults(device,slot.queries,0,static_cast<std::uint32_t>(slot.marks.size()),sizeof(t),t.data(),sizeof(std::uint64_t),VK_QUERY_RESULT_64_BIT|VK_QUERY_RESULT_WAIT_BIT),"Reading Vulkan timestamps");
+    auto ms=[&](std::size_t a,std::size_t b){return double(t[b]-t[a])*timing.period/1e6;};
+    for(std::size_t i=1;i<slot.marks.size();++i){
+        auto found=std::find_if(timing.gpu.begin(),timing.gpu.end(),[&](const auto& p){return std::strcmp(p.first,slot.marks[i])==0;});
+        if(found==timing.gpu.end()){timing.gpu.emplace_back(slot.marks[i],0.0);found=timing.gpu.end()-1;}
+        found->second+=ms(i-1,i);
+    }
+    timing.gpuTotal+=ms(0,slot.marks.size()-1);slot.marks.clear();
+    if(++timing.frames%300)return;
+    const double n=300;std::string line="kabus22: gpu-timing frames="+std::to_string(timing.frames)+" fps="+std::to_string(1000.0/(timing.interval/n))+" cpu_frame_ms="+std::to_string(timing.interval/n)+" cpu_wait_ms="+std::to_string(timing.cpuWait/n)+" cpu_record_ms="+std::to_string(timing.cpuRecord/n)+" fence_ms="+std::to_string(timing.fence/n)+" acquire_ms="+std::to_string(timing.acquire/n)+" present_ms="+std::to_string(timing.present/n)+" gpu_total_ms="+std::to_string(timing.gpuTotal/n);
+    for(auto& [label,total]:timing.gpu){line+=" ";line+=label;line+="="+std::to_string(total/n);total=0;}
+    std::fprintf(stderr,"%s\n",line.c_str());timing.gpuTotal=timing.cpuWait=timing.cpuRecord=timing.interval=timing.fence=timing.acquire=timing.present=0;
 }
 void VulkanBackend::State::drain(){for(unsigned i=0;i<slots.size();++i)retire_slot(*this,i);front=slotIndex;}
 void VulkanBackend::State::invalidate(){drain();finalValid=false;swapDirty=true;}
@@ -457,11 +499,17 @@ void VulkanBackend::draw(const RenderFrame& frame,WindowMetrics metrics) {
             }
         }
     }
+    using clock=std::chrono::steady_clock;const auto t0=clock::now();
     state_->begin(metrics,frame.tripleBufferRaw,frame.bonusProfile);
+    if(state_->timing.enabled){auto& t=state_->timing;const auto now=t0.time_since_epoch().count();if(t.last)t.interval+=double(now-t.last)/1e6;t.last=now;}
+    const auto t1=clock::now();
     if(!state_->command) return;
     try {
         vk22::raster_draw(*state_->raster,frame,metrics);
+        const auto t2=clock::now();
         state_->finish();
+        // cpu_wait: fence waits, acquire, submit and present; cpu_record: Raster command recording.
+        if(state_->timing.enabled){auto& t=state_->timing;t.cpuRecord+=std::chrono::duration<double,std::milli>(t2-t1).count();t.cpuWait+=std::chrono::duration<double,std::milli>((t1-t0)+(clock::now()-t2)).count();}
     } catch(...) {
         state_->command=VK_NULL_HANDLE;
         state_->finalValid=false;
