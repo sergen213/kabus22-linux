@@ -1591,6 +1591,9 @@ void rt_reflection_checks(std::span<const std::byte> mix,std::span<const std::by
     auto black=flat({0,0,0,255}),blue=flat({0,0,255,255}),green=flat({0,255,0,255});
     auto redHalf=flat({255,0,0,128},true),greenHalf=flat({0,255,0,128},true);
     auto redOpaque=flat({255,0,0,255}),redOpaqueTarget=flat({255,0,0,128}),cutout=flat({255,0,0,0},true);
+    // Renderer textures are keyed by Image*: every image swapped in below outlives the renderer,
+    // so a freed image's address cannot be reused by a later one and hit its stale GPU texture.
+    auto white=flat({255,255,255,255}),mixBase=flat({128,64,32,255}),mixDetail=flat({128,128,0,255}),mixBaseAlpha=flat({128,64,32,255},true);
     auto pattern=std::make_shared<Image>();pattern->width=pattern->height=16;pattern->sourceDepth=16;pattern->nativeStorageBytes=2;
     for(unsigned y=0;y<16;++y)for(unsigned x=0;x<16;++x)
         pattern->rgba.insert(pattern->rgba.end(),{std::uint8_t(x*17),std::uint8_t(y*17),std::uint8_t((x^y)*17),255});
@@ -1642,7 +1645,7 @@ void rt_reflection_checks(std::span<const std::byte> mix,std::span<const std::by
     reflectedMaterial.albedoRaw=102400;
     frame.materials=std::span(&reflectedMaterial,1);
     layers[2].materialIndex=0;
-    rear.materials[0].texture=flat({255,255,255,255});
+    rear.materials[0].texture=white;
     {
         struct ReflectedLightContext {
             NativeEntityLightState returned{255,{},{}};
@@ -1731,8 +1734,8 @@ void rt_reflection_checks(std::span<const std::byte> mix,std::span<const std::by
     reflectedMaterial.effect=Renderer::identify_effect("Normal_Mix.fx",mix);
     reflectedMaterial.effectGeneration=1;
     reflectedMaterial.specular={};
-    rear.materials[0].texture=flat({128,64,32,255});
-    rear.materials.resize(2);rear.materials[1].texture=flat({128,128,0,255});
+    rear.materials[0].texture=mixBase;
+    rear.materials.resize(2);rear.materials[1].texture=mixDetail;
     frame.sunDirection={-1,0,0};
     auto reflectedSkills=[&](std::array<float,8> values){for(unsigned i=0;i<8;++i)reflectedMaterial.skillBits[i]=std::bit_cast<std::uint32_t>(values[i]);};
     reflectedSkills({0,0,.5f,1,0,0,0,0});
@@ -1740,7 +1743,7 @@ void rt_reflection_checks(std::span<const std::byte> mix,std::span<const std::by
     reflectedMaterial.effect=Renderer::identify_effect("Normal_SunMix.fx",sunMix);
     ++reflectedMaterial.effectGeneration;
     expect("Reflected literal Normal_SunMix retains nonzero authored specular",{64,32,16});
-    rear.materials[0].texture=flat({128,64,32,255},true);
+    rear.materials[0].texture=mixBaseAlpha;
     expect("Reflected literal FX full RGBA specular .5 composites alpha .5",{32,16,8});
     frame.materials={};frame.sunDirection={};layers[2].materialIndex=~0u;
     rear.materials.resize(1);rear.materials[0].texture=blue;
