@@ -39,7 +39,7 @@ layout(set=0,binding=4) uniform sampler2D normalSkin;
 // Wave-2: shadow maps (raster fallback) and denoised screen-space ray-traced signals of the primary view.
 layout(set=0,binding=9) uniform sampler2DShadow sunShadowMap;
 layout(set=0,binding=10) uniform samplerCubeShadow cubeShadowMap;
-layout(set=0,binding=11) uniform sampler2D rtMask; // r dynamic-light visibility, g sun visibility, b contact shadow.
+layout(set=0,binding=11) uniform sampler2D rtMask; // r dynamic-light visibility, g sun visibility, b contact shadow, a lightmap actor shadow.
 layout(set=0,binding=12) uniform sampler2D rtGi; // linear one-bounce irradiance (albedo applied here).
 layout(set=0,binding=13) uniform sampler2D rtReflect; // rgb reflected radiance, a transmitted fraction.
 layout(set=0,binding=14) uniform sampler2D gbufferDepth;
@@ -165,7 +165,7 @@ void main(){
     if(!unlit&&!explicitMaterial){
         illumination=hasLightmap?2*clamp(texture(lightmap,lmuv).rgb+vec3(surfaceAmbient),0,1):vec3(materialAmbient);
 #if K22_RAY_QUERY
-        if(signalShadows)illumination*=mask.b;
+        if(signalShadows)illumination*=hasLightmap?mask.b*mask.a:mask.b; // a: actor shadows from the actual lights (rt_signals.comp actorShadow).
 #endif
         vec3 n=normalize(worldNormal);
         if(!hasLightmap){

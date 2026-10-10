@@ -408,6 +408,21 @@ inline int shadow_light_index(std::span<const RenderLight>lights,Vec3 eye){
     }
     return best;
 }
+// shadows=rt actor shadows on lightmapped surfaces (rt_signals.comp): the baked WMB lights whose range sphere is nearest
+// to the camera, then the hardware sun. Independent of the 32-record shading upload, which keeps native slots first.
+constexpr std::size_t actorShadowLightLimit=32;
+inline std::vector<std::uint32_t> actor_shadow_lights(std::span<const RenderLight>lights,Vec3 eye){
+    std::vector<std::uint32_t>baked;int sun=-1;
+    for(std::uint32_t i=0;i<lights.size();++i){
+        const auto&l=lights[i];if(!(l.intensity>0)||l.color.r+l.color.g+l.color.b<=0)continue;
+        if(l.baked&&l.range>0)baked.push_back(i);else if(sun<0&&l.synthetic&&l.type==3)sun=int(i);
+    }
+    auto gap=[&](std::uint32_t i){auto d=add(lights[i].position,mul(eye,-1));return std::sqrt(dot(d,d))-lights[i].range;};
+    const auto kept=std::min(baked.size(),actorShadowLightLimit-(sun>=0));
+    std::partial_sort(baked.begin(),baked.begin()+kept,baked.end(),[&](auto a,auto b){return gap(a)<gap(b);});
+    baked.resize(kept);if(sun>=0)baked.push_back(std::uint32_t(sun));
+    return baked;
+}
 constexpr unsigned sunShadowResolution=2048,cubeShadowResolution=1024;constexpr float sunShadowDistance=2048;
 // TAA: 8-sample Halton(2,3) sub-pixel offsets in pixels, applied in clip space.
 inline float halton(std::uint32_t index,std::uint32_t base){float f=1,r=0;for(;index;index/=base){f/=float(base);r+=f*float(index%base);}return r;}

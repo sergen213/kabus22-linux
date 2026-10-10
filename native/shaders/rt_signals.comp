@@ -8,9 +8,11 @@
 // soft shadows (area sun/point/spot lights + contact shadows from models), one-bounce diffuse GI and
 // roughness-aware reflections. rt_filter.comp accumulates and denoises them; scene.frag consumes them.
 layout(local_size_x=8,local_size_y=8) in;
-layout(set=0,binding=0,std140) uniform Signals { mat4 inverseViewProjection,previousViewProjection; vec4 eye,sun,params,camera; ivec4 config; } g;
+layout(set=0,binding=0,std140) uniform Signals { mat4 inverseViewProjection,previousViewProjection; vec4 eye,sun,params,camera; ivec4 config; vec4 actor; } g;
 // eye: xyz position, w far; sun: xyz direction, w angular radius (rad); params: x frame, y GI distance, z contact distance, w near;
-// camera: xyz forward, w light count; config: x signal bits (1 shadows, 2 GI, 4 reflections), yz size, w history valid.
+// camera: xyz forward, w light count; config: x signal bits (1 shadows, 2 GI, 4 reflections), yz size, w history valid;
+// actor: x first, y count of the actor-shadow light records appended after the shading lights (render_policy::actor_shadow_lights),
+// z SHADOW_ALPHA / 100.
 layout(set=0,binding=1,std430) readonly buffer Lights { vec4 lightData[]; };
 #include "ray_query.glsl"
 layout(set=0,binding=2) uniform sampler2D gDepth;
@@ -57,6 +59,30 @@ vec3 hitRadiance(uint instanceIndex,uint geometryIndex,uint triangle,bool front,
         if(d.w==2.0){float rho=dot(-L,d.xyz);attenuation*=rho>=c.x?1.0:rho<=c.y?0.0:pow((rho-c.y)/max(c.x-c.y,0.0001),e.w);}
         illumination+=clamp(b.rgb*abs(b.a)*attenuation,0.0,1.0)*max(dot(n,L),0.0);}
     return linear(albedo.rgb*illumination)*albedo.a;
+}
+// Actor shadows on lightmapped surfaces (the A6 planar shadow's replacement): the lightmaps already hold the static light and
+// its world shadows, so only models with the original SHADOW flag (TLAS mask 4) are traced, toward the baked WMB lights and
+// the sun, area-jittered like the soft shadows. Each light weighs luma x N.L x linear falloff 1 - d/range (the sun only where
+// the level lets it reach the receiver); a blocked light counts only where the level geometry passes it (else the lightmap
+// holds none of it). Result: lightmap factor 1 - SHADOW_ALPHA x occluded share, so a single blocked light darkens like the
+// original planar shadow, several lights give several partial shadows, and the shadow fades where the lights fade (0.05).
+// Per pixel and frame one baked light is traced, picked in proportion to its weight (reservoir sampling; its occlusion
+// estimates the occluded share, the denoiser averages it), plus the sun; the long sun ray toward the level runs only where
+// a caster blocks (render_policy appends at most one sun).
+float actorShadow(vec3 origin,vec3 n){
+    float total=0.0,sunLight=0.0;int chosen=-1;vec3 sunL=vec3(0);
+    for(int j=0;j<int(g.actor.y);++j){int i=int(g.actor.x)+j;vec4 a=lightData[i*5],b=lightData[i*5+1],d=lightData[i*5+2];
+        bool sun=d.w==3.0;vec3 delta=a.xyz-origin;float distance=length(delta);vec3 L=sun?-d.xyz:delta/max(distance,0.0001);
+        float falloff=sun?1.0:max(1.0-distance/max(a.w,0.0001),0.0),c=luma(b.rgb*abs(b.a))*falloff*max(dot(n,L),0.0);if(c<=0.001)continue;
+        if(sun){sunLight=c;sunL=L;}else{total+=c;if(rnd()*total<c)chosen=i;}
+    }
+    float occluded=0.0,sunCaster=0.0;vec3 sunDirection=vec3(0);
+    if(chosen>=0){vec4 a=lightData[chosen*5];vec3 toward=a.xyz+sphereOffset()*clamp(a.w*0.03,2.0,12.0)-origin;float reach=length(toward);vec3 direction=toward/max(reach,0.0001);reach=max(reach-rtLightClearance,0.0);
+        float caster=1.0-rtVisibility(origin,direction,reach,4u);if(caster>0.0)occluded=total*caster*rtVisibility(origin,direction,reach,1u);}
+    if(sunLight>0.0){mat3 frame=basis(sunL);float r=g.sun.w*sqrt(rnd()),phi=6.2831853*rnd();sunDirection=normalize(frame*vec3(r*cos(phi),r*sin(phi),1.0));sunCaster=1.0-rtVisibility(origin,sunDirection,g.eye.w,4u);}
+    if(occluded<=0.0&&sunCaster<=0.0)return 1.0;
+    if(sunLight>0.0){sunLight*=rtVisibility(origin,sunDirection,g.eye.w,1u);total+=sunLight;occluded+=sunLight*sunCaster;}
+    return 1.0-g.actor.z*occluded/max(total,0.05);
 }
 // rtReflection with the transmitted fraction returned separately (the receiving color is not known here).
 vec4 reflectionLayers(vec3 origin,vec3 direction,float maxDistance){
@@ -116,6 +142,7 @@ void main(){
             rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsNoneEXT,2,origin,0.01,cosineDirection(n),g.params.z);
             while(rayQueryProceedEXT(q))if(rayQueryGetIntersectionTypeEXT(q,false)==gl_RayQueryCandidateIntersectionTriangleEXT&&!rtAdditive(rayQueryGetIntersectionInstanceCustomIndexEXT(q,false),rayQueryGetIntersectionGeometryIndexEXT(q,false))&&rtHitColor(q,false).a>=0.5)rayQueryConfirmIntersectionEXT(q);
             if(rayQueryGetIntersectionTypeEXT(q,true)!=gl_RayQueryCommittedIntersectionNoneEXT)mask.b=mix(0.3,1.0,rayQueryGetIntersectionTEXT(q,true)/g.params.z);
+            if((flags&1)!=0)mask.a=actorShadow(origin,n); // Lightmapped receivers only.
         }
         if((g.config.x&2)!=0&&(flags&4)==0){
             rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsNoneEXT,255,origin,0.01,cosineDirection(n),g.params.y);

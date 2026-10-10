@@ -31,7 +31,7 @@ struct alignas(16) Uniform {
     Matrix previousModel{}; // Motion-vector pass (3) only.
 };
 // Compute passes of the ray-traced screen-space signals (rt_signals.comp / rt_filter.comp).
-struct alignas(16) ComputeUniform { Matrix inverseViewProjection{},previousViewProjection{}; F4 eye{},sun{},params{},camera{}; std::array<std::int32_t,4> config{}; };
+struct alignas(16) ComputeUniform { Matrix inverseViewProjection{},previousViewProjection{}; F4 eye{},sun{},params{},camera{}; std::array<std::int32_t,4> config{}; F4 actor{}; };
 F4 vec(Vec3 v,float w=0){return {v.x,v.y,v.z,w};}
 F4 vec(Color c){return {c.r,c.g,c.b,c.a};}
 struct UIVertex{float x,y,u,v,r,g,b,a;};
@@ -98,6 +98,9 @@ struct Raster {
     } fx;
     VkDescriptorSetLayout computeSetLayout{};VkPipelineLayout computeLayout{};VkPipeline signalsPipeline{},filterPipeline{};
     std::uint64_t frameIndex{};const Camera*primary{};
+    // shadows=rt actor shadows: light records appended after the shading lights, and the casters they replace the planar shadow for.
+    std::size_t actorShadowFirst{},actorShadowCount{};std::vector<std::uint32_t>actorShadowCasters;
+    bool actorShadows()const{return s.rayEnabled&&s.options.features.shadows==ShadowMode::RayTraced;}
     bool rtSignals()const{const auto&f=s.options.features;return s.rayEnabled&&(f.shadows==ShadowMode::RayTraced||f.gi||f.roughReflections);}
     bool motionVectors()const{return s.options.features.taa||s.options.features.fsr||(rtSignals()&&s.options.features.denoise);}
     // Caster push constant stages: the tessellation evaluation stage projects tessellated casters too.
@@ -635,7 +638,7 @@ struct Raster {
         // The TLAS and the GPU-deformed poses written this frame are read by compute ray queries.
         compute_barrier(VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_HOST_BIT,VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR|VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_HOST_WRITE_BIT);
         ComputeUniform cu;cu.inverseViewProjection=inverse(view.viewProjection);cu.previousViewProjection=fx.previousVP;cu.eye=vec(camera.position,camera.farClip);cu.sun=vec(unit(frame->sunDirection),0.02f);
-        cu.params={float(frameIndex&0xffff),1500.f,40.f,camera.nearClip};cu.camera=vec(fx.forward,float(std::min<std::size_t>(frame->lights.size(),32)));cu.config={bits,int(s.render.width),int(s.render.height),fx.historyValid?1:0};
+        cu.params={float(frameIndex&0xffff),1500.f,40.f,camera.nearClip};cu.camera=vec(fx.forward,float(std::min<std::size_t>(frame->lights.size(),32)));cu.config={bits,int(s.render.width),int(s.render.height),fx.historyValid?1:0};cu.actor={float(actorShadowFirst),float(actorShadowCount),std::clamp(frame->shadowAlpha*.01f,0.f,1.f),0};
         const auto nearest=sampler(false,true);const std::array<std::pair<Image*,VkSampler>,5>edges{{{&fx.gdepth[cur],nearest},{&fx.gdata[cur],nearest},{&fx.gdepth[prev],nearest},{&fx.gdata[prev],nearest},{&fx.motion,nearest}}};
         dispatch(signalsPipeline,compute_set(cu,std::span(edges).first(2),std::array<Image*,3>{&fx.raw[0],&fx.raw[1],&fx.raw[2]}),0,0);s.mark("rt_signals");
         std::array<Image,3>*result=&fx.raw;
@@ -737,6 +740,8 @@ struct Raster {
         if(camera.portalClip){auto position=targetPlane?targetPlane->position:camera.portalPosition,normal=targetPlane?targetPlane->normal:camera.portalNormal;if(dot(normal,normal)==0)throw std::runtime_error("Portal clip view has no real surface plane");normal=unit(normal);view.clipPlane=vec(normal,-dot(normal,position));}
         auto selectShadows=[&]{
             shadowOrder.clear();if(camera.drawWorld&&!camera.noShadow&&!camera.noEntities&&frame->renderEntities&&(!frame->bonusProfile||frame->planarCapable)&&!frame->shadows.empty()){if(frame->bonusProfile?frame->shadowStencilRaw>0:frame->shadowStencilRaw!=0)throw std::runtime_error("Nondefault source stencil-volume shadows are not implemented; native Vulkan supports the recovered planar route");for(auto&d:frame->shadows){if(!(d.layers&camera.layers)||(d.shadowViewId&&d.shadowViewId!=camera.sourceId)||(camera.excludeEntityId&&d.objectId==camera.excludeEntityId))continue;auto cached=frame->cachedEntityShadow?frame->cachedEntityShadow(frame->lightContext,d):d.nativeShadow;if(frame->bonusProfile||cached.caster)shadowOrder.push_back(&d);}std::sort(shadowOrder.begin(),shadowOrder.end(),[&](auto*a,auto*b){auto da=add(a->position,mul(camera.position,-1)),db=add(b->position,mul(camera.position,-1));if(!frame->shadowSortVertical)da.z=db.z=0;return dot(da,da)>dot(db,db);});}
+            // shadows=rt: visible SHADOW casters already shadow the primary view from the actual lights (rt_signals.comp actorShadow).
+            if(primaryView&&actorShadows())std::erase_if(shadowOrder,[&](auto*d){return std::ranges::find(actorShadowCasters,d->objectId)!=actorShadowCasters.end();});
         };
         auto encounters=[&](Encounter encounter){
             if(camera.drawWorld&&frame->world&&(camera.layers&1))draw_instance(worldDraw,camera,true,-1,encounter);
@@ -785,9 +790,15 @@ struct Raster {
         primary=nullptr;if(f.world)for(auto&c:f.cameras){Rect v=c.viewport;if(c.foreground||c.portalTarget||!c.drawWorld||(!c.perDrawOpacity&&c.alpha<1))continue;if(v.width<=0||v.height<=0||(v.x<=0&&v.y<=0&&v.x+v.width>=m.width&&v.y+v.height>=m.height)){primary=&c;break;}}
         selectedLight=material_selected_light(f);
         std::array<float,4>zero{};zeroAllocation=allocate(sizeof(zero),std::max<VkDeviceSize>(16,s.properties.limits.minStorageBufferOffsetAlignment),zero.data());
-        std::array<F4,160>lights{};std::size_t count=std::min<std::size_t>(32,f.lights.size());
-        for(std::size_t i=0;i<count;++i){auto&l=f.lights[i];lights[i*5]=vec(l.position,l.range);lights[i*5+1]={l.color.r,l.color.g,l.color.b,l.baked?-l.intensity:l.intensity};lights[i*5+2]=vec(l.direction,float(l.type));lights[i*5+3]=vec(l.attenuation,l.falloff);lights[i*5+4]={l.type==2?std::cos(rad(l.theta)*.5f):0,l.type==2?std::cos(rad(l.phi)*.5f):0,l.synthetic?1.f:0.f,0};}
-        lightAllocation=count?allocate(count*5*sizeof(F4),std::max<VkDeviceSize>(16,s.properties.limits.minStorageBufferOffsetAlignment),lights.data()):zeroAllocation;
+        std::array<F4,(32+actorShadowLightLimit)*5>lights{};std::size_t count=std::min<std::size_t>(32,f.lights.size());
+        auto pack=[&](const RenderLight&l,std::size_t i){lights[i*5]=vec(l.position,l.range);lights[i*5+1]={l.color.r,l.color.g,l.color.b,l.baked?-l.intensity:l.intensity};lights[i*5+2]=vec(l.direction,float(l.type));lights[i*5+3]=vec(l.attenuation,l.falloff);lights[i*5+4]={l.type==2?std::cos(rad(l.theta)*.5f):0,l.type==2?std::cos(rad(l.phi)*.5f):0,l.synthetic?1.f:0.f,0};};
+        for(std::size_t i=0;i<count;++i)pack(f.lights[i],i);
+        actorShadowFirst=count;actorShadowCount=0;actorShadowCasters.clear();
+        if(actorShadows()&&primary){
+            for(auto i:actor_shadow_lights(f.lights,primary->position))pack(f.lights[i],count+actorShadowCount++);
+            for(auto&d:f.instances)if(d.shadowRequested&&d.visible&&!d.viewSpace&&d.objectId)actorShadowCasters.push_back(d.objectId);
+        }
+        lightAllocation=count?allocate((count+actorShadowCount)*5*sizeof(F4),std::max<VkDeviceSize>(16,s.properties.limits.minStorageBufferOffsetAlignment),lights.data()):zeroAllocation;
         worldDraw={};
         if(f.world){worldDraw.model=&f.world->mesh;prepare(worldDraw);for(auto&mat:f.world->mesh.materials)if((mat.flags&15)==5&&mat.texture&&(mat.texture->width==mat.texture->height*6||mat.texture->width==mat.texture->height*2))sky_texture(*mat.texture);}
         for(auto&d:f.instances)prepare(d);

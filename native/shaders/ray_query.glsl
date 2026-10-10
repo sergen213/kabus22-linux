@@ -96,13 +96,15 @@ bool rtAdditive(uint instanceIndex,uint geometryIndex){return (rtMaterials[rtIns
 // Lights often sit inside lamp/pole/emitter fixtures: as with the shadow cube near plane (render_policy::cubeShadowNear),
 // geometry closer than this to a point or spot light does not occlude it.
 const float rtLightClearance=16.0;
-float rtVisibility(vec3 origin,vec3 direction,float maxDistance){
+// TLAS instance masks: 1 level/map geometry, 2 models and sprites, 4 models with the original SHADOW flag (actor shadows).
+float rtVisibility(vec3 origin,vec3 direction,float maxDistance,uint mask){
     if(maxDistance<=.001||dot(direction,direction)==0.0)return 1.0;
-    rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsNoneEXT,255,origin,.001,normalize(direction),maxDistance);
+    rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsNoneEXT,mask,origin,.001,normalize(direction),maxDistance);
     float visibility=1.0;
     while(rayQueryProceedEXT(q))if(rayQueryGetIntersectionTypeEXT(q,false)==gl_RayQueryCandidateIntersectionTriangleEXT&&!rtAdditive(rayQueryGetIntersectionInstanceCustomIndexEXT(q,false),rayQueryGetIntersectionGeometryIndexEXT(q,false))){vec4 color=rtMaterialHit(rayQueryGetIntersectionInstanceCustomIndexEXT(q,false),rayQueryGetIntersectionGeometryIndexEXT(q,false),rayQueryGetIntersectionPrimitiveIndexEXT(q,false),!rayQueryGetIntersectionFrontFaceEXT(q,false),rayQueryGetIntersectionBarycentricsEXT(q,false),rayQueryGetIntersectionObjectToWorldEXT(q,false));if(color.a>0.0){visibility*=1.0-clamp(color.a,0.0,1.0);if(visibility<.01){rayQueryTerminateEXT(q);return 0.0;}}}
     return visibility;
 }
+float rtVisibility(vec3 origin,vec3 direction,float maxDistance){return rtVisibility(origin,direction,maxDistance,255u);}
 vec3 rtReflection(vec3 origin,vec3 direction,float maxDistance,vec3 fallback){
     if(maxDistance<=.001||dot(direction,direction)==0.0)return fallback;
     vec3 radiance=vec3(0);float visibility=1.0,minDistance=.001;
