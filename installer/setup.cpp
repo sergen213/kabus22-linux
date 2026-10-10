@@ -637,25 +637,23 @@ struct PatchSnapshot {
         }
     }
 };
-void encodeIcon(const fs::path& source, const fs::path& destination) {
-    require(fs::file_size(source) <= 4 * 1024 * 1024, "Original logo exceeds preview bound");
-    std::ifstream input(source, std::ios::binary);
-    std::vector<std::uint8_t> encoded(static_cast<std::size_t>(fs::file_size(source)) + AV_INPUT_BUFFER_PADDING_SIZE, 0);
-    const auto length = encoded.size() - AV_INPUT_BUFFER_PADDING_SIZE;
-    input.read(reinterpret_cast<char*>(encoded.data()), static_cast<std::streamsize>(length)); require(bool(input), "Cannot read original logo");
+void encodePng(std::string encoded, AVCodecID codec, const fs::path& destination) {
+    require(!encoded.empty() && encoded.size() <= 4 * 1024 * 1024, "Original artwork exceeds preview bound");
+    const auto length = encoded.size();
+    encoded.resize(length + AV_INPUT_BUFFER_PADDING_SIZE, '\0');
     auto codecDelete = [](AVCodecContext* p) { avcodec_free_context(&p); };
     auto frameDelete = [](AVFrame* p) { av_frame_free(&p); };
     auto packetDelete = [](AVPacket* p) { av_packet_free(&p); };
-    const auto* jpeg = avcodec_find_decoder(AV_CODEC_ID_MJPEG);
+    const auto* jpeg = avcodec_find_decoder(codec);
     const auto* png = avcodec_find_encoder(AV_CODEC_ID_PNG);
-    require(jpeg && png, "FFmpeg JPEG decoder/PNG encoder missing");
+    require(jpeg && png, "FFmpeg artwork decoder/PNG encoder missing");
     std::unique_ptr<AVCodecContext, decltype(codecDelete)> decoder(avcodec_alloc_context3(jpeg), codecDelete), encoder(avcodec_alloc_context3(png), codecDelete);
     std::unique_ptr<AVFrame, decltype(frameDelete)> frame(av_frame_alloc(), frameDelete), rgba(av_frame_alloc(), frameDelete);
     std::unique_ptr<AVPacket, decltype(packetDelete)> packet(av_packet_alloc(), packetDelete);
     require(decoder && encoder && frame && rgba && packet, "Cannot allocate artwork codec");
     decoder->max_pixels = 4096 * 4096;
     require(avcodec_open2(decoder.get(), jpeg, nullptr) >= 0, "Cannot open logo decoder");
-    packet->data = encoded.data(); packet->size = static_cast<int>(length);
+    packet->data = reinterpret_cast<std::uint8_t*>(encoded.data()); packet->size = static_cast<int>(length);
     require(avcodec_send_packet(decoder.get(), packet.get()) >= 0 && avcodec_receive_frame(decoder.get(), frame.get()) >= 0 &&
         frame->width > 0 && frame->height > 0 && frame->width <= 4096 && frame->height <= 4096, "Invalid original logo");
     packet->data = nullptr; packet->size = 0;
@@ -666,6 +664,19 @@ void encodeIcon(const fs::path& source, const fs::path& destination) {
     encoder->width = rgba->width; encoder->height = rgba->height; encoder->pix_fmt = AV_PIX_FMT_RGBA; encoder->time_base = {1, 1};
     require(avcodec_open2(encoder.get(), png, nullptr) >= 0 && avcodec_send_frame(encoder.get(), rgba.get()) >= 0 && avcodec_receive_packet(encoder.get(), packet.get()) >= 0, "Cannot encode desktop icon");
     writeFile(destination, {reinterpret_cast<const char*>(packet->data), static_cast<std::size_t>(packet->size)});
+}
+void encodeIcon(const fs::path& source, const fs::path& destination) {
+    require(fs::file_size(source) <= 4 * 1024 * 1024, "Original logo exceeds preview bound");
+    std::ifstream input(source, std::ios::binary);
+    std::string encoded(static_cast<std::size_t>(fs::file_size(source)), '\0');
+    input.read(encoded.data(), static_cast<std::streamsize>(encoded.size())); require(bool(input), "Cannot read original logo");
+    encodePng(std::move(encoded), AV_CODEC_ID_MJPEG, destination);
+}
+// Original Inno wizard images as wizard-image.png / wizard-small-image.png for the native wizard UI.
+void wizardArtwork(const fs::path& setup, const fs::path& directory) {
+    auto images = media::wizardImages(setup);
+    encodePng(std::move(images.large), AV_CODEC_ID_BMP, directory/"wizard-image.png");
+    encodePng(std::move(images.small), AV_CODEC_ID_BMP, directory/"wizard-small-image.png");
 }
 struct Font { std::string pcx, provenance; };
 Font recoverFont(const fs::path& pe, const std::string& origin, const Progress& progress) {
@@ -971,7 +982,7 @@ Verification repair(const fs::path& input, const fs::path& sourcePath, const fs:
     }
     return verify(root, progress);
 }
-fs::path previewArtwork(const fs::path& input, const fs::path& extractor, const fs::path& scratch, const Progress& progress) {
+Artwork previewArtwork(const fs::path& input, const fs::path& extractor, const fs::path& scratch, const Progress& progress) {
     require(geteuid() != 0, "Run installer as your ordinary user, not root/sudo");
     const auto destination = checkedAbsolute(scratch);
     chain(destination.parent_path());
@@ -984,18 +995,26 @@ fs::path previewArtwork(const fs::path& input, const fs::path& extractor, const 
         PatchSnapshot windows(source.path, true);
         for (const auto& file : windows.files) if (lower(file.relative.generic_string()) == "help/help_files/fon_logo.jpg") {
             windows.copy(file, destination/"artwork/fon_logo.jpg", progress);
-            return destination/"artwork/fon_logo.jpg";
+            return {destination/"artwork/fon_logo.jpg", {}, {}};
         }
         throw std::runtime_error("Original game logo is not present in the game folder");
     }
     const auto prepared = media::prepare(source.kind == SourceKind::Iso ? source.path : fs::path{},
         source.kind == SourceKind::Setup ? source.path : fs::path{}, destination/"source", progress);
+    Artwork artwork;
+    try {
+        mkdirPrivate(destination/"wizard");
+        wizardArtwork(prepared.setup, destination/"wizard");
+        artwork.wizard = destination/"wizard/wizard-image.png";
+        artwork.wizardSmall = destination/"wizard/wizard-small-image.png";
+    } catch (const std::runtime_error&) {} // cosmetic: the wizard keeps its plain style
     const auto members = media::list(prepared, checkedAbsolute(extractor), progress);
     std::vector<media::Member> selected;
     for (const auto& member : members) if (lower(member.path.generic_string()) == "app/help/help_files/fon_logo.jpg") selected.push_back(member);
     require(selected.size() == 1, "Original game logo is not present in supplied media");
     media::extract(prepared, checkedAbsolute(extractor), selected, destination/"artwork", progress);
-    return destination/"artwork"/selected.front().path;
+    artwork.logo = destination/"artwork"/selected.front().path;
+    return artwork;
 }
 void publish(const fs::path& staging, const fs::path& input, const std::vector<std::pair<fs::path, fs::path>>& shortcuts, const Progress& progress) {
     const auto root = checkedAbsolute(input), installation = checkedAbsolute(staging);
@@ -1176,6 +1195,8 @@ Result install(const Request& request, const Progress& progress) {
         if (lower(entry.path().lexically_relative(installation/"game").generic_string()) == "help/help_files/fon_logo.jpg") logo = entry.path();
     require(!logo.empty(), "Original logo is required for installed desktop icon");
     encodeIcon(logo, installation/"kabus22.png");
+    // Cosmetic only: the settings launcher falls back to its plain style without them.
+    if (prepared) try { wizardArtwork(prepared->setup, installation); } catch (const std::runtime_error&) {}
     finalizeInstallation(installation, {root, source.path, kindName(source.kind), edition(names),
         {applications/shortcutName, desktop/shortcutName}}, progress);
     Result result{root, root/"game", root/"bin/kabus22-launcher", applications/shortcutName, desktop/shortcutName};

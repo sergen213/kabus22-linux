@@ -637,12 +637,118 @@ void extractFontSource(const Prepared& source, const fs::path& extractor,
     extractChecked(source, extractor, {member}, privateOutput, progress);
 }
 
+namespace {
+std::uint32_t crc32(std::string_view bytes) {
+    std::uint32_t crc = 0xffffffffu;
+    for (const auto byte : bytes) {
+        crc ^= static_cast<unsigned char>(byte);
+        for (int bit = 0; bit < 8; ++bit) crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+std::uint32_t le32(std::string_view bytes, std::size_t at) {
+    std::uint32_t value = 0;
+    for (int i = 3; i >= 0; --i) value = value << 8 | static_cast<unsigned char>(bytes[at + i]);
+    return value;
+}
+// Inno >= 4.1.6 compresses the setup header block as LZMA1 (5 property bytes, end marker).
+// libarchive's .lzma reader accepts it once the unknown-size alone header is restored.
+std::string inflateHeader(std::string_view raw) {
+    constexpr std::size_t limit = 64 * 1024 * 1024;
+    require(raw.size() > 5, "Truncated Inno setup header");
+    std::string alone(raw.substr(0, 5));
+    alone.append(8, '\xff');
+    alone.append(raw.substr(5));
+    Archive archive(archive_read_new(), archive_read_free);
+    struct archive_entry* entry = nullptr;
+    require(archive && archive_read_support_filter_lzma(archive.get()) == ARCHIVE_OK &&
+            archive_read_support_format_raw(archive.get()) == ARCHIVE_OK &&
+            archive_read_open_memory(archive.get(), alone.data(), alone.size()) == ARCHIVE_OK &&
+            archive_read_next_header(archive.get(), &entry) == ARCHIVE_OK &&
+            archive_filter_code(archive.get(), 0) == ARCHIVE_FILTER_LZMA, "Unsupported Inno setup header compression");
+    std::string output;
+    std::array<char, 65536> buffer{};
+    for (;;) {
+        const auto n = archive_read_data(archive.get(), buffer.data(), buffer.size());
+        require(n >= 0, "Corrupt Inno setup header");
+        if (!n) break;
+        require(static_cast<std::size_t>(n) <= limit - output.size(), "Inno setup header exceeds safety limit");
+        output.append(buffer.data(), static_cast<std::size_t>(n));
+    }
+    return output;
+}
+// The setup-0 block (Inno >= 4.0.9): 64-byte version id, CRC32 over {stored size, compressed flag},
+// then 4096-byte chunks each preceded by their CRC32. The loader also names the id, so only a
+// CRC-valid occurrence counts. Wizard images follow the entries as length-prefixed BMP strings:
+// WizardImageFile immediately followed by WizardSmallImageFile.
+WizardImages wizardImagesFrom(std::string_view exe) {
+    constexpr std::string_view id = "Inno Setup Setup Data (";
+    std::string raw;
+    bool compressed = false, found = false;
+    for (auto at = exe.find(id); at != std::string_view::npos; at = exe.find(id, at + 1)) {
+        const auto block = at + 64;
+        if (block + 9 > exe.size() || crc32(exe.substr(block + 4, 5)) != le32(exe, block)) continue;
+        const std::size_t stored = le32(exe, block + 4);
+        require(!found && stored <= exe.size() - block - 9, "Ambiguous or truncated Inno setup header");
+        found = true;
+        compressed = exe[block + 8] != 0;
+        for (auto chunk = block + 9, end = chunk + stored; chunk < end;) {
+            const auto size = std::min<std::size_t>(4100, end - chunk);
+            require(size > 4 && crc32(exe.substr(chunk + 4, size - 4)) == le32(exe, chunk), "Inno setup header checksum mismatch");
+            raw.append(exe.substr(chunk + 4, size - 4));
+            chunk += size;
+        }
+    }
+    require(found, "No Inno setup header in original setup");
+    const auto header = compressed ? inflateHeader(raw) : raw;
+    const auto bitmap = [&](std::size_t at, std::size_t& length) {
+        if (at > header.size() || header.size() - at < 4 + 54) return false;
+        length = le32(header, at);
+        return length >= 54 && length <= header.size() - at - 4 && header.compare(at + 4, 2, "BM") == 0 &&
+               le32(header, at + 6) == length;
+    };
+    for (auto at = header.find("BM", 4); at != std::string::npos; at = header.find("BM", at + 1)) {
+        std::size_t large = 0, small = 0;
+        if (bitmap(at - 4, large) && bitmap(at + large, small))
+            return {header.substr(at, large), header.substr(at + large + 4, small)};
+    }
+    throw std::runtime_error("Original setup has no wizard images");
+}
+} // namespace
+
+WizardImages wizardImages(const fs::path& setupPath) {
+    const auto setup = checkedPath(setupPath);
+    const auto identity = regular(setup, 64ULL * 1024 * 1024);
+    std::string exe(static_cast<std::size_t>(identity.st_size), '\0');
+    Fd file(::open(setup.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
+    require(file.value >= 0 && ::pread(file.value, exe.data(), exe.size(), 0) == static_cast<ssize_t>(exe.size()),
+            "Cannot read original setup");
+    unchanged(setup, identity);
+    require(exe.starts_with("MZ"), "Source installer is not an original Windows setup file");
+    return wizardImagesFrom(exe);
+}
+
 void selfCheck() {
     auto rejected = [](auto operation) {
         bool failed = false;
         try { operation(); } catch (const std::runtime_error&) { failed = true; }
         require(failed, "Media security boundary regression");
     };
+    const auto u32 = [](std::uint32_t value) { std::string s(4, '\0'); for (int i = 0; i < 4; ++i) s[i] = static_cast<char>(value >> 8 * i); return s; };
+    const auto bmp = [&](char fill, std::uint32_t size) { return u32(size) + "BM" + u32(size) + std::string(size - 6, fill); };
+    const auto payload = "entries" + bmp('a', 60) + bmp('b', 70) + "decompressor";
+    std::string chunks;
+    for (std::size_t at = 0; at < payload.size(); at += 4096) { const auto part = payload.substr(at, 4096); chunks += u32(crc32(part)) + part; }
+    const auto head = u32(static_cast<std::uint32_t>(chunks.size())) + '\0';
+    std::string id = "Inno Setup Setup Data (5.2.1)";
+    id.resize(64, '\0');
+    const auto exe = "MZ loader " + id + "Inno Setup Messages" + std::string(64, '\0') + id + u32(crc32(head)) + head + chunks;
+    const auto images = wizardImagesFrom(exe);
+    require(crc32("123456789") == 0xcbf43926u && images.large.size() == 60 && images.large[6] == 'a' &&
+            images.small.size() == 70 && images.small[6] == 'b', "Inno wizard image parser regression");
+    auto corrupt = exe;
+    corrupt[corrupt.size() - 20] ^= 1;
+    rejected([&] { wizardImagesFrom(corrupt); });
     require(fontSource({"app/K22.exe", 2347008, {}}) && !selected({"app/K22.exe", 2347008, {}}),
             "Temporary font source must remain excluded from native assets");
     require(!fontSource({"app/Kabus22.exe", 1244972, {}}) && !fontSource({"app/k22.exe", 2347008, {}}) &&

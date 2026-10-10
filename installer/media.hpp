@@ -18,5 +18,9 @@ void extract(const Prepared& source, const fs::path& extractor,
 void extractFontSource(const Prepared& source, const fs::path& extractor,
                        const Member& member, const fs::path& privateOutput,
                        const Progress& progress = {});
+// Original Inno WizardImageFile / WizardSmallImageFile BMP bytes from the user's setup.exe
+// header (never bundled). Throws when the setup has no recognisable pair.
+struct WizardImages { std::string large, small; };
+WizardImages wizardImages(const fs::path& setup);
 void selfCheck();
 }

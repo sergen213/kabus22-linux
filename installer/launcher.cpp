@@ -1,5 +1,6 @@
 #include "launcher_settings.hpp"
 #include "layout.hpp"
+#include "wizard_style.hpp"
 #include <gtk/gtk.h>
 #include <algorithm>
 #include <array>
@@ -82,7 +83,7 @@ struct Job {
 };
 struct UI {
     Options options; std::optional<Settings> settings;
-    GtkWidget *window=nullptr,*root=nullptr,*status=nullptr,*book=nullptr,*apply=nullptr,*play=nullptr,*reload=nullptr,*restore=nullptr,*browse=nullptr,*progress=nullptr;
+    GtkWidget *window=nullptr,*root=nullptr,*status=nullptr,*book=nullptr,*apply=nullptr,*play=nullptr,*reload=nullptr,*restore=nullptr,*browse=nullptr,*progress=nullptr,*headerImage=nullptr;
     GtkWidget *mode=nullptr,*renderer=nullptr,*display=nullptr,*windowMode=nullptr,*resolution=nullptr,*language=nullptr,*bonusLanguage=nullptr,*audio=nullptr,*aa=nullptr,*camera=nullptr,*nativeGrid=nullptr;
     GtkWidget *launchPage=nullptr,*campaignPage=nullptr,*renderPage=nullptr,*audioPage=nullptr,*keysPage=nullptr,*joyPage=nullptr,*padPage=nullptr,*bonusPage=nullptr,*logsPage=nullptr;
     std::array<GtkWidget*,31> campaign{};std::array<GtkWidget*,5> bonus{};
@@ -206,6 +207,8 @@ struct UI {
             options.renderer.clear();
             settings=std::move(fresh);capsNote="Querying engine capabilities…";populate();
             auto icon=settings->root/"kabus22.png";if(fs::is_regular_file(icon))gtk_window_set_icon_from_file(GTK_WINDOW(window),icon.c_str(),nullptr);
+            // Original setup's small wizard image, converted at install time; older installs stay plain.
+            if(auto* small=k22::wizard::load(settings->root/"wizard-small-image.png")){gtk_image_set_from_pixbuf(GTK_IMAGE(headerImage),small);g_object_unref(small);}else gtk_image_clear(GTK_IMAGE(headerImage));
             std::string text="Settings loaded. Original game files and saves are untouched. Apply or Play commits private preferences.";
             for(const auto& w:settings->warnings)text+="\nWarning: "+w;
             message(text);describeInstallation();probe();
@@ -416,9 +419,10 @@ struct UI {
     void build() {
         window=gtk_window_new(GTK_WINDOW_TOPLEVEL);gtk_window_set_title(GTK_WINDOW(window),"Kabus 22 — Native Settings");gtk_window_set_default_size(GTK_WINDOW(window),900,780);
         g_signal_connect(window,"delete-event",G_CALLBACK(+[](GtkWidget*,GdkEvent*,gpointer data)->gboolean {auto& ui=*static_cast<UI*>(data);if(ui.job){ui.message("Wait for the running game / setup / update task to finish; its exit will be collected here.");return TRUE;}gtk_main_quit();return FALSE;}),this);
-        auto* outer=gtk_box_new(GTK_ORIENTATION_VERTICAL,10);gtk_container_set_border_width(GTK_CONTAINER(outer),16);gtk_container_add(GTK_CONTAINER(window),outer);
-        auto* title=gtk_label_new(nullptr);gtk_label_set_markup(GTK_LABEL(title),"<span size='xx-large' weight='bold'>KABUS 22</span>  <span size='large'>/ NATIVE SETTINGS</span>");gtk_label_set_xalign(GTK_LABEL(title),0);gtk_box_pack_start(GTK_BOX(outer),title,false,false,0);
-        gtk_box_pack_start(GTK_BOX(outer),note("Version " K22_VERSION "  •  Original game files are never modified  •  No automatic renderer fallback"),false,false,0);
+        auto* frame=gtk_box_new(GTK_ORIENTATION_VERTICAL,0);gtk_container_add(GTK_CONTAINER(window),frame);
+        GtkWidget *heading=nullptr,*subheading=nullptr;gtk_box_pack_start(GTK_BOX(frame),k22::wizard::header(heading,subheading,headerImage),false,false,0);
+        gtk_label_set_text(GTK_LABEL(heading),"Kabus 22 Settings");gtk_label_set_text(GTK_LABEL(subheading),"Version " K22_VERSION "  •  Original game files are never modified  •  No automatic renderer fallback");
+        auto* outer=gtk_box_new(GTK_ORIENTATION_VERTICAL,10);gtk_container_set_border_width(GTK_CONTAINER(outer),14);gtk_box_pack_start(GTK_BOX(frame),outer,true,true,0);
         auto* pathGrid=gtk_grid_new();gtk_grid_set_column_spacing(GTK_GRID(pathGrid),8);root=gtk_entry_new();row(pathGrid,0,"_Installation",root);
         gtk_entry_set_text(GTK_ENTRY(root),options.root.c_str());browse=gtk_button_new_with_mnemonic("_Browse…");reload=gtk_button_new_with_mnemonic("_Load / Reload");gtk_grid_attach(GTK_GRID(pathGrid),browse,2,0,1,1);gtk_grid_attach(GTK_GRID(pathGrid),reload,3,0,1,1);gtk_box_pack_start(GTK_BOX(outer),pathGrid,false,false,0);
         g_signal_connect(reload,"clicked",G_CALLBACK(+[](GtkButton*,gpointer data){static_cast<UI*>(data)->loadRoot();}),this);
@@ -515,7 +519,8 @@ struct UI {
         auto* output=gtk_expander_new("Game output / startup errors");gtk_container_add(GTK_CONTAINER(output),textView(logView,105));gtk_box_pack_start(GTK_BOX(outer),output,false,false,0);
         progress=gtk_progress_bar_new();gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(progress),true);gtk_box_pack_start(GTK_BOX(outer),progress,false,false,0);
         status=note("");gtk_label_set_selectable(GTK_LABEL(status),true);gtk_box_pack_start(GTK_BOX(outer),status,false,false,0);
-        auto* buttons=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,10);restore=gtk_button_new_with_mnemonic("Restore game _defaults");apply=gtk_button_new_with_mnemonic("_Apply");play=gtk_button_new_with_mnemonic("_Play");gtk_box_pack_start(GTK_BOX(buttons),restore,false,false,0);gtk_box_pack_end(GTK_BOX(buttons),play,false,false,0);gtk_box_pack_end(GTK_BOX(buttons),apply,false,false,0);gtk_box_pack_start(GTK_BOX(outer),buttons,false,false,0);
+        auto* buttons=k22::wizard::styled(gtk_box_new(GTK_ORIENTATION_HORIZONTAL,10),"wizard-nav");gtk_container_set_border_width(GTK_CONTAINER(buttons),12);restore=gtk_button_new_with_mnemonic("Restore game _defaults");apply=gtk_button_new_with_mnemonic("_Apply");play=gtk_button_new_with_mnemonic("_Play");gtk_box_pack_start(GTK_BOX(buttons),restore,false,false,0);gtk_box_pack_end(GTK_BOX(buttons),play,false,false,0);gtk_box_pack_end(GTK_BOX(buttons),apply,false,false,0);
+        gtk_box_pack_start(GTK_BOX(frame),gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),false,false,0);gtk_box_pack_start(GTK_BOX(frame),buttons,false,false,0);
         g_signal_connect(restore,"clicked",G_CALLBACK(+[](GtkButton*,gpointer data){static_cast<UI*>(data)->defaults();}),this);g_signal_connect(apply,"clicked",G_CALLBACK(+[](GtkButton*,gpointer data){static_cast<UI*>(data)->commit(false);}),this);g_signal_connect(play,"clicked",G_CALLBACK(+[](GtkButton*,gpointer data){static_cast<UI*>(data)->commit(true);}),this);
         gtk_widget_show_all(window);gtk_widget_hide(progress);loadRoot();
     }
@@ -529,6 +534,7 @@ int main(int argc,char** argv) {
         const auto schemas=executable.parent_path().parent_path()/"share/glib-2.0/schemas";
         if(fs::is_regular_file(schemas/"gschemas.compiled")){g_setenv("GSETTINGS_SCHEMA_DIR",schemas.c_str(),true);g_unsetenv("GTK_MODULES");g_unsetenv("GTK3_MODULES");}
         if(!gtk_init_check(&argc,&argv))throw std::runtime_error("Cannot open GTK display; --self-check works without a GUI");
+        k22::wizard::style();
         UI ui;ui.options=std::move(options);ui.build();gtk_main();return 0;
     }catch(const std::exception& error){std::cerr<<"kabus22-launcher: "<<error.what()<<'\n';return 1;}
 }

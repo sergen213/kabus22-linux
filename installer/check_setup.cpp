@@ -52,7 +52,7 @@ void fixtures(const fs::path& base) {
     require(detected.kind == SourceKind::Directory && detected.edition == "merscom+kabus22patch",
         "Windows folder/edition detection failed: " + detected.edition);
     const auto preview = previewArtwork(win, {}, base/"preview");
-    require(get(preview) == "logo", "Directory artwork preview failed");
+    require(get(preview.logo) == "logo" && preview.wizard.empty(), "Directory artwork preview failed");
 
     // A staged flat installation becomes versions/<v> + current + compat links with both inventories.
     const auto staging = base/"stage", root = base/"install/kabus22";

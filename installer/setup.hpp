@@ -45,9 +45,12 @@ Verification repair(const fs::path& root, const fs::path& source, const fs::path
                     const Progress& progress = {});
 Request defaultPaths();
 // source is an ISO, original setup.exe or Windows game directory. Scratch must not exist;
-// caller owns its removal after the returned image is consumed (also on failure).
-fs::path previewArtwork(const fs::path& source, const fs::path& extractor,
-                        const fs::path& scratch, const Progress& progress = {});
+// caller owns its removal after the returned images are consumed (also on failure).
+// wizard/wizardSmall are the original Inno wizard images as PNG, empty when unavailable
+// (installed Windows folders carry no setup).
+struct Artwork { fs::path logo, wizard, wizardSmall; };
+Artwork previewArtwork(const fs::path& source, const fs::path& extractor,
+                       const fs::path& scratch, const Progress& progress = {});
 Result install(const Request& request, const Progress& progress = {});
 // Converts a staged flat installation (bin/lib/share + game/) into the versioned layout
 // (versions/K22_VERSION + current + compat links) and writes the ownership marker and both
