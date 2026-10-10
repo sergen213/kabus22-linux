@@ -718,6 +718,12 @@ def build(args) -> None:
                 snapshot(ROOT / "third_party" / name,
                          appdir / "usr/share/licenses/kabus22/dependencies/ode" / name)
                 for name in ("ode-LICENSE-BSD.TXT", "ode-ou-LICENSE-BSD.TXT")]}
+        license_report["fidelityfx"] = {
+            "version": "FidelityFX SDK v1.1.4 (FSR 3.1.4 upscaler, statically linked)",
+            "notices": [
+                snapshot(ROOT / "third_party/FidelityFX-SDK" / name,
+                         appdir / "usr/share/licenses/kabus22/dependencies/fidelityfx" / name)
+                for name in ("LICENSE.txt", "KABUS-PROVENANCE.txt")]}
         license_report["ffmpeg"] = ffmpeg_report
         common = Path("/usr/share/common-licenses")
         if not common.is_dir():

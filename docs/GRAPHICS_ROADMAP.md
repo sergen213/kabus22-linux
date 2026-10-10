@@ -31,6 +31,7 @@ Implemented `--graphics` keys:
 | `bloom`, `ssao`, `fxaa`, `volumetric_fog` | `0`, `1` | `0` | All backends. |
 | `taa` | `0`, `1` | `0` | Vulkan raster and RT only. |
 | `texture_upscale`, `sharpen` | `0`, `1` | `0` | Vulkan raster and RT only; on in `enhanced`/`ultra`. |
+| `fsr` | `off`, `native`, `quality`, `balanced`, `performance`, `ultra_performance` | `off` | AMD FSR 3.1.4 upscaling, Vulkan raster and RT only; `quality` in `ultra`. Replaces TAA. |
 
 Features a backend cannot run are dropped by `render_policy::admit_features` with one
 `kabus22: graphics: ...` notice each (also after a preset backend degrades). Capabilities list each
@@ -149,7 +150,22 @@ world camera; depth-based effects apply only to it.
   or near 0/1, so edges do not halo. It mainly restores texture detail that TAA softens.
 - **Texture upscale** (`texture_upscale=1`, Vulkan): 2x of original world/model skins ≤ 512 px at upload
   (Scale2x or Lanczos-3 + mild unsharp, nearest alpha), see `docs/TEXTURE_RESTORATION.md`. No AI, no
-  pack needed; a pack hit wins. Screen-space upscaling (FSR/DLSS-style) is not implemented.
+  pack needed; a pack hit wins.
+- **FSR** (`fsr=native|quality|balanced|performance|ultra_performance`, Vulkan): AMD FidelityFX Super Resolution
+  3.1.4 (SDK v1.1.4 upscaler + Vulkan backend vendored in `third_party/FidelityFX-SDK`, MIT, provenance and the 5 local
+  patches in `KABUS-PROVENANCE.txt`; wrapper `native/fsr_vk.cpp`, shader blobs `tools/k22_fsr3_blobs.py`). Background
+  views (HDR target), their effects (SSAO, fog, bloom) and the ray-traced signals/denoiser render at the quality mode's
+  render size (1.0x, 1.5x, 1.7x, 2x, 3x per axis); the tone-mapped composite is upscaled to the display before the
+  UI/HUD and VIEW-entity layers, which stay at display resolution. Inputs: FSR's Halton jitter on the primary view,
+  device depth captured before view-space entities, full unjittered motion (the TAA motion-vector pass for moving or
+  animated entities, camera reprojection of the depth elsewhere; `effects.frag` mode 13), and a reactive mask that
+  FSR's autogen pass derives from the primary view's colour before translucent/particle/view-space draws. History
+  resets on scene release, resize and every frame without a primary 3D view. FSR replaces TAA; its RCAS (0.4) replaces
+  CAS when `sharpen=1`, and FXAA is skipped. Foreground VIEW entities start from cleared depth/stencil instead of the
+  (differently sized) background depth. A device without storage-image write-without-format / extended formats or
+  compute subgroup quad operations is rejected like other missing features (explicit choices fail, preset backends
+  degrade). `k22-render-check --vulkan[-rt]` runs the temporal-ghosting consumer with `fsr=quality`: 28 (raster) /
+  34 (RT) visibly different pixels between the moving and the converged frame, against 790 / 819 with TAA.
 
 ## Geometry upgrades (`smooth_normals`, `tessellation`; Vulkan only)
 

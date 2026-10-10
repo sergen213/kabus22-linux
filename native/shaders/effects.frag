@@ -26,7 +26,16 @@ void main(){
         for(int y=-2;y<2;++y)for(int x=-2;x<2;++x){vec2 o=(vec2(x,y)+0.5)*texel;float w=1.0/(1.0+abs(texture(inputB,uv+o).r-center)*0.25);sum+=texture(inputA,uv+o).r*w;weight+=w;}
         color=vec4(vec3(sum/weight),1);return;
     }
-    if(mode==4){float d=texture(inputA,uv).r;vec3 eye=cameraPosition;vec3 p=eye+k22ViewRay(k22NdcFromUv(uv),u.dataInverseViewProjection,eye,forwardAxis())*d;color=vec4(k22FogInscatter(eye,p,u.dataRange.yz,k22Noise(gl_FragCoord.xy+u.dataPass.y)),0);return;}
+    if(mode==4){float d=texture(inputA,uv).r;vec3 eye=cameraPosition;vec3 p=eye+k22ViewRay(k22NdcFromUv(uv),u.dataInverseViewProjection,eye,forwardAxis())*d;color=vec4(k22FogInscatter(eye,p,u.dataRange.yz,k22Noise(gl_FragCoord.xy+u.dataPass.y)),d);return;}
+    if(mode==14){
+        // Half-resolution fog (mode 4, alpha = its sample's linear depth): bilinear weights damped by relative depth
+        // difference so fog does not bleed across silhouettes; the closest-depth texel when every neighbour differs.
+        vec2 size=vec2(textureSize(inputA,0)),p=uv*size-0.5,f=fract(p);ivec2 b=ivec2(floor(p)),last=ivec2(size)-1;float d=texture(inputB,uv).r;
+        vec3 sum=vec3(0),best=vec3(0);float weight=0.0,closest=1e30;
+        for(int i=0;i<4;++i){ivec2 o=ivec2(i&1,i>>1);vec4 s=texelFetch(inputA,clamp(b+o,ivec2(0),last),0);float dz=abs(s.a-d);
+            float w=(o.x==1?f.x:1.0-f.x)*(o.y==1?f.y:1.0-f.y)*exp(-dz/(0.05*max(d,1e-3)));sum+=w*s.rgb;weight+=w;if(dz<closest){closest=dz;best=s.rgb;}}
+        color=vec4(weight>1e-4?sum/weight:best,0);return;
+    }
     if(mode==5){color=vec4(k22BloomPrefilter(k22BloomDown(inputA,uv,texel)),1);return;}
     if(mode==6){color=vec4(k22BloomDown(inputA,uv,texel),1);return;}
     if(mode==7){color=vec4(k22BloomUp(inputA,uv,texel),1);return;}
@@ -47,6 +56,13 @@ void main(){
         color=vec4(fromYCoCg*mix(mean+history,current,0.1),1);return;
     }
     if(mode==10){color=vec4(k22Fxaa(inputA,uv,texel),1);return;}
+    if(mode==13){
+        // FSR motion: unjittered previous-minus-current UV. Entity vectors (scene pass 3, previous unjittered minus this
+        // jittered pixel) where the scene depth agrees, as in TAA; the camera reprojection of the depth elsewhere.
+        float d=texture(inputA,uv).r;vec3 p=cameraPosition+k22ViewRay(k22NdcFromUv(uv),u.dataInverseViewProjection,cameraPosition,forwardAxis())*d;
+        vec4 c=u.dataViewProjection*vec4(p,1),q=u.dataPreviousViewProjection*vec4(p,1),m=texture(inputB,uv);vec2 current=k22UvFromNdc(c.xy/c.w);
+        color=vec4(m.z>0.0&&m.z<=d*1.03?m.xy+uv-current:q.w>0.0?k22UvFromNdc(q.xy/q.w)-current:vec2(0),0,1);return;
+    }
     if(mode==12){
         // sharpen: AMD FidelityFX CAS (contrast-adaptive sharpening) on the final LDR image; sharpness 0.4 (0..1).
         // Per-channel amount shrinks where the 3x3 cross is already contrasty or near clipping, so no halos.

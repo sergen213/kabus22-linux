@@ -1779,7 +1779,8 @@ void rt_reflection_checks(std::span<const std::byte> mix,std::span<const std::by
 // A moving, vertex-animated actor under a following camera with the full temporal stack (TAA, and RT shadows/GI/
 // rough reflections with the denoiser) must not leave a trail: the frame reached through motion is compared with the
 // same final frame converged with everything held still. K22_CAPTURE_DIR keeps the captures for inspection.
-void temporal_ghosting_checks(bool rayTracing) {
+// fsr: the same with FSR 3.1 upscaling (quality mode replaces TAA; scene and RT signals at the render size).
+void temporal_ghosting_checks(bool rayTracing,std::uint8_t fsr=0) {
     using namespace k22;
     TempDirectory captures;
     auto checker=[](std::array<std::uint8_t,3>a,std::array<std::uint8_t,3>b){auto image=std::make_shared<Image>();image->width=image->height=8;for(unsigned i=0;i<64;++i){auto&c=(i%8+i/8)%2?a:b;image->rgba.insert(image->rgba.end(),{c[0],c[1],c[2],255});}return image;};
@@ -1797,9 +1798,10 @@ void temporal_ghosting_checks(bool rayTracing) {
     options.width=320;options.height=180;options.samples=2;options.vsync=false;options.title="Kabus 22 temporal ghosting consumer";
     auto&f=options.features;f.taa=f.fxaa=f.bloom=f.ssao=f.fog=true;
     if(rayTracing){f.shadows=ShadowMode::RayTraced;f.gi=f.roughReflections=f.denoise=true;}
+    f.fsr=fsr;
     Renderer renderer(options);
     auto pose=[&](int i){actors[1].position.y=-5+.4f*i;camera.position.y=.5f*actors[1].position.y;actors[1].interpolation=float(i%6)/5;};
-    auto shot=[&](const char*name){auto pixels=captured_pixels(renderer,frame,captures.path/name);if(auto*keep=std::getenv("K22_CAPTURE_DIR"))std::filesystem::copy_file(captures.path/name,std::filesystem::path(keep)/(std::string(rayTracing?"rt-":"raster-")+name),std::filesystem::copy_options::overwrite_existing);return pixels;};
+    auto shot=[&](const char*name){auto pixels=captured_pixels(renderer,frame,captures.path/name);if(auto*keep=std::getenv("K22_CAPTURE_DIR"))std::filesystem::copy_file(captures.path/name,std::filesystem::path(keep)/(std::string(rayTracing?"rt-":"raster-")+(fsr?"fsr-":"")+name),std::filesystem::copy_options::overwrite_existing);return pixels;};
     constexpr int steps=24;for(int i=0;i<steps;++i){pose(i);renderer.draw(frame);}
     pose(steps);const auto moving=shot("moving.ppm");
     for(int i=0;i<40;++i)renderer.draw(frame);const auto still=shot("still.ppm");
@@ -1807,7 +1809,7 @@ void temporal_ghosting_checks(bool rayTracing) {
     // Visible difference: any channel off by more than 24.
     auto ghost=[](const std::vector<std::uint8_t>&a,const std::vector<std::uint8_t>&b){std::size_t n=0;double sum=0;for(std::size_t i=0;i<a.size();i+=3){int d=0;for(int c=0;c<3;++c)d=std::max(d,std::abs(int(a[i+c])-int(b[i+c])));n+=d>24;sum+=d;}return std::pair{n,sum/(a.size()/3)};};
     const auto [trail,trailMean]=ghost(moving,still);const auto [noise,noiseMean]=ghost(still,still2);
-    std::cout<<(rayTracing?"RT":"Raster")<<" temporal ghosting: moving-vs-still "<<trail<<" px (mean "<<trailMean<<"), still-vs-still "<<noise<<" px (mean "<<noiseMean<<")"<<std::endl;
+    std::cout<<(rayTracing?"RT":"Raster")<<(fsr?" FSR quality":"")<<" temporal ghosting: moving-vs-still "<<trail<<" px (mean "<<trailMean<<"), still-vs-still "<<noise<<" px (mean "<<noiseMean<<")"<<std::endl;
     // Camera-only reprojection left 6043 (RT) / 2278 (raster) visibly different pixels of 57600; motion vectors ~800.
     if(trail>1400||noise>200)throw std::runtime_error("Moving actor left a temporal trail");
 }
@@ -1831,17 +1833,21 @@ void graphics_policy_checks() {
     // Wave-2 features: off by default, preset contents, explicit overrides, per-backend admission with notices.
     require(none.features==GraphicsFeatures{}&&custom.features==GraphicsFeatures{},"original/custom enable no wave-2 effect");
     {auto&f=enhanced.features;require(f.shadows==ShadowMode::ShadowMap&&f.ssao&&f.fxaa&&!f.gi&&!f.roughReflections&&!f.denoise&&!f.bloom&&!f.taa&&!f.fog&&f.smoothNormals&&f.tessellation&&f.upscale&&f.sharpen,"enhanced = shadow maps + SSAO + FXAA + Vulkan upgrades");}
-    {auto&f=ultra.features;require(f.shadows==ShadowMode::RayTraced&&f.gi&&f.roughReflections&&f.denoise&&f.bloom&&f.taa&&f.fog&&!f.ssao&&!f.fxaa&&f.smoothNormals&&f.tessellation&&f.upscale&&f.sharpen,"ultra = RT shadows/GI/reflections + denoise + bloom + TAA + volumetric fog + Vulkan upgrades");}
+    {auto&f=ultra.features;require(f.shadows==ShadowMode::RayTraced&&f.gi&&f.roughReflections&&f.denoise&&f.bloom&&f.taa&&f.fog&&!f.ssao&&!f.fxaa&&f.smoothNormals&&f.tessellation&&f.upscale&&f.sharpen&&f.fsr==2,"ultra = RT shadows/GI/reflections + denoise + bloom + TAA + volumetric fog + Vulkan upgrades + FSR quality");}
+    require(enhanced.features.fsr==0,"enhanced leaves FSR off");
+    {const std::vector<std::pair<std::string,std::string>>off{{"fsr","off"}},native{{"fsr","native"}},ultraPerformance{{"fsr","ultra_performance"}};
+     require(resolve_graphics("ultra",off).features.fsr==0&&resolve_graphics("custom",native).features.fsr==1&&resolve_graphics("custom",ultraPerformance).features.fsr==5,"fsr values map to quality modes");
+     const std::vector<std::pair<std::string,std::string>>bad{{"fsr","1"}};rejects([&]{resolve_graphics("custom",bad);},"fsr=1 accepted");}
     {const std::vector<std::pair<std::string,std::string>>set{{"shadows","rt"},{"gi","1"},{"reflections","rough"},{"bloom","1"},{"volumetric_fog","1"},{"shadows","shadowmap"},{"ssao","1"},{"fxaa","1"},{"taa","1"},{"denoise","1"}};auto f=resolve_graphics("custom",set).features;
      require(f.shadows==ShadowMode::ShadowMap&&f.gi&&f.roughReflections&&f.bloom&&f.fog&&f.ssao&&f.fxaa&&f.taa&&f.denoise,"later --graphics keys win");
      auto g=resolve_graphics("ultra",std::vector<std::pair<std::string,std::string>>{{"gi","0"},{"shadows","original"},{"taa","0"}}).features;require(!g.gi&&g.shadows==ShadowMode::Original&&!g.taa&&g.bloom,"overrides disable preset effects");}
     {std::vector<std::string>notes;auto f=admit_features(ultra.features,"opengl",notes);
-     require(f.shadows==ShadowMode::ShadowMap&&!f.gi&&!f.roughReflections&&!f.denoise&&!f.taa&&f.bloom&&f.fog&&!f.smoothNormals&&!f.tessellation&&!f.upscale&&!f.sharpen&&notes.size()==9,"OpenGL admission: RT shadows fall back to shadow maps, RT/TAA/Vulkan upgrades dropped with notices");
+     require(f.shadows==ShadowMode::ShadowMap&&!f.gi&&!f.roughReflections&&!f.denoise&&!f.taa&&f.bloom&&f.fog&&!f.smoothNormals&&!f.tessellation&&!f.upscale&&!f.sharpen&&!f.fsr&&notes.size()==10,"OpenGL admission: RT shadows fall back to shadow maps, RT/TAA/Vulkan upgrades dropped with notices");
      notes.clear();f=admit_features(ultra.features,"vulkan-raster",notes);require(f.shadows==ShadowMode::ShadowMap&&f.taa&&!f.gi&&notes.size()==4,"raster admission keeps TAA");
      notes.clear();require(admit_features(ultra.features,"vulkan-rt",notes)==ultra.features&&notes.empty(),"RT admits everything silently");
      notes.clear();f=admit_features(enhanced.features,"opengl",notes);require(f.ssao&&f.fxaa&&f.shadows==ShadowMode::ShadowMap&&!f.smoothNormals&&notes.size()==4,"enhanced effects run on every backend; Vulkan upgrades drop on OpenGL");}
-    for(auto&option:graphicsOptions){const bool rtOnly=option.key=="gi"||option.key=="reflections"||option.key=="denoise";const bool vulkanOnly=option.key=="taa"||option.key=="smooth_normals"||option.key=="tessellation"||option.key=="texture_upscale"||option.key=="sharpen";require(option.backends==(rtOnly?backendRT:vulkanOnly?backendVulkan:backendAll),"capability backends match implementations");}
-    require(!composite_enabled(false,{})&&composite_enabled(true,{})&&composite_enabled(false,{.bloom=true})&&composite_enabled(false,{.taa=true})&&composite_enabled(false,{.sharpen=true})&&!composite_enabled(false,{.ssao=true})&&!composite_enabled(false,{.upscale=true}),"composite only when an effect needs it");
+    for(auto&option:graphicsOptions){const bool rtOnly=option.key=="gi"||option.key=="reflections"||option.key=="denoise";const bool vulkanOnly=option.key=="taa"||option.key=="smooth_normals"||option.key=="tessellation"||option.key=="texture_upscale"||option.key=="sharpen"||option.key=="fsr";require(option.backends==(rtOnly?backendRT:vulkanOnly?backendVulkan:backendAll),"capability backends match implementations");}
+    require(!composite_enabled(false,{})&&composite_enabled(true,{})&&composite_enabled(false,{.bloom=true})&&composite_enabled(false,{.taa=true})&&composite_enabled(false,{.sharpen=true})&&!composite_enabled(false,{.ssao=true})&&!composite_enabled(false,{.upscale=true})&&composite_enabled(false,{.fsr=1}),"composite only when an effect needs it");
     require(!shadow_maps_enabled({})&&shadow_maps_enabled({.shadows=ShadowMode::ShadowMap})&&!shadow_maps_enabled({.shadows=ShadowMode::RayTraced})&&!shadow_maps_enabled({.shadows=ShadowMode::RayTraced,.fog=true}),"shadow maps only for shadows=shadowmap (RT fog does not render them)");
     {Camera c;c.position={100,-50,30};c.angles={30,-10,0};c.nearClip=1;c.farClip=8000;const float aspect=16/9.f;auto vp=camera_matrix(c,aspect);auto iv=inverse(vp);auto id=product(vp,iv);
      for(int i=0;i<16;++i)require(std::abs(id[i]-(i%5==0?1.f:0.f))<1e-3f,"matrix inverse");
@@ -1947,12 +1953,12 @@ int main(int argc,char** argv) {
     std::cout<<"Renderer material/effect boundary checks passed\n";
     if(argc==3) {
         if(mode=="--vulkan-rt"){
-            temporal_ghosting_checks(true);gl_checks(bytes(mix),bytes(sunMix),k22::RendererBackend::Vulkan,true);
+            temporal_ghosting_checks(true);temporal_ghosting_checks(true,2);gl_checks(bytes(mix),bytes(sunMix),k22::RendererBackend::Vulkan,true);
             rt_checks();rt_reflection_checks(bytes(mix),bytes(sunMix));overlay_key_checks(k22::RendererBackend::Vulkan,true);
             std::cout<<"Actual Vulkan hardware ray-query visibility/animation/alpha/reflection/turbulence consumer checks passed\n";
         }else{
             const auto backend=mode=="--vulkan"?k22::RendererBackend::Vulkan:k22::RendererBackend::OpenGL;
-            if(backend==k22::RendererBackend::Vulkan)temporal_ghosting_checks(false);gl_checks(bytes(mix),bytes(sunMix),backend);turbulence_checks(backend);overlay_key_checks(backend,false);
+            if(backend==k22::RendererBackend::Vulkan){temporal_ghosting_checks(false);temporal_ghosting_checks(false,2);}gl_checks(bytes(mix),bytes(sunMix),backend);turbulence_checks(backend);overlay_key_checks(backend,false);
             std::cout<<"Actual "<<(mode=="--vulkan"?"Vulkan raster":"GL")<<" material/effect/opacity/particle/turbulence consumer checks passed\n";
         }
     }

@@ -24,7 +24,8 @@ Honest list of what is not established or not implemented. See [PROGRESS.md](PRO
 - Nondefault stencil shadows, software world light and VIEW render-to-bitmap remain unsupported.
 - Ray tracing needs ray queries, acceleration structures, buffer device addresses, descriptor indexing and shader int64; 1024-material-sampler ceiling. Presets disable unsupported features with a notice; explicit `--renderer vulkan` / RT requests fail instead of falling back.
 - Bloom works in LDR thresholds when PBR/HDR is off, so bright white paper can glow like a light source.
-- Upscaling (FSR-like) is not implemented and not offered.
+- FSR 3.1 (`fsr=...`, Vulkan): foreground VIEW entities start from cleared depth/stencil (the background depth is at the render size); view-space entities of the primary view share the camera motion and rely on the reactive mask. No frame generation.
+- Vulkan frame timing on Xvfb is not meaningful: without DRI3 Mesa cannot present on the GPU, presets degrade to OpenGL on llvmpipe. GPU measurements use a headless gamescope (`K22_GPU_TIMING=1`, [RAYTRACING.md](RAYTRACING.md#performance)).
 - IBL is an ambient-only approximation (no sky cubemaps in the original data).
 - Vulkan motion vectors (TAA, RT denoiser) cover opaque entities of the primary view. Translucent entities, particles and view-space models have none and rely on the TAA history clip; entities without an id use camera reprojection, and actors whose pose cannot be matched to the previous frame (no id, several poses per id) get transform motion only. Moving edges stay slightly softer than with TAA off, and GI (history floor 0.06) still trails a little behind fast-moving casters.
 

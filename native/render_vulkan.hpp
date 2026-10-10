@@ -1,6 +1,7 @@
 #pragma once
 #include "render.hpp"
 #include "vulkan_loader.hpp"
+#include "fsr_vk.hpp"
 #include <array>
 #include <memory>
 #include <functional>
@@ -64,15 +65,21 @@ struct VulkanBackend::State {
     VkQueue queue{}; std::uint32_t queueFamily{}; bool rayEnabled{};
     bool bufferAddressEnabled{},swapDirty{};
     VkSwapchainKHR swapchain{}; VkFormat swapFormat{}; VkPresentModeKHR presentMode{VK_PRESENT_MODE_FIFO_KHR};
-    VkExtent2D extent{}; std::vector<VkImage> swapImages; std::vector<VkImageLayout> swapLayouts;
+    // extent: display (swapchain, UI); render: background views, their effects and RT signals (FSR input size, else extent).
+    VkExtent2D extent{},render{}; std::vector<VkImage> swapImages; std::vector<VkImageLayout> swapLayouts;
     std::vector<VkSemaphore> swapRendered;
     VkFormat depthFormat{VK_FORMAT_D24_UNORM_S8_UINT}; VkSampleCountFlagBits samples{VK_SAMPLE_COUNT_1_BIT};
-    vk22::Target scene,alpha,portal,hdr; vk22::Image finalImage; // hdr: PBR background views (RGBA16F, scene samples).
+    vk22::Target scene,alpha,portal,hdr; vk22::Image finalImage; // hdr: PBR background views (RGBA16F, scene samples, render size).
+    std::unique_ptr<vk22::Fsr3> fsr; // fsr feature: upscales the composited render-size view to extent.
     bool retainedColorValid{},portalColorValid{},finalValid{};
-    struct Slot { VkCommandPool pool{}; VkCommandBuffer command{}; VkFence fence{}; VkSemaphore acquired{},rendered{}; bool pending{}; std::vector<vk22::Buffer> garbageBuffers; std::vector<vk22::Image> garbageImages; };
+    struct Slot { VkCommandPool pool{}; VkCommandBuffer command{}; VkFence fence{}; VkSemaphore acquired{},rendered{}; bool pending{}; std::vector<vk22::Buffer> garbageBuffers; std::vector<vk22::Image> garbageImages; VkQueryPool queries{}; std::vector<const char*> marks; };
     std::array<Slot,2> slots{}; unsigned slotIndex{},front{},pending{},limit{1}; std::uint64_t submissions{},waits{};
     VkCommandBuffer command{}; std::uint32_t acquiredIndex{}; int requestedInterval{-1};
     std::uint64_t finalSubmission{}; unsigned finalSlot{};
+    // K22_GPU_TIMING=1: GPU timestamps between mark() calls plus CPU frame times, averaged to stderr every 300 frames.
+    struct Timing { bool enabled{}; double period{}; std::vector<std::pair<const char*,double>> gpu; double gpuTotal{},cpuWait{},cpuRecord{},interval{},fence{},acquire{},present{}; std::uint64_t frames{}; std::int64_t last{}; } timing;
+    void mark(const char* label);
+    void account(Slot&);
     std::unique_ptr<vk22::Raster,vk22::RasterDelete> raster;
     std::unique_ptr<vk22::RayTracing,vk22::RayDelete> rays;
     State(SDL_Window*,const RenderOptions&); ~State();
@@ -84,7 +91,7 @@ struct VulkanBackend::State {
     VkSampler sampler(bool linear,bool clamp,double mipmapping=0,float anisotropy=1);
     VkShaderModule shader(std::span<const std::uint32_t>);
     void begin(WindowMetrics,std::int32_t,bool); void finish(); void drain(); void invalidate();
-    void ensure_targets(WindowMetrics); void ensure_auxiliary(vk22::Target&);
+    void ensure_targets(WindowMetrics); void ensure_auxiliary(vk22::Target&,VkExtent2D);
     void immediate(const std::function<void(VkCommandBuffer)>&);
     void readback(std::string_view,WindowMetrics);
 };

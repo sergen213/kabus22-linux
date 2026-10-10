@@ -31,6 +31,8 @@
     X(vkCmdPipelineBarrier) \
     X(vkCmdPipelineBarrier2) \
     X(vkCmdPushConstants) \
+    X(vkCmdResetQueryPool) \
+    X(vkCmdWriteTimestamp2) \
     X(vkCmdResolveImage) \
     X(vkCmdSetScissor) \
     X(vkCmdSetViewport) \
@@ -46,6 +48,7 @@
     X(vkCreateImageView) \
     X(vkCreateInstance) \
     X(vkCreatePipelineLayout) \
+    X(vkCreateQueryPool) \
     X(vkCreateSampler) \
     X(vkCreateSemaphore) \
     X(vkCreateShaderModule) \
@@ -61,6 +64,7 @@
     X(vkDestroyInstance) \
     X(vkDestroyPipeline) \
     X(vkDestroyPipelineLayout) \
+    X(vkDestroyQueryPool) \
     X(vkDestroySampler) \
     X(vkDestroySemaphore) \
     X(vkDestroyShaderModule) \
@@ -76,7 +80,9 @@
     X(vkGetDeviceProcAddr) \
     X(vkGetDeviceQueue) \
     X(vkGetImageMemoryRequirements) \
+    X(vkGetPhysicalDeviceFeatures) \
     X(vkGetPhysicalDeviceFeatures2) \
+    X(vkGetQueryPoolResults) \
     X(vkGetPhysicalDeviceFormatProperties) \
     X(vkGetPhysicalDeviceImageFormatProperties) \
     X(vkGetPhysicalDeviceMemoryProperties) \

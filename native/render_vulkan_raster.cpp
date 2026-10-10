@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <compare>
 #include <cstring>
@@ -68,6 +69,7 @@ struct Raster {
     int selectedLight{-1};
     Target*target{};VkRect2D region{};Uniform view{};Allocation lightAllocation,zeroAllocation;
     VkExtent2D renderExtent{};
+    Target*opaqueTarget{};VkExtent2D viewExtent{}; // Destination size of the current view: s.render for FSR background views, else s.extent.
     std::vector<UIVertex>uiVertices;std::vector<const DrawInstance*>transparent,shadowOrder;
     struct CasterDraw{VkBuffer vertices,indices;VkDescriptorSet set;bool cull,clockwise,tess;std::uint32_t first,count;};std::vector<CasterDraw>casterDraws;
     enum class Encounter {Live,Prepare,Replay};
@@ -82,19 +84,22 @@ struct Raster {
     struct Fx {
         VkExtent2D extent{};
         Image depth,depthSampled;VkImageView depthView{}; // Single-sample primary depth before view-space entities; depthSampled aliases a depth-only view.
-        Image linear,ao,ldr;std::array<Image,2>taa;std::array<Image,5>bloom;
+        Image linear,ao,ldr,fog;std::array<Image,2>taa;std::array<Image,5>bloom;
         Image sharp; // sharpen with FXAA: FXAA output, read by the final CAS pass.
+        Image fsrDepth,fsrMotion,upscaled; // FSR inputs (render size: R32F device depth, RG16F full motion) and its display-size output.
+        Image opaque,reactive; // FSR: primary view colour before translucent/particle/view-space draws, and the derived reactive mask.
         Image sun,cube;std::array<VkImageView,6>faces{};
         std::array<Image,2>gdata,gdepth,length;std::array<Image,3>raw,tmp;std::array<std::array<Image,3>,2>history;
         Image motion,motionDepth; // Motion vectors of moving/animated entities (scene pass 3) for TAA and the denoiser.
         std::unordered_map<std::uint32_t,Matrix>previousModels,currentModels;std::uint64_t motionFrame{};
         Matrix sunMatrix{},previousVP{},unjittered{},inverseVP{};float sunTexel{},shadowRange{},nearPlane{1},farPlane{1};Vec3 shadowLight{},eye{},forward{};int shadowIndex{-1};
-        unsigned taaIndex{},historyIndex{};bool taaValid{},historyValid{},linearValid{},shadowsValid{},motionValid{};
+        unsigned taaIndex{},historyIndex{};bool taaValid{},historyValid{},linearValid{},shadowsValid{},motionValid{},fsrValid{},opaqueValid{};bool captureOpaque{};
+        std::array<float,2> fsrJitter{};float fovY{1};std::uint64_t fsrFrame{};std::chrono::steady_clock::time_point fsrTime{};
     } fx;
     VkDescriptorSetLayout computeSetLayout{};VkPipelineLayout computeLayout{};VkPipeline signalsPipeline{},filterPipeline{};
     std::uint64_t frameIndex{};const Camera*primary{};
     bool rtSignals()const{const auto&f=s.options.features;return s.rayEnabled&&(f.shadows==ShadowMode::RayTraced||f.gi||f.roughReflections);}
-    bool motionVectors()const{return s.options.features.taa||(rtSignals()&&s.options.features.denoise);}
+    bool motionVectors()const{return s.options.features.taa||s.options.features.fsr||(rtSignals()&&s.options.features.denoise);}
     // Caster push constant stages: the tessellation evaluation stage projects tessellated casters too.
     VkShaderStageFlags casterStages{VK_SHADER_STAGE_VERTEX_BIT};
     bool smoothing()const{return s.options.features.smoothNormals||s.options.features.tessellation;}
@@ -143,12 +148,12 @@ struct Raster {
     // Extent-dependent effect images are retired (fence-safe) on resize; shadow maps only on teardown.
     void free_effects(bool all){
         auto drop=[&](Image&i){if(all)s.destroy(i);else s.retire(i);};auto dropView=[&](VkImageView&v){if(!v)return;if(all)vkDestroyImageView(s.device,v,nullptr);else arenas[s.slotIndex].views.push_back(v);v=VK_NULL_HANDLE;};
-        dropView(fx.depthView);fx.depthSampled={};drop(fx.depth);drop(fx.linear);drop(fx.ao);drop(fx.ldr);drop(fx.motion);drop(fx.motionDepth);for(auto*set:{&fx.taa,&fx.gdata,&fx.gdepth,&fx.length})for(auto&i:*set)drop(i);for(auto&i:fx.bloom)drop(i);for(auto&i:fx.raw)drop(i);for(auto&i:fx.tmp)drop(i);for(auto&h:fx.history)for(auto&i:h)drop(i);
-        drop(fx.sharp);
-        fx.taaValid=fx.historyValid=fx.linearValid=false;fx.extent={};
+        dropView(fx.depthView);fx.depthSampled={};drop(fx.depth);drop(fx.linear);drop(fx.ao);drop(fx.fog);drop(fx.ldr);drop(fx.motion);drop(fx.motionDepth);for(auto*set:{&fx.taa,&fx.gdata,&fx.gdepth,&fx.length})for(auto&i:*set)drop(i);for(auto&i:fx.bloom)drop(i);for(auto&i:fx.raw)drop(i);for(auto&i:fx.tmp)drop(i);for(auto&h:fx.history)for(auto&i:h)drop(i);
+        drop(fx.sharp);drop(fx.fsrDepth);drop(fx.fsrMotion);drop(fx.upscaled);drop(fx.opaque);drop(fx.reactive);
+        fx.taaValid=fx.historyValid=fx.linearValid=fx.fsrValid=false;fx.extent={};
         if(all){for(auto&v:fx.faces)dropView(v);drop(fx.sun);drop(fx.cube);}
     }
-    void release(){for(auto&[k,m]:meshes)s.destroy(m.indices);meshes.clear();for(auto&[k,a]:textures)for(auto&t:a){s.destroy(t.image);s.destroy(t.normal);s.destroy(t.orm);}textures.clear();for(auto&[k,w]:warps)s.destroy(w.image);warps.clear();turbulent.clear();for(auto&[k,w]:skies)s.destroy(w.image);skies.clear();effects.clear();overrideBounds.clear();prepared.clear();actorLights.clear();s.retainedColorValid=s.portalColorValid=false;}
+    void release(){fx.fsrValid=false;for(auto&[k,m]:meshes)s.destroy(m.indices);meshes.clear();for(auto&[k,a]:textures)for(auto&t:a){s.destroy(t.image);s.destroy(t.normal);s.destroy(t.orm);}textures.clear();for(auto&[k,w]:warps)s.destroy(w.image);warps.clear();turbulent.clear();for(auto&[k,w]:skies)s.destroy(w.image);skies.clear();effects.clear();overrideBounds.clear();prepared.clear();actorLights.clear();s.retainedColorValid=s.portalColorValid=false;}
     VkSampler sampler(bool linear,bool clamp,double mip=0,bool anisotropic=false){mip=mip<1?0:mip<=2?1:3;float a=anisotropic?effective_anisotropy(s.options.forceAnisotropy?1:frame?frame->anisotropy:0,std::clamp(s.options.anisotropy,1.f,s.properties.limits.maxSamplerAnisotropy)):1;auto key=std::tuple(linear,clamp,mip,a);auto[it,inserted]=samplers.try_emplace(key);if(inserted)try{it->second=s.sampler(linear,clamp,mip,a);}catch(...){samplers.erase(it);throw;}return it->second;}
     Allocation allocate(VkDeviceSize size,VkDeviceSize alignment=16,const void*data=nullptr){
         auto&a=arenas[s.slotIndex];for(std::size_t i=0;;++i){if(i==a.buffers.size()){a.used.push_back(0);try{a.buffers.emplace_back();}catch(...){a.used.pop_back();throw;}try{a.buffers.back()=s.buffer(std::max<VkDeviceSize>(1024*1024,size+alignment),VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,true);}catch(...){a.buffers.pop_back();a.used.pop_back();throw;}}auto offset=(a.used[i]+alignment-1)/alignment*alignment;if(offset+size>a.buffers[i].size)continue;a.used[i]=offset+size;if(data)std::memcpy(static_cast<std::byte*>(a.buffers[i].mapped)+offset,data,size);return {&a.buffers[i],offset,size};}
@@ -210,8 +215,8 @@ struct Raster {
         return {{std::int32_t(x0),std::int32_t(y0)},{std::uint32_t(x1-x0),std::uint32_t(y1-y0)}};
     }
     void set_region(VkRect2D r){region=r;VkViewport viewport{float(r.offset.x),float(r.offset.y),float(std::max(1u,r.extent.width)),float(std::max(1u,r.extent.height)),0,1};vkCmdSetViewport(s.command,0,1,&viewport);auto scissor=bounded(r);vkCmdSetScissor(s.command,0,1,&scissor);}
-    VkRect2D full()const{return {{0,0},{s.extent.width,s.extent.height}};}
-    VkRect2D rectangle(Rect r)const{if(r.width<=0||r.height<=0)r={0,0,float(metrics.width),float(metrics.height)};return {{std::int32_t(std::lround(r.x*metrics.scaleX)),std::int32_t(std::lround(r.y*metrics.scaleY))},{std::uint32_t(std::max(0l,std::lround(r.width*metrics.scaleX))),std::uint32_t(std::max(0l,std::lround(r.height*metrics.scaleY)))}};}
+    VkRect2D full()const{return {{0,0},renderExtent};}
+    VkRect2D rectangle(Rect r)const{if(r.width<=0||r.height<=0)r={0,0,float(metrics.width),float(metrics.height)};const float sx=metrics.scaleX*float(viewExtent.width)/float(s.extent.width),sy=metrics.scaleY*float(viewExtent.height)/float(s.extent.height);return {{std::int32_t(std::lround(r.x*sx)),std::int32_t(std::lround(r.y*sy))},{std::uint32_t(std::max(0l,std::lround(r.width*sx))),std::uint32_t(std::max(0l,std::lround(r.height*sy)))}};}
     void clear(Color c,bool color,bool depth,bool stencil,VkRect2D r){r=bounded(r);if(!r.extent.width||!r.extent.height)return;std::array<VkClearAttachment,2>a{};unsigned n=0;if(color){a[n].aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;a[n].colorAttachment=0;a[n++].clearValue.color={{c.r,c.g,c.b,c.a}};}if(depth||stencil){a[n].aspectMask=(depth?VK_IMAGE_ASPECT_DEPTH_BIT:0)|(stencil?VK_IMAGE_ASPECT_STENCIL_BIT:0);a[n++].clearValue.depthStencil={1,0};}if(n){VkClearRect rect{r,0,1};vkCmdClearAttachments(s.command,n,a.data(),1,&rect);}}
     void bind(PipelineKey key,const Uniform&u,std::array<Image*,6>images={},std::array<VkSampler,6>sampling={},Allocation offsets={}){key.samples=target?target->color.samples:renderSamples;key.colorFormat=target?target->color.format:renderColor;key.depthFormat=target?target->depth.format:renderDepth;vkCmdBindPipeline(s.command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline(key));auto set=descriptor(u,images,sampling,offsets);vkCmdBindDescriptorSets(s.command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelineLayout,0,1,&set,0,nullptr);if(key.program==Scene&&s.rayEnabled){auto rays=rt_set(*s.rays);vkCmdBindDescriptorSets(s.command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelineLayout,1,1,&rays,0,nullptr);}}
     void mipmaps(Image&image){end();s.transition(image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);for(std::uint32_t level=1,w=image.width,h=image.height;level<image.levels;++level){VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;b.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;b.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;b.newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.image=image.handle;b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,level-1,1,0,image.layers};vkCmdPipelineBarrier(s.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&b);auto nw=std::max(1u,w/2),nh=std::max(1u,h/2);VkImageBlit blit{};blit.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,level-1,0,image.layers};blit.srcOffsets[1]={int(w),int(h),1};blit.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,level,0,image.layers};blit.dstOffsets[1]={int(nw),int(nh),1};vkCmdBlitImage(s.command,image.handle,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,image.handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,VK_FILTER_LINEAR);w=nw;h=nh;}if(image.levels>1){VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT;b.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;b.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;b.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.image=image.handle;b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,image.levels-1,0,image.layers};vkCmdPipelineBarrier(s.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&b);}image.layout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;s.transition(image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);}
@@ -468,15 +473,18 @@ struct Raster {
         if(fx.shadowsValid){globals[0]={&fx.sun,compareSampler};if(fx.shadowIndex>=0)globals[1]={&fx.cube,compareSampler};}
     }
     void ensure_effects(){
-        const auto&f=s.options.features;const bool depthEffects=f.ssao||f.fog||f.taa,rt=rtSignals();
-        if((!depthEffects&&!f.bloom&&!f.fxaa&&!rt)||(fx.extent.width==s.extent.width&&fx.extent.height==s.extent.height))return;
-        free_effects(false);fx.extent=s.extent;const auto w=s.extent.width,h=s.extent.height;
+        const auto&f=s.options.features;const bool depthEffects=f.ssao||f.fog||f.taa||f.fsr,rt=rtSignals();
+        if((!depthEffects&&!f.bloom&&!f.fxaa&&!rt)||(fx.extent.width==s.render.width&&fx.extent.height==s.render.height&&(!f.fsr||(fx.upscaled.width==s.extent.width&&fx.upscaled.height==s.extent.height))))return;
+        free_effects(false);fx.extent=s.render;const auto w=s.render.width,h=s.render.height;
         constexpr VkImageUsageFlags color=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,storage=VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
         auto readable=[&](Image&i){s.transition(i,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);};
         auto general=[&](Image&i){s.transition(i,VK_IMAGE_LAYOUT_GENERAL,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);};
         if(depthEffects){fx.depth=s.image(w,h,s.depthFormat,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);fx.depthView=depth_view(fx.depth);fx.depthSampled=fx.depth;fx.depthSampled.view=fx.depthView;fx.linear=s.image(w,h,VK_FORMAT_R32_SFLOAT,color);}
         if(f.ssao)fx.ao=s.image(w,h,VK_FORMAT_R16_SFLOAT,color);
-        if(f.taa||f.fxaa||f.sharpen)fx.ldr=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);
+        if(f.fog)fx.fog=s.image(std::max(1u,w/2),std::max(1u,h/2),VK_FORMAT_R16G16B16A16_SFLOAT,color);
+        if(f.taa||f.fxaa||f.sharpen||f.fsr)fx.ldr=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);
+        if(f.fsr){fx.fsrDepth=s.image(w,h,VK_FORMAT_R32_SFLOAT,color);fx.fsrMotion=s.image(w,h,VK_FORMAT_R16G16_SFLOAT,color);fx.upscaled=s.image(s.extent.width,s.extent.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);readable(fx.upscaled);
+            fx.opaque=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);fx.reactive=s.image(w,h,VK_FORMAT_R8_UNORM,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);readable(fx.reactive);}
         if(f.fxaa&&f.sharpen)fx.sharp=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);
         if(f.taa)for(auto&i:fx.taa){i=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);readable(i);}
         if(f.bloom)for(unsigned i=0;i<fx.bloom.size();++i)fx.bloom[i]=s.image(std::max(1u,w>>(i+1)),std::max(1u,h>>(i+1)),VK_FORMAT_R16G16B16A16_SFLOAT,color);
@@ -537,26 +545,28 @@ struct Raster {
     Uniform effect_uniform(int mode,float texelWidth,float texelHeight)const{Uniform u=view;u.inverseViewProjection=fx.inverseVP;u.camera=vec(fx.forward,fx.nearPlane);u.range={fx.farPlane,view.fogParameters[0],view.fogParameters[1],0};u.pass={float(mode),float(frameIndex%64)*7.f,texelWidth,texelHeight};return u;}
     // Primary view, before view-space entities clear depth: single-sample depth copy, linear depth, SSAO, volumetric fog.
     void depth_effects(Target&destination,VkRect2D r){
-        const auto&f=s.options.features;if(!(f.ssao||f.fog||f.taa))return;end();
+        const auto&f=s.options.features;if(!(f.ssao||f.fog||f.taa||f.fsr))return;end();
         constexpr auto depthStages=VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;constexpr auto depthAccess=VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         if(destination.depth.samples!=VK_SAMPLE_COUNT_1_BIT){
             // An empty rendering instance resolves sample 0 of the MSAA depth (Vulkan 1.2 depth/stencil resolve).
             s.transition(destination.depth,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,depthStages,depthAccess);s.transition(fx.depth,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,depthStages,depthAccess);
             VkRenderingAttachmentInfo d{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};d.imageView=destination.depth.view;d.imageLayout=destination.depth.layout;d.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;d.storeOp=VK_ATTACHMENT_STORE_OP_STORE;d.resolveMode=VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;d.resolveImageView=fx.depth.view;d.resolveImageLayout=fx.depth.layout;
-            VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};ri.renderArea={{0,0},s.extent};ri.layerCount=1;ri.pDepthAttachment=&d;vkCmdBeginRendering(s.command,&ri);vkCmdEndRendering(s.command);
+            VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};ri.renderArea={{0,0},s.render};ri.layerCount=1;ri.pDepthAttachment=&d;vkCmdBeginRendering(s.command,&ri);vkCmdEndRendering(s.command);
         }else{
             s.transition(destination.depth,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);s.transition(fx.depth,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
-            VkImageCopy copy{};copy.srcSubresource={VK_IMAGE_ASPECT_DEPTH_BIT,0,0,1};copy.dstSubresource=copy.srcSubresource;copy.extent={s.extent.width,s.extent.height,1};vkCmdCopyImage(s.command,destination.depth.handle,destination.depth.layout,fx.depth.handle,fx.depth.layout,1,&copy);
+            VkImageCopy copy{};copy.srcSubresource={VK_IMAGE_ASPECT_DEPTH_BIT,0,0,1};copy.dstSubresource=copy.srcSubresource;copy.extent={s.render.width,s.render.height,1};vkCmdCopyImage(s.command,destination.depth.handle,destination.depth.layout,fx.depth.handle,fx.depth.layout,1,&copy);
         }
         s.transition(fx.depth,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
-        const float tw=1.f/s.extent.width,th=1.f/s.extent.height;const auto nearest=sampler(false,true),linear=sampler(true,true);
+        const float tw=1.f/s.render.width,th=1.f/s.render.height;const auto nearest=sampler(false,true),linear=sampler(true,true);
         auto readable=[&](Image&i){s.transition(i,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);};
         begin_image(fx.linear);set_region(full());bind({EffectProgram},effect_uniform(1,tw,th),{&fx.depthSampled},{nearest});vkCmdDraw(s.command,3,1,0,0);end();readable(fx.linear);fx.linearValid=true;
         if(f.ssao){
             begin_image(fx.ao);set_region(full());bind({EffectProgram},effect_uniform(2,tw,th),{&fx.linear},{nearest});vkCmdDraw(s.command,3,1,0,0);end();readable(fx.ao);
             begin(destination);set_region(r);bind({EffectProgram,0,0,0,1,0,3},effect_uniform(3,tw,th),{&fx.ao,&fx.linear},{linear,nearest});vkCmdDraw(s.command,3,1,0,0);
         }
-        if(f.fog){begin(destination);set_region(r);bind({EffectProgram,0,0,0,1,0,4},effect_uniform(4,tw,th),{&fx.linear},{nearest});vkCmdDraw(s.command,3,1,0,0);}
+        // Volumetric fog marches at half resolution (alpha keeps each sample's depth) and is added with a depth-aware upsample.
+        if(f.fog){begin_image(fx.fog);set_region(full());bind({EffectProgram},effect_uniform(4,1.f/fx.fog.width,1.f/fx.fog.height),{&fx.linear},{nearest});vkCmdDraw(s.command,3,1,0,0);end();readable(fx.fog);
+            begin(destination);set_region(r);bind({EffectProgram,0,0,0,1,0,4},effect_uniform(14,tw,th),{&fx.fog,&fx.linear},{nearest,nearest});vkCmdDraw(s.command,3,1,0,0);}
         begin(destination);set_region(r);
     }
     VkDescriptorSet allocate_set(VkDescriptorSetLayout setLayout){
@@ -575,7 +585,7 @@ struct Raster {
     }
     void dispatch(VkPipeline pipeline,VkDescriptorSet set,int mode,int stride){
         vkCmdBindPipeline(s.command,VK_PIPELINE_BIND_POINT_COMPUTE,pipeline);std::array<VkDescriptorSet,2>sets{set,rt_set(*s.rays)};vkCmdBindDescriptorSets(s.command,VK_PIPELINE_BIND_POINT_COMPUTE,computeLayout,0,2,sets.data(),0,nullptr);
-        const std::array<std::int32_t,2>push{mode,stride};vkCmdPushConstants(s.command,computeLayout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(push),push.data());vkCmdDispatch(s.command,(s.extent.width+7)/8,(s.extent.height+7)/8,1);
+        const std::array<std::int32_t,2>push{mode,stride};vkCmdPushConstants(s.command,computeLayout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(push),push.data());vkCmdDispatch(s.command,(s.render.width+7)/8,(s.render.height+7)/8,1);
     }
     void compute_barrier(VkPipelineStageFlags source=VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VkAccessFlags written=VK_ACCESS_SHADER_WRITE_BIT){VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};b.srcAccessMask=written;b.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;vkCmdPipelineBarrier(s.command,source,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,1,&b,0,nullptr,0,nullptr);}
     // One depth-tested prepass draw (G-buffer pass 2, motion-vector pass 3); `previous` and `before` supply the motion pass's
@@ -602,7 +612,7 @@ struct Raster {
         const bool consecutive=fx.motionFrame+1==frameIndex;fx.motionFrame=frameIndex;std::swap(fx.previousModels,fx.currentModels);fx.currentModels.clear();
         // The previous frame's deformed poses (its compute writes) are read as vertex-shader storage.
         end();VkMemoryBarrier poses{VK_STRUCTURE_TYPE_MEMORY_BARRIER};poses.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;poses.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;vkCmdPipelineBarrier(s.command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,0,1,&poses,0,nullptr,0,nullptr);
-        auto saved=view;view.pass={3,0,1.f/s.extent.width,1.f/s.extent.height};view.previousViewProjection=fx.previousVP;begin_offscreen(&fx.motion,fx.motionDepth,fx.motionDepth.view,s.extent.width,s.extent.height);auto retained=effects;
+        auto saved=view;view.pass={3,0,1.f/s.render.width,1.f/s.render.height};view.previousViewProjection=fx.previousVP;begin_offscreen(&fx.motion,fx.motionDepth,fx.motionDepth.view,s.render.width,s.render.height);auto retained=effects;
         opaque_entities(camera,[&](const DrawInstance&d,int queue){
             auto model=model_matrix(d,&camera);if(d.objectId)fx.currentModels.insert_or_assign(d.objectId,model);
             auto previous=consecutive&&d.objectId?fx.previousModels.find(d.objectId):fx.previousModels.end();auto found=prepared.find(&d);
@@ -615,37 +625,74 @@ struct Raster {
     // Primary RT view: G-buffer prepass, stochastic ray-query signals, optional temporal + a-trous denoise (docs/RAYTRACING.md).
     void rt_signals(const Camera&camera){
         const auto&f=s.options.features;const int bits=(f.shadows==ShadowMode::RayTraced?1:0)|(f.gi?2:0)|(f.roughReflections?4:0);const unsigned cur=fx.historyIndex,prev=cur^1u;
-        auto saved=view;view.pass[0]=2;begin_offscreen(&fx.gdata[cur],fx.gdepth[cur],fx.gdepth[cur].view,s.extent.width,s.extent.height);auto retained=effects;
+        auto saved=view;view.pass[0]=2;begin_offscreen(&fx.gdata[cur],fx.gdepth[cur],fx.gdepth[cur].view,s.render.width,s.render.height);auto retained=effects;
         auto draw=[&](const DrawInstance&d,int queue){prepass_draw(d,queue,camera,retained,model_matrix(d,&camera));};
         if(camera.drawWorld&&frame->world&&(camera.layers&1))draw(worldDraw,-1);
         opaque_entities(camera,draw);
-        end();view=saved;
+        end();view=saved;s.mark("rt_gbuffer");
         for(auto*image:{&fx.gdata[cur],&fx.gdepth[cur]})s.transition(*image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
         for(auto*set:{&fx.raw,&fx.tmp})for(auto&image:*set)s.transition(image,VK_IMAGE_LAYOUT_GENERAL,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);
         // The TLAS and the GPU-deformed poses written this frame are read by compute ray queries.
         compute_barrier(VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_HOST_BIT,VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR|VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_HOST_WRITE_BIT);
         ComputeUniform cu;cu.inverseViewProjection=inverse(view.viewProjection);cu.previousViewProjection=fx.previousVP;cu.eye=vec(camera.position,camera.farClip);cu.sun=vec(unit(frame->sunDirection),0.02f);
-        cu.params={float(frameIndex&0xffff),1500.f,40.f,camera.nearClip};cu.camera=vec(fx.forward,float(std::min<std::size_t>(frame->lights.size(),32)));cu.config={bits,int(s.extent.width),int(s.extent.height),fx.historyValid?1:0};
+        cu.params={float(frameIndex&0xffff),1500.f,40.f,camera.nearClip};cu.camera=vec(fx.forward,float(std::min<std::size_t>(frame->lights.size(),32)));cu.config={bits,int(s.render.width),int(s.render.height),fx.historyValid?1:0};
         const auto nearest=sampler(false,true);const std::array<std::pair<Image*,VkSampler>,5>edges{{{&fx.gdepth[cur],nearest},{&fx.gdata[cur],nearest},{&fx.gdepth[prev],nearest},{&fx.gdata[prev],nearest},{&fx.motion,nearest}}};
-        dispatch(signalsPipeline,compute_set(cu,std::span(edges).first(2),std::array<Image*,3>{&fx.raw[0],&fx.raw[1],&fx.raw[2]}),0,0);
+        dispatch(signalsPipeline,compute_set(cu,std::span(edges).first(2),std::array<Image*,3>{&fx.raw[0],&fx.raw[1],&fx.raw[2]}),0,0);s.mark("rt_signals");
         std::array<Image,3>*result=&fx.raw;
         if(f.denoise){
             auto&history=fx.history[cur];auto&before=fx.history[prev];
             auto filter=[&](int mode,int stride,std::array<Image,3>&in,std::array<Image,3>&out){compute_barrier();dispatch(filterPipeline,compute_set(cu,edges,std::array<Image*,11>{&in[0],&in[1],&in[2],&before[0],&before[1],&before[2],&fx.length[prev],&out[0],&out[1],&out[2],&fx.length[cur]}),mode,stride);};
-            filter(0,0,fx.raw,history);filter(1,1,history,fx.tmp);filter(1,2,fx.tmp,fx.raw);filter(1,4,fx.raw,fx.tmp);result=&fx.tmp;
+            filter(0,0,fx.raw,history);filter(1,1,history,fx.tmp);filter(1,2,fx.tmp,fx.raw);filter(1,4,fx.raw,fx.tmp);result=&fx.tmp;s.mark("rt_denoise");
         }
         for(auto&image:*result)s.transition(image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
         globals[2]={&(*result)[0],nearest};globals[3]={&(*result)[1],nearest};globals[4]={&(*result)[2],nearest};globals[5]={&fx.gdepth[cur],nearest};view.effects[1]=float(bits|int(view.effects[1]));
         fx.historyValid=true;fx.historyIndex=prev;
     }
-    // Background-view composite: resolve, bloom, tone map (PBR) or identity, TAA, FXAA, written into the LDR scene target.
+    // Foreground views depth-test against the background views' depth/stencil. At a different (FSR render) size it cannot
+    // be copied: they start from cleared depth/stencil (VIEW entities draw in front of the world anyway).
+    void carry_depth(){
+        s.transition(s.scene.depth,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
+        if(s.render.width==s.extent.width&&s.render.height==s.extent.height){
+            s.transition(s.hdr.depth,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
+            VkImageCopy copy{};copy.srcSubresource={VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT,0,0,1};copy.dstSubresource=copy.srcSubresource;copy.extent={s.extent.width,s.extent.height,1};vkCmdCopyImage(s.command,s.hdr.depth.handle,s.hdr.depth.layout,s.scene.depth.handle,s.scene.depth.layout,1,&copy);
+        }else{const VkClearDepthStencilValue clear{1,0};const VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT,0,1,0,1};vkCmdClearDepthStencilImage(s.command,s.scene.depth.handle,s.scene.depth.layout,&clear,1,&range);}
+    }
+    // FSR 3.1 inputs at render size (device depth as R32F, unjittered full motion: entity vectors where the depth agrees,
+    // camera reprojection elsewhere), then the upscale of the tone-mapped LDR view into fx.upscaled (display size).
+    // FSR reactive input: the primary view's colour once its opaque geometry is drawn (resolved when multisampled).
+    void snapshot_opaque(Target&t){
+        end();fx.captureOpaque=false;auto&c=t.color;
+        s.transition(c,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);s.transition(fx.opaque,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
+        if(c.samples!=VK_SAMPLE_COUNT_1_BIT){VkImageResolve r{};r.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};r.dstSubresource=r.srcSubresource;r.extent={c.width,c.height,1};vkCmdResolveImage(s.command,c.handle,c.layout,fx.opaque.handle,fx.opaque.layout,1,&r);}
+        else{VkImageCopy r{};r.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};r.dstSubresource=r.srcSubresource;r.extent={c.width,c.height,1};vkCmdCopyImage(s.command,c.handle,c.layout,fx.opaque.handle,fx.opaque.layout,1,&r);}
+        s.transition(fx.opaque,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);fx.opaqueValid=true;
+    }
+    void upscale(Uniform u,Image&source){
+        const auto nearest=sampler(false,true);
+        auto pass=[&](Image&out,int mode,std::array<Image*,6>in){begin_image(out);set_region({{0,0},{out.width,out.height}});u.pass={float(mode),0,1.f/out.width,1.f/out.height};bind({EffectProgram},u,in,{nearest,nearest});vkCmdDraw(s.command,3,1,0,0);end();};
+        pass(fx.fsrDepth,11,{&fx.depthSampled});
+        u.inverseViewProjection=fx.inverseVP;u.previousViewProjection=fx.previousVP;u.viewProjection=fx.unjittered;u.cameraPosition=vec(fx.eye,fx.farPlane);u.camera=vec(fx.forward,fx.nearPlane);
+        pass(fx.fsrMotion,13,{&fx.linear,fx.motionValid?&fx.motion:&black});
+        const auto now=std::chrono::steady_clock::now();
+        const float ms=fx.fsrTime==std::chrono::steady_clock::time_point{}?16.7f:std::chrono::duration<float,std::milli>(now-fx.fsrTime).count();
+        const bool reset=!fx.fsrValid||fx.fsrFrame+1!=frameIndex;fx.fsrTime=now;fx.fsrFrame=frameIndex;fx.fsrValid=true;
+        for(auto*i:{&fx.ldr,&fx.fsrDepth,&fx.fsrMotion,&fx.upscaled})s.transition(*i,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);
+        constexpr VkImageUsageFlags color=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,storage=VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
+        auto in=[](Image&i,VkImageUsageFlags usage){return Fsr3::Image{i.handle,i.format,{i.width,i.height},usage};};
+        Fsr3::Image reactive{};
+        if(fx.opaqueValid){s.transition(source,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);s.fsr->reactive(s.command,in(fx.opaque,VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT),in(source,color|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT),in(fx.reactive,storage));
+            reactive=in(fx.reactive,storage);s.transition(fx.reactive,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);}
+        s.fsr->dispatch({s.command,in(fx.ldr,color),in(fx.fsrDepth,color),in(fx.fsrMotion,color),reactive,in(fx.upscaled,storage),
+            fx.fsrJitter,std::clamp(ms,.1f,1000.f),s.options.features.sharpen?.4f:0.f,fx.nearPlane,fx.farPlane,fx.fovY,reset});
+        s.transition(fx.upscaled,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);s.mark("fsr");
+    }
+    // Background-view composite: resolve, bloom, tone map (PBR) or identity, TAA or FSR, FXAA, written into the LDR scene target.
     void composite(){
         const auto&f=s.options.features;if(!composite_enabled(s.options.pbr,f))return;
-        if(!f.bloom&&!f.fxaa&&!f.taa&&!f.sharpen){composite_hdr();return;}
+        if(!f.bloom&&!f.fxaa&&!f.taa&&!f.sharpen&&!f.fsr){composite_hdr();return;}
         end();Image*source=&s.hdr.color;
-        if(s.samples!=VK_SAMPLE_COUNT_1_BIT){s.transition(s.hdr.color,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);s.transition(s.hdr.resolve,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);VkImageResolve resolve{};resolve.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};resolve.dstSubresource=resolve.srcSubresource;resolve.extent={s.extent.width,s.extent.height,1};vkCmdResolveImage(s.command,s.hdr.color.handle,s.hdr.color.layout,s.hdr.resolve.handle,s.hdr.resolve.layout,1,&resolve);source=&s.hdr.resolve;}
-        s.transition(s.hdr.depth,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);s.transition(s.scene.depth,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
-        VkImageCopy copy{};copy.srcSubresource={VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT,0,0,1};copy.dstSubresource=copy.srcSubresource;copy.extent={s.extent.width,s.extent.height,1};vkCmdCopyImage(s.command,s.hdr.depth.handle,s.hdr.depth.layout,s.scene.depth.handle,s.scene.depth.layout,1,&copy);
+        if(s.samples!=VK_SAMPLE_COUNT_1_BIT){s.transition(s.hdr.color,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);s.transition(s.hdr.resolve,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);VkImageResolve resolve{};resolve.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};resolve.dstSubresource=resolve.srcSubresource;resolve.extent={s.render.width,s.render.height,1};vkCmdResolveImage(s.command,s.hdr.color.handle,s.hdr.color.layout,s.hdr.resolve.handle,s.hdr.resolve.layout,1,&resolve);source=&s.hdr.resolve;}
+        carry_depth();
         s.transition(*source,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
         const auto linear=sampler(true,true),nearest=sampler(false,true);Uniform u;u.pbr={s.options.pbr?1.f:0.f,0,0,0};
         auto pass=[&](Image&out,int mode,std::array<Image*,6>in,std::array<VkSampler,6>sampling,int blend=0,bool load=false){
@@ -655,28 +702,36 @@ struct Raster {
         if(f.bloom){pass(fx.bloom[0],5,{source},{linear});for(unsigned i=1;i<fx.bloom.size();++i)pass(fx.bloom[i],6,{&fx.bloom[i-1]},{linear});for(int i=int(fx.bloom.size())-2;i>=0;--i)pass(fx.bloom[i],7,{&fx.bloom[i+1]},{linear},4,true);}
         u.range[3]=f.bloom?0.15f:0.f; // effects.glsl k22BloomStrength.
         const std::array<Image*,6>compositeInputs{source,f.bloom?&fx.bloom[0]:&white};const std::array<VkSampler,6>compositeSampling{nearest,linear};
-        const bool chain=f.taa||f.fxaa||f.sharpen;Image*current=&fx.ldr;
+        const bool chain=f.taa||f.fxaa||f.sharpen||f.fsr;Image*current=&fx.ldr;
         if(chain)pass(fx.ldr,8,compositeInputs,compositeSampling);else{begin(s.scene);set_region(full());u.pass={8,0,0,0};bind({EffectProgram},u,compositeInputs,compositeSampling);vkCmdDraw(s.command,3,1,0,0);}
         if(f.taa){
             auto&next=fx.taa[fx.taaIndex];auto&history=fx.taa[fx.taaIndex^1u];u.inverseViewProjection=fx.inverseVP;u.previousViewProjection=fx.previousVP;u.cameraPosition=vec(fx.eye,fx.farPlane);u.camera=vec(fx.forward,fx.nearPlane);u.range[3]=fx.taaValid&&fx.linearValid?1.f:0.f;
             pass(next,9,{&fx.ldr,&history,fx.linearValid?&fx.linear:&white,fx.motionValid?&fx.motion:&black},{nearest,linear,nearest,nearest});current=&next;fx.taaIndex^=1u;fx.taaValid=fx.linearValid;
         }
         // sharpen: contrast-adaptive sharpening (effects.frag mode 12) is the last LDR pass, after TAA/FXAA.
-        if(f.sharpen&&f.fxaa){pass(fx.sharp,10,{current},{linear});current=&fx.sharp;}
-        if(chain){begin(s.scene);set_region(full());u.pass={f.sharpen?12.f:f.fxaa?10.f:11.f,0,1.f/s.extent.width,1.f/s.extent.height};bind({EffectProgram},u,{current},{linear});vkCmdDraw(s.command,3,1,0,0);}
+        // FSR replaces TAA (and FXAA/CAS: its RCAS sharpens); without a primary 3D view this frame the LDR view is stretched.
+        if(f.fsr){if(fx.linearValid){upscale(u,*source);current=&fx.upscaled;}else fx.fsrValid=false;}
+        else if(f.sharpen&&f.fxaa){pass(fx.sharp,10,{current},{linear});current=&fx.sharp;}
+        if(chain){begin(s.scene);set_region(full());u.pass={f.fsr?11.f:f.sharpen?12.f:f.fxaa?10.f:11.f,0,1.f/current->width,1.f/current->height};bind({EffectProgram},u,{current},{linear});vkCmdDraw(s.command,3,1,0,0);}
     }
     void camera(const Camera&camera,bool targetOnly=false,const PortalSurface*targetPlane=nullptr){
+        // Composited background views (PBR, bloom, TAA, FXAA, FSR) render to the HDR target; LDR targets tone map in shader.
+        const bool hdrView=composite_enabled(s.options.pbr,s.options.features)&&!camera.foreground&&!targetOnly;
+        struct ExtentGuard{VkExtent2D&e;VkExtent2D saved;~ExtentGuard(){e=saved;}}extentGuard{viewExtent,viewExtent};if(!targetOnly)viewExtent=hdrView?s.render:s.extent; // portal targets inherit their parent's size
         Rect viewport=camera.viewport;if(viewport.width<=0||viewport.height<=0)viewport={0,0,float(metrics.width),float(metrics.height)};auto r=rectangle(viewport);if(!r.extent.width||!r.extent.height||(!camera.perDrawOpacity&&camera.alpha<=0))return;
-        const Camera*portalCamera=nullptr;std::optional<PortalSurface>surface;if(!targetOnly&&camera.portalId){for(auto&candidate:frame->cameras)if(candidate.sourceId==camera.portalId){portalCamera=&candidate;break;}if(!portalCamera)throw std::runtime_error("Attached portal view is absent from game frame");surface=Renderer::portal_surface(*frame,camera,metrics);if(surface){end();s.ensure_auxiliary(s.portal);this->camera(*portalCamera,true,&*surface);end();s.transition(s.portal.color,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);}}
-        // Composited background views (PBR, bloom, TAA, FXAA) render to the HDR target; LDR targets tone map in shader.
-        const bool hdrView=composite_enabled(s.options.pbr,s.options.features)&&!camera.foreground&&!targetOnly;Target&main=hdrView?s.hdr:s.scene;auto seeded=[&](Color c){return hdrView&&s.options.pbr?inverse_tone_map(c):c;};
-        bool translucent=!targetOnly&&!camera.perDrawOpacity&&camera.alpha<1;end();Target*destination=&main;if(targetOnly){s.ensure_auxiliary(s.portal);destination=&s.portal;}else if(translucent){s.ensure_auxiliary(s.alpha);destination=&s.alpha;}
+        const Camera*portalCamera=nullptr;std::optional<PortalSurface>surface;if(!targetOnly&&camera.portalId){for(auto&candidate:frame->cameras)if(candidate.sourceId==camera.portalId){portalCamera=&candidate;break;}if(!portalCamera)throw std::runtime_error("Attached portal view is absent from game frame");surface=Renderer::portal_surface(*frame,camera,metrics);if(surface){end();s.ensure_auxiliary(s.portal,viewExtent);this->camera(*portalCamera,true,&*surface);end();s.transition(s.portal.color,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);}}
+        Target&main=hdrView?s.hdr:s.scene;auto seeded=[&](Color c){return hdrView&&s.options.pbr?inverse_tone_map(c):c;};
+        bool translucent=!targetOnly&&!camera.perDrawOpacity&&camera.alpha<1;end();Target*destination=&main;if(targetOnly){s.ensure_auxiliary(s.portal,viewExtent);destination=&s.portal;}else if(translucent){s.ensure_auxiliary(s.alpha,viewExtent);destination=&s.alpha;}
         portalPass=targetOnly;maskPass=false;view={};view.viewProjection=camera_matrix(camera,float(r.extent.width)/r.extent.height);view.cameraPosition=vec(camera.position,camera.farClip);view.sunDirection=vec(frame->sunDirection);view.fogColor=vec(camera.environmentOverride?camera.fogColor:frame->fogColor);view.fogParameters={camera.environmentOverride?camera.fogStart:frame->fogStart,camera.environmentOverride?camera.fogEnd:frame->fogEnd,1,0};view.flags[0][0]=std::min<std::size_t>(frame->lights.size(),32);view.flags[3][3]=surface.has_value();if(surface){Rect pv=portalCamera->viewport;if(pv.width<=0||pv.height<=0)pv={0,0,float(metrics.width),float(metrics.height)};view.portalProjection=camera_matrix(*portalCamera,pv.width/pv.height);view.portalViewport={pv.x/metrics.width,pv.y/metrics.height,pv.width/metrics.width,pv.height/metrics.height};view.portalPlane=vec(surface->normal,-dot(surface->normal,surface->position));}
         view.pbr={s.options.pbr?1.f:0.f,s.options.pbr&&!hdrView?1.f:0.f,0,0};
         // Original D3D VIEW +Z maps to world forward even though native projection is GL-style RH.
         auto basis=transform({},camera.angles,{1,1,1});view.parameters[2][1]=basis[0];view.parameters[2][2]=basis[1];view.parameters[2][3]=basis[2];
         const bool primaryView=&camera==primary&&!targetOnly;
-        if(primaryView){fx.unjittered=view.viewProjection;if(s.options.features.taa)view.viewProjection=jittered(view.viewProjection,taa_jitter(frameIndex),float(r.extent.width),float(r.extent.height));fx.inverseVP=inverse(view.viewProjection);fx.eye=camera.position;fx.forward={basis[0],basis[1],basis[2]};fx.nearPlane=camera.nearClip;fx.farPlane=camera.farClip;}
+        fx.captureOpaque=primaryView&&s.fsr;opaqueTarget=destination;
+        if(primaryView){fx.unjittered=view.viewProjection;
+            // FSR: its Halton phase (render pixels, y down); clip y is up before scene.vert's Vulkan inversion.
+            if(s.fsr){fx.fsrJitter=s.fsr->jitter(frameIndex);view.viewProjection=jittered(view.viewProjection,{fx.fsrJitter[0],-fx.fsrJitter[1]},float(r.extent.width),float(r.extent.height));const float aspect=float(r.extent.width)/float(r.extent.height);fx.fovY=2*std::atan(std::tan(rad(std::abs(camera.horizontalFov))*0.5f)/(camera.widescreen?camera.referenceAspect:aspect)*std::abs(camera.pixelAspect));}
+            else if(s.options.features.taa)view.viewProjection=jittered(view.viewProjection,taa_jitter(frameIndex),float(r.extent.width),float(r.extent.height));fx.inverseVP=inverse(view.viewProjection);fx.eye=camera.position;fx.forward={basis[0],basis[1],basis[2]};fx.nearPlane=camera.nearClip;fx.farPlane=camera.farClip;}
         if(s.rayEnabled&&s.options.features.shadows==ShadowMode::RayTraced)view.effects[1]=8; // shadows=rt: inline visibility rays in every view.
         if(fx.shadowsValid){view.effects[0]=1;view.sunShadow=fx.sunMatrix;view.effects[2]=fx.sunTexel;view.effects[3]=float(fx.shadowIndex);view.shadowLight=vec(fx.shadowLight,fx.shadowIndex>=0?fx.shadowRange:0);}
         if(camera.portalClip){auto position=targetPlane?targetPlane->position:camera.portalPosition,normal=targetPlane?targetPlane->normal:camera.portalNormal;if(dot(normal,normal)==0)throw std::runtime_error("Portal clip view has no real surface plane");normal=unit(normal);view.clipPlane=vec(normal,-dot(normal,position));}
@@ -692,6 +747,7 @@ struct Raster {
                 transparent.clear();for(auto&d:frame->instances){if(camera.noEntities||!frame->renderEntities||!(d.layers&camera.layers)||d.viewSpace||(camera.excludeEntityId&&d.objectId==camera.excludeEntityId))continue;if(camera.perDrawOpacity&&d.model&&model_has_entity_skins(*d.model)){if(d.scale.x==0||d.scale.y==0||d.scale.z==0)continue;if(!d.visible){draw_instance(d,camera,true,-1,encounter);continue;}auto queues=model_queue(d);if(queues&1)draw_instance(d,camera,true,0,encounter);if(queues&2)transparent.push_back(&d);continue;}bool translucentDraw=d.alpha<1||d.additive||d.translucent||d.flare;if(d.model)for(auto&mat:d.model->materials)translucentDraw|=mat.alpha<1;if(translucentDraw)transparent.push_back(&d);else draw_instance(d,camera,true,-1,encounter);}
                 std::sort(transparent.begin(),transparent.end(),[&](auto*a,auto*b){auto da=add(a->position,mul(camera.position,-1)),db=add(b->position,mul(camera.position,-1));return dot(da,da)>dot(db,db);});
             }
+            if(fx.captureOpaque&&encounter!=Encounter::Prepare)snapshot_opaque(*opaqueTarget);
             for(auto*d:transparent)draw_instance(*d,camera,false,encounter==Encounter::Replay?-1:camera.perDrawOpacity&&d->model&&model_has_entity_skins(*d->model)?1:-1,encounter);
             for(auto*d:shadowOrder)draw_planar(*d,camera,encounter);
         };
@@ -701,19 +757,18 @@ struct Raster {
             selectShadows(); // A6 cached-caster admission precedes every current-camera callback.
             encounters(Encounter::Prepare);
         }
-        ray_scene(camera);if(primaryView&&motionVectors())motion_vectors(camera);if(primaryView&&rtSignals())rt_signals(camera);begin(*destination);set_region(r);if(targetOnly&&(!camera.perDrawOpacity||!s.portalColorValid)){clear(camera.environmentOverride?camera.background:frame->clearColor,true,true,true,full());s.portalColorValid=true;}if(translucent)clear(seeded(camera.foreground?Color{0,0,0,0}:camera.environmentOverride?camera.background:frame->clearColor),true,true,true,full());if(camera.perDrawOpacity)clear(seeded(camera.environmentOverride?camera.background:frame->clearColor),camera.clearColor,camera.clearDepth,camera.clearStencil,r);else if(camera.clearDepth)clear({},false,true,false,r);
+        ray_scene(camera);s.mark("as_build");if(primaryView&&motionVectors()){motion_vectors(camera);s.mark("motion");}if(primaryView&&rtSignals())rt_signals(camera);begin(*destination);set_region(r);if(targetOnly&&(!camera.perDrawOpacity||!s.portalColorValid)){clear(camera.environmentOverride?camera.background:frame->clearColor,true,true,true,full());s.portalColorValid=true;}if(translucent)clear(seeded(camera.foreground?Color{0,0,0,0}:camera.environmentOverride?camera.background:frame->clearColor),true,true,true,full());if(camera.perDrawOpacity)clear(seeded(camera.environmentOverride?camera.background:frame->clearColor),camera.clearColor,camera.clearDepth,camera.clearStencil,r);else if(camera.clearDepth)clear({},false,true,false,r);
         if(!s.rayEnabled)selectShadows();
-        draw_sky(camera);encounters(s.rayEnabled?Encounter::Replay:Encounter::Live);
-        particles(camera);if(primaryView)depth_effects(*destination,r);bool hasView=false;if(frame->renderEntities&&!camera.noEntities)for(auto&d:frame->instances)if(!targetOnly&&d.viewSpace&&(d.layers&camera.layers)&&d.visible&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId)){hasView=true;break;}if(hasView){clear({},false,true,false,r);view.fogParameters[0]=view.fogParameters[1]=0;for(auto&d:frame->instances)if(d.viewSpace&&(d.layers&camera.layers)&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId))draw_instance(d,camera);}
+        draw_sky(camera);encounters(s.rayEnabled?Encounter::Replay:Encounter::Live);s.mark("scene");
+        particles(camera);s.mark("particles");if(primaryView){depth_effects(*destination,r);s.mark("depth_fx");}bool hasView=false;if(frame->renderEntities&&!camera.noEntities)for(auto&d:frame->instances)if(!targetOnly&&d.viewSpace&&(d.layers&camera.layers)&&d.visible&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId)){hasView=true;break;}if(hasView){clear({},false,true,false,r);view.fogParameters[0]=view.fogParameters[1]=0;for(auto&d:frame->instances)if(d.viewSpace&&(d.layers&camera.layers)&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId))draw_instance(d,camera);}
         if(translucent){end();s.transition(s.alpha.color,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);begin(main);set_region(full());Uniform u;u.viewport={float(metrics.width),float(metrics.height),0,0};uiVertices.clear();quad(viewport,{viewport.x/metrics.width,viewport.y/metrics.height,viewport.width/metrics.width,viewport.height/metrics.height},{camera.alpha,camera.alpha,camera.alpha,camera.alpha});flush_ui(s.alpha.color,u,false,true,true);}
         if(primaryView&&rtSignals()){const auto nearest=sampler(false,true);globals[2]=globals[3]=globals[4]={&white,nearest};globals[5]={&dummyDepth,nearest};}
     }
     // Resolve HDR background views, carry depth/stencil for foreground views, tone map into the LDR scene target.
     void composite_hdr(){
         if(!s.options.pbr)return;end();Image*source=&s.hdr.color;
-        if(s.samples!=VK_SAMPLE_COUNT_1_BIT){s.transition(s.hdr.color,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);s.transition(s.hdr.resolve,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);VkImageResolve resolve{};resolve.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};resolve.dstSubresource=resolve.srcSubresource;resolve.extent={s.extent.width,s.extent.height,1};vkCmdResolveImage(s.command,s.hdr.color.handle,s.hdr.color.layout,s.hdr.resolve.handle,s.hdr.resolve.layout,1,&resolve);source=&s.hdr.resolve;}
-        s.transition(s.hdr.depth,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);s.transition(s.scene.depth,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
-        VkImageCopy copy{};copy.srcSubresource={VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT,0,0,1};copy.dstSubresource=copy.srcSubresource;copy.extent={s.extent.width,s.extent.height,1};vkCmdCopyImage(s.command,s.hdr.depth.handle,s.hdr.depth.layout,s.scene.depth.handle,s.scene.depth.layout,1,&copy);
+        if(s.samples!=VK_SAMPLE_COUNT_1_BIT){s.transition(s.hdr.color,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);s.transition(s.hdr.resolve,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);VkImageResolve resolve{};resolve.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};resolve.dstSubresource=resolve.srcSubresource;resolve.extent={s.render.width,s.render.height,1};vkCmdResolveImage(s.command,s.hdr.color.handle,s.hdr.color.layout,s.hdr.resolve.handle,s.hdr.resolve.layout,1,&resolve);source=&s.hdr.resolve;}
+        carry_depth();
         s.transition(*source,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
         begin(s.scene);set_region(full());Uniform u;bind({TonemapProgram},u,{source},{sampler(false,true)});vkCmdDraw(s.command,3,1,0,0);
     }
@@ -722,8 +777,8 @@ struct Raster {
         if(m.drawableWidth<=0||m.drawableHeight<=0)return;
         if(f.world&&!f.hardwareLighting)throw std::runtime_error("Legacy software world-light topology is not implemented by the native Vulkan hardware path");
         if(!s.command)throw std::runtime_error("Vulkan raster requires an admitted platform frame");
-        frame=&f;metrics=m;centroid=centroid_lighting(f);reset_arena();prepared.clear();actorLights.clear();
-        ++frameIndex;ensure_dummies();fx.shadowsValid=fx.linearValid=fx.motionValid=false;reset_globals();ensure_effects();
+        frame=&f;metrics=m;viewExtent=s.extent;centroid=centroid_lighting(f);reset_arena();prepared.clear();actorLights.clear();
+        ++frameIndex;ensure_dummies();fx.shadowsValid=fx.linearValid=fx.motionValid=fx.opaqueValid=fx.captureOpaque=false;reset_globals();ensure_effects();
         // scene.vert reads the caster push constant statically (selected only by shadow passes): define it for every draw.
         {const Matrix identity{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};vkCmdPushConstants(s.command,pipelineLayout,casterStages,0,sizeof(Matrix),identity.data());}
         // The primary view (effects owner): first full-window background world view that is not alpha-blended.
@@ -741,15 +796,15 @@ struct Raster {
         for(auto&c:f.ui){if(c.kind==UICommand::Kind::Image&&c.image)texture(c.image,c.dynamicImage,c.imageSerial,c.textureMode);if(c.kind==UICommand::Kind::Text&&c.font)texture(&c.font->image);}
         if(f.video){check_image(*f.video);if(!video.handle||video.width!=f.video->width||video.height!=f.video->height||videoSerial!=f.videoSerial){end();if(video.handle)s.retire(video);video=s.image(f.video->width,f.video->height,VK_FORMAT_R8G8B8A8_UNORM,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={f.video->width,f.video->height,1};s.upload(video,std::as_bytes(std::span(f.video->rgba)),std::span(&copy,1));videoSerial=f.videoSerial;}}
         if(f.adjustment.enabled&&(!gammaUploaded||adjustment.gammaRamp!=f.adjustment.gammaRamp)){end();s.retire(gamma);gamma=s.image(256,3,VK_FORMAT_R16_UNORM,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={256,3,1};s.upload(gamma,std::as_bytes(std::span(f.adjustment.gammaRamp)),std::span(&copy,1));adjustment=f.adjustment;gammaUploaded=true;}adjustment.enabled=f.adjustment.enabled;
-        if(primary&&shadow_maps_enabled(s.options.features))shadow_maps(*primary);reset_globals();
+        s.mark("prepare");if(primary&&shadow_maps_enabled(s.options.features)){shadow_maps(*primary);s.mark("shadow_maps");}reset_globals();
         const bool composited=composite_enabled(s.options.pbr,s.options.features);
         begin(composited?s.hdr:s.scene);set_region(full());auto seed=[&](Color c){return s.options.pbr?inverse_tone_map(c):c;};bool native=std::any_of(f.cameras.begin(),f.cameras.end(),[](auto&c){return c.perDrawOpacity;});if(!native||!s.retainedColorValid){clear(seed(f.clearColor),true,true,true,full());s.retainedColorValid=true;}if(native&&f.clearScreen){const Camera*first=nullptr;for(auto&c:f.cameras)if(!c.foreground&&!c.portalTarget){first=&c;break;}if(!first)for(auto&c:f.cameras)if(c.foreground&&!c.portalTarget){first=&c;break;}Rect v=first?first->viewport:Rect{};bool fullScreen=first&&(v.width<=0||v.height<=0||(v.x<=0&&v.y<=0&&v.x+v.width>=m.width&&v.y+v.height>=m.height));if(!fullScreen)clear(seed(f.screenColor),true,false,false,full());}
-        for(auto&c:f.cameras)if(!c.foreground&&!c.portalTarget)camera(c);composite();std::size_t ci=0,ui=0,cursor=f.ui.size();while(ci<f.cameras.size()||ui<f.ui.size()){while(ci<f.cameras.size()&&(!f.cameras[ci].foreground||f.cameras[ci].portalTarget))++ci;if(ci<f.cameras.size()&&(ui==f.ui.size()||f.cameras[ci].layer<=f.ui[ui].layer))camera(f.cameras[ci++]);else if(ui<f.ui.size()){auto&c=f.ui[ui++];if(c.cursorOverlay){if(cursor==f.ui.size())cursor=ui-1;}else draw_ui(c);}}
-        if(f.video){begin(s.scene);set_region(full());Rect r=f.videoRect;if(r.width<=0||r.height<=0){float scale=std::min(float(m.width)/f.video->width,float(m.height)/f.video->height);r={(m.width-f.video->width*scale)/2,(m.height-f.video->height*scale)/2,f.video->width*scale,f.video->height*scale};}Uniform u;u.viewport={float(m.width),float(m.height),0,0};uiVertices.clear();quad(r,{0,0,1,1},{1,1,1,1});flush_ui(video,u,false,true);}for(;cursor<f.ui.size();++cursor)if(f.ui[cursor].cursorOverlay)draw_ui(f.ui[cursor]);end();
+        for(auto&c:f.cameras)if(!c.foreground&&!c.portalTarget)camera(c);s.mark("views");composite();s.mark("composite");std::size_t ci=0,ui=0,cursor=f.ui.size();while(ci<f.cameras.size()||ui<f.ui.size()){while(ci<f.cameras.size()&&(!f.cameras[ci].foreground||f.cameras[ci].portalTarget))++ci;if(ci<f.cameras.size()&&(ui==f.ui.size()||f.cameras[ci].layer<=f.ui[ui].layer))camera(f.cameras[ci++]);else if(ui<f.ui.size()){auto&c=f.ui[ui++];if(c.cursorOverlay){if(cursor==f.ui.size())cursor=ui-1;}else draw_ui(c);}}
+        if(f.video){begin(s.scene);set_region(full());Rect r=f.videoRect;if(r.width<=0||r.height<=0){float scale=std::min(float(m.width)/f.video->width,float(m.height)/f.video->height);r={(m.width-f.video->width*scale)/2,(m.height-f.video->height*scale)/2,f.video->width*scale,f.video->height*scale};}Uniform u;u.viewport={float(m.width),float(m.height),0,0};uiVertices.clear();quad(r,{0,0,1,1},{1,1,1,1});flush_ui(video,u,false,true);}for(;cursor<f.ui.size();++cursor)if(f.ui[cursor].cursorOverlay)draw_ui(f.ui[cursor]);end();s.mark("ui");
         Image*resolved=&s.scene.color;
         if(s.samples!=VK_SAMPLE_COUNT_1_BIT){s.transition(s.scene.color,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);s.transition(s.scene.resolve,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);VkImageResolve resolve{};resolve.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};resolve.dstSubresource=resolve.srcSubresource;resolve.extent={s.extent.width,s.extent.height,1};vkCmdResolveImage(s.command,s.scene.color.handle,s.scene.color.layout,s.scene.resolve.handle,s.scene.resolve.layout,1,&resolve);resolved=&s.scene.resolve;}
         s.transition(*resolved,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
-        begin_image(s.finalImage);set_region(full());Uniform post;post.parameters[1][3]=adjustment.enabled;bind({Post},post,{resolved,&gamma},{sampler(true,true),sampler(false,true)});vkCmdDraw(s.command,3,1,0,0);end();
+        begin_image(s.finalImage);set_region(full());Uniform post;post.parameters[1][3]=adjustment.enabled;bind({Post},post,{resolved,&gamma},{sampler(true,true),sampler(false,true)});vkCmdDraw(s.command,3,1,0,0);end();s.mark("post");
         transparent.clear();shadowOrder.clear();particlePose=nullptr;if(primary)fx.previousVP=fx.unjittered;
     }
 };

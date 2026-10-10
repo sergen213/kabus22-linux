@@ -1,0 +1,241 @@
+Kabus22 provenance: AMD FidelityFX SDK (FSR 3.1.4 upscaler subset)
+=====================================================
+
+Upstream
+  Repository  https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK
+  Tag         v1.1.4 (release notes: FSR 3.1.4; sdk/include/FidelityFX/host/ffx_fsr3upscaler.h VERSION 3.1.4)
+  Commit      c6efa6bf7f2027b3ec94f28578bb5965eabb9e55
+  Archive     https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/archive/refs/tags/v1.1.4.tar.gz
+              (GitHub tag archives are not guaranteed byte-stable; the per-file hashes below are authoritative)
+  License     MIT, LICENSE.txt (installed as share/doc/kabus22/third_party/FidelityFX-SDK-LICENSE.txt)
+  Ported from the sibling project IKV (third_party/FidelityFX-SDK, IKV-PROVENANCE.txt), same archive and patches.
+
+Selection
+  What FSR 3.1.4 upscaling needs on the Vulkan backend: the fsr3upscaler host component, the VK backend (ffx_vk.cpp),
+  its GLSL passes and gpu headers (fsr3upscaler, fsr1, spd, core) and the shared host helpers. Paths are kept as in the
+  upstream tree. Frame interpolation, optical flow, the Win32-only FrameInterpolationSwapchain, the fsr3 wrapper
+  component, ffx-api, samples, prebuilt DLLs and other effects are not vendored.
+
+Kabus22-owned files around it (not upstream)
+  tools/k22_fsr3_blobs.py             replaces the Windows-only FidelityFX_SC: glslangValidator SPIR-V for the 10 FSR3
+                                      upscaler passes x sharpening (LDR input, unjittered render-resolution motion,
+                                      non-inverted depth) + SPIR-V descriptor reflection into <build>/k22_fsr3_blobs.h
+  third_party/k22-ffx-posix/k22_ffx_posix.h  force-included POSIX stand-ins (_countof, wcscpy_s, strcpy_s, sprintf_s),
+                                      FFX_SDK_DEFAULT_CONTEXT_SIZE 1 MiB (wchar_t is 4 bytes on Linux) and the engine's
+                                      dlopen Vulkan dispatch (native/vulkan_loader.hpp, VK_NO_PROTOTYPES)
+  native/fsr_vk.hpp, native/fsr_vk.cpp  wrapper: blob accessor, capability clamp, shared resources, upscale dispatch
+
+Local patches (each marked "Kabus22 local patch (shared with IKV)" in the source; numbering follows IKV-PROVENANCE.txt,
+IKV patch 6 touches frame interpolation only and is not vendored)
+  1. sdk/src/backends/vk/ffx_vk.cpp, findMemoryTypeIndex: skip memory types with VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD
+     unless that property is requested (RADV lists its uncached device-coherent type last; VUID-vkAllocateMemory-
+     deviceCoherentMemory-02790 and uncached memory for every FSR resource).
+  2. sdk/src/backends/vk/ffx_vk.cpp, ffxGetScratchMemorySizeVK + CreateBackendContextVK: scratch sub-arrays aligned to
+     alignof(BackendContext_VK::EffectContext) (alignas(32)) instead of 4 bytes, plus slack; GCC -O2 aligned SSE stores
+     into pEffectContexts crashed with 4-byte offsets.
+  3. sdk/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp: a failed ffxFsr3UpscalerContextCreate released nothing
+     (VUID-vkDestroyDevice-device-05137); context->device is set only after the backend context exists and a failed
+     create calls the idempotent fsr3upscalerRelease.
+  4. sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_callbacks_glsl.h: rw_luma_history storage format qualifier
+     rgba8 -> rgba16f, the format of FSR3UPSCALER_LumaHistory1/2 (validation Undefined-Value-StorageImage-FormatMismatch).
+  5. sdk/src/backends/vk/ffx_vk.cpp, CreateBackendContextVK: the global descriptor pool passed poolSizeCount = 5 of 6
+     pool sizes, dropping VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; now _countof(poolSizes).
+
+Patched files: unmodified upstream sha256 -> Kabus22 sha256
+  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_callbacks_glsl.h
+    upstream 875c2b8d8df93716fb46271886c768a9ef40c5ccc11ade39397952b4a4e54321
+    kabus22  395f22227f6a59b254134b5f1c68e55c250956acb92be70ee476737e08e33890
+  sdk/src/backends/vk/ffx_vk.cpp
+    upstream 9fa430949184fadb357e6949d7564cf0f8e4653ead683a99755a6f15c4a76589
+    kabus22  33201106c876d01fc86a636f4b2a008d5d901a60a755651b7c1dd7b3317a5aec
+  sdk/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp
+    upstream 0b1f1227535971a818c6367f1c27f115db682aea4371fa0c15e8dbd3b0ba5764
+    kabus22  2d40ba406ec223f83d9a1774313584b27f4e898b28a29bba01ff5b4396aa8b1d
+
+Upstream sha256 of every vendored file (unmodified originals; the 3 patched files differ as listed above)
+82cf74fc23885107c7f69249ac3f1dac55898ff68320eb2c753984cae6b2d78a  LICENSE.txt
+a19560f837c09f0c990e98b5925b731135d908e372af41c5895cbfa70cc9e5c8  sdk/include/FidelityFX/gpu/ffx_common_types.h
+e439aa5f516b2d2ebf070ff1d24561f04fa5f00262a2e4f760764a7d07de7997  sdk/include/FidelityFX/gpu/ffx_core.h
+bdb58574cf3ba80803c4198b4661e3a1cd63c877d59833f22bf15962b164a7fe  sdk/include/FidelityFX/gpu/ffx_core_cpu.h
+01afe5b65549b2c0951b494ca4bf570ee2aa89a64344e4c7d98ef86e6613ab42  sdk/include/FidelityFX/gpu/ffx_core_glsl.h
+0e3c50cb0b4592c051d87e028a1dfa54fbd097942ebb3146964db801dec095d0  sdk/include/FidelityFX/gpu/ffx_core_gpu_common.h
+d10466cbf027c8c23858a25f8e8cbbbf521d29f373db663c9354221651e9a498  sdk/include/FidelityFX/gpu/ffx_core_gpu_common_half.h
+98722d4b1331c437f5aee645e6f12ed722b721f2ffcb0ec523ee817857f394c7  sdk/include/FidelityFX/gpu/ffx_core_hlsl.h
+a7c3a1c213ec083bec401181036cffe7a222af2c430c0bab6bd8c14e83e8a567  sdk/include/FidelityFX/gpu/ffx_core_portability.h
+5d608d9d0645da03a3aa6c729c5ad990c6f222053eab850b8e218607c1baaa9d  sdk/include/FidelityFX/gpu/fsr1/ffx_fsr1.h
+1859aa7ebdaa8ab92da5d0034d7392b6daa5eb54c8775f18b5ad622fd759513b  sdk/include/FidelityFX/gpu/fsr1/ffx_fsr1_callbacks_glsl.h
+26dc1e08945df01278e975b9baca62746967efeb2e668f7c96c41e601bd3a92c  sdk/include/FidelityFX/gpu/fsr1/ffx_fsr1_callbacks_hlsl.h
+4247ba45634dba21bf27b6d81c27ee4ce323b6978fc772f1209b2b313aab25d7  sdk/include/FidelityFX/gpu/fsr1/ffx_fsr1_easu.h
+26305f114f77faaa69e5e1eb89bf16009ac2373e96009624917aba5db645b522  sdk/include/FidelityFX/gpu/fsr1/ffx_fsr1_rcas.h
+df2891141e2332cf309782e9e4183bf01a7c8bd3628a5035b99838f0e7a9f0bd  sdk/include/FidelityFX/gpu/fsr1/ffx_fsr1_resources.h
+7212a028c6ff3ca4a76f9d62b7f64f5f5adce0f108067d8995c7bc795234afbc  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_accumulate.h
+875c2b8d8df93716fb46271886c768a9ef40c5ccc11ade39397952b4a4e54321  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_callbacks_glsl.h
+85d6250e9b89d431167e98400e6e2db64227769b393c97ca6aad077581179114  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_callbacks_hlsl.h
+4898aa014fef875d3644b9b3bed03f31a963349e17ad553198f87ae8af82cb3f  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_common.h
+51849bd2f758e2b15375c6a21633fea2f7433a19eb3d74d1d07f8ead36a695ba  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_debug_view.h
+82d13d21e161732e48b267d28906f067a8df306ead5aeeed65a1ef66b3e06003  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_luma_instability.h
+fa6eeaf8197b214ee1853d73da3c66cd0c8fc24444a65237b0023bd68f10d887  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_luma_pyramid.h
+acae0499b8805c363c105895afc28fc90e549b38c8bffdcbec1cf9e2f842abb0  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_prepare_inputs.h
+ddf7a6d9cd6e357328e972e0b654da977edcb2e337c992b06d6256eeae339e03  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_prepare_reactivity.h
+f1d8a9152bd3ceda8a10dafe44e0c6d27109b345fc4a5704f71c6bf23d6c5cb4  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_rcas.h
+d2d01ea2f59658e5494414448f11435879bdac871c3ad7c84b951248bc223702  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_reproject.h
+10c6f7619a6c1ff9983fdff9bac565789b1cda52f97ef60b491498223e7b7097  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_resources.h
+e8de656c71b15537ddd891b7485492b7829e6aec1dea96256fbc246c9a7c7366  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_sample.h
+13e772ff9bd32244fb990704055040f8dbb945c014cc6f0fdbf553188b300e7e  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_shading_change.h
+b1e94d7cbb1b7d6e4556e4a080577a62fde07efbc8379b52223d322ed4b75912  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_shading_change_pyramid.h
+c51f3af61b43fd779a6685202886dbb5dab3bfea989f8b5060c8c9ab4a93207b  sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_upsample.h
+d276f32ee18948cb053c991f3c8821f9664c93f12cb2483dd2978f333bca67b2  sdk/include/FidelityFX/gpu/spd/ffx_spd.h
+87b1172d08d80767d91242cdb1ebc2a1127fd6e0787fa799732c8341fdf4b76e  sdk/include/FidelityFX/gpu/spd/ffx_spd_callbacks_glsl.h
+dafecd4a2556828fafe4a57cb542903b2782426b1850610cc42984e539804ac0  sdk/include/FidelityFX/gpu/spd/ffx_spd_callbacks_hlsl.h
+985cf820915f2b36bc3cc0a5f6cbd1d56fb86e34492df06fa970b32fc48dfcac  sdk/include/FidelityFX/gpu/spd/ffx_spd_downsample.h
+b5b4eaa8cdc613ee1d3104a0be64ea4bac96afa1bffe1699ac7d0888e03a9c27  sdk/include/FidelityFX/gpu/spd/ffx_spd_resources.h
+75343f8508cfa609bd79a7deddf2df572f0ff876ead8b5ddd1bd9c46f96f1459  sdk/include/FidelityFX/host/backends/vk/ffx_vk.h
+d64fb7b916773d2ac96903fc699e438099b8702ecf5ce7aba051bd7e0a109ee1  sdk/include/FidelityFX/host/ffx_assert.h
+511ba2b3d99aaa3ac450de7c548244647df146939a7de105bd85713bde4a36c0  sdk/include/FidelityFX/host/ffx_error.h
+686cf613f70a1b01a9fa1302fb15f896b86cf2a68b069b3f5f2b5c0bcd9ea15b  sdk/include/FidelityFX/host/ffx_fsr3upscaler.h
+0b012be0256c47663905e51fa31873f8bf2c5536c40211e1b01cf117eb5988d6  sdk/include/FidelityFX/host/ffx_interface.h
+48c125292b054be1ad208e36b24fb174a9cae80a3fd780a2cb52c4674e6bf4fe  sdk/include/FidelityFX/host/ffx_message.h
+057535d46b7241bb25163a21dc4e59b0029f2d3da6a474b1c1028f921d5eb6f8  sdk/include/FidelityFX/host/ffx_types.h
+efe50400378277356116f0a3989ec69367b08aaae65892fdf3a4cf931a4c7bb8  sdk/include/FidelityFX/host/ffx_util.h
+d139f399b80ebf2f232c3fd64139edd1ea62f4d5f28ff144c3971fffdc5771a4  sdk/src/backends/shared/ffx_shader_blobs.h
+9fa430949184fadb357e6949d7564cf0f8e4653ead683a99755a6f15c4a76589  sdk/src/backends/vk/ffx_vk.cpp
+73b5be6db479475559d2374957b2854aa6d7f7ddadba76ef5e4ed7f248ea9564  sdk/src/backends/vk/shaders/fsr3upscaler/ffx_fsr3upscaler_accumulate_pass.glsl
+95991f97c70409cd2783ce7b6866d1fd318e8751c774e1aef6b55f3e470bd81f  sdk/src/backends/vk/shaders/fsr3upscaler/ffx_fsr3upscaler_autogen_reactive_pass.glsl
+2ed1674f3f42316b1603111155aa042096158a646cb59117d38b6b0ec130c78b  sdk/src/backends/vk/shaders/fsr3upscaler/ffx_fsr3upscaler_debug_view_pass.glsl
+423345d36c811237af7a41ef5e6220638f5159952e90fa084aa952ddd267581b  sdk/src/backends/vk/shaders/fsr3upscaler/ffx_fsr3upscaler_luma_instability_pass.glsl
+3e637a702c2cc6b6a222df4327a4ed565f731c6190e958e0ffec5b43741f7ea4  sdk/src/backends/vk/shaders/fsr3upscaler/ffx_fsr3upscaler_luma_pyramid_pass.glsl
+bdf3b1ca0fdce968afb79f55d667960382139926eccdfdec46e08dbae3982657  sdk/src/backends/vk/shaders/fsr3upscaler/ffx_fsr3upscaler_prepare_inputs_pass.glsl
+176f6aa5f2f437487222c7fc057ce858795a6677d6ac3e937a1ce36521c6ddfc  sdk/src/backends/vk/shaders/fsr3upscaler/ffx_fsr3upscaler_prepare_reactivity_pass.glsl
+110b409d5e10b16e5a237c13932a707c1c07932bf790e814f1a9d76f02569ad7  sdk/src/backends/vk/shaders/fsr3upscaler/ffx_fsr3upscaler_rcas_pass.glsl
+246d24b76e292b7c8c5ba39dfc3a4dff1486701f5fccc6482284afac5a7daaf9  sdk/src/backends/vk/shaders/fsr3upscaler/ffx_fsr3upscaler_shading_change_pass.glsl
+ce34582f454925499523d30d2619e19aefd8f1c091545c37d4ebd8feea91cf55  sdk/src/backends/vk/shaders/fsr3upscaler/ffx_fsr3upscaler_shading_change_pyramid_pass.glsl
+0b1f1227535971a818c6367f1c27f115db682aea4371fa0c15e8dbd3b0ba5764  sdk/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp
+89935ce16720ce8b164538e886df29929716e947b47c72ca3243fed833286bdd  sdk/src/components/fsr3upscaler/ffx_fsr3upscaler_private.h
+c84efb3fe942e3c80b6a595cc68e580154d2380717a88f2ac37939e156b27952  sdk/src/shared/ffx_assert.cpp
+fbe34fcdda7db272b7cdb97619ba4d800829fcbabd42cac6e9862d7f898de14a  sdk/src/shared/ffx_breadcrumbs_list.cpp
+06c6a58888cbb0d9a74b330682adf3ad0a50d4aea8bce8e69e52c2e5b9c724e6  sdk/src/shared/ffx_breadcrumbs_list.h
+96c5a2d576f0688aa77249bf9a85ff8ce3e85c874ccc3d7d4201693f95818811  sdk/src/shared/ffx_message.cpp
+607b93de58b16eaa891056b6664d719699c83f8ba9e039aa1a9e44fcecd1ab09  sdk/src/shared/ffx_object_management.cpp
+e388d1af28f4d3f7388e524257b9692be867884cff720414031d9768995bf223  sdk/src/shared/ffx_object_management.h
+
+Complete local diff (diff -u upstream kabus22; marker comments read "IKV local patch" upstream of this port)
+--- upstream/sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_callbacks_glsl.h
++++ ikv/sdk/include/FidelityFX/gpu/fsr3upscaler/ffx_fsr3upscaler_callbacks_glsl.h
+@@ -395,7 +395,9 @@
+ #endif
+ 
+ #if defined(FSR3UPSCALER_BIND_UAV_LUMA_HISTORY)
+-layout (set = 0, binding = FSR3UPSCALER_BIND_UAV_LUMA_HISTORY, rgba8) uniform image2D  rw_luma_history;
++// IKV local patch: rgba8 -> rgba16f, the format of FSR3UPSCALER_LumaHistory1/2 (R16G16B16A16_FLOAT, ffx_fsr3upscaler.cpp);
++// a mismatched storage format qualifier makes every load/store undefined in Vulkan.
++layout (set = 0, binding = FSR3UPSCALER_BIND_UAV_LUMA_HISTORY, rgba16f) uniform image2D  rw_luma_history;
+ 
+ void StoreLumaHistory(FfxInt32x2 iPxPos, FfxFloat32x4 fLumaHistory)
+ {
+--- upstream/sdk/src/backends/vk/ffx_vk.cpp
++++ ikv/sdk/src/backends/vk/ffx_vk.cpp
+@@ -280,14 +280,17 @@
+         vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &numExtensions, nullptr);
+ 
+     uint32_t extensionPropArraySize = sizeof(VkExtensionProperties) * numExtensions;
+-    uint32_t gpuJobDescArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_GPU_JOBS * sizeof(FfxGpuJobDescription), sizeof(uint32_t));
+-    uint32_t resourceViewArraySize = FFX_ALIGN_UP(((maxContexts * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + FFX_MAX_BINDLESS_DESCRIPTOR_COUNT) * sizeof(BackendContext_VK::VkResourceView), sizeof(uint32_t));
+-    uint32_t stagingRingBufferArraySize = FFX_ALIGN_UP(maxContexts * FFX_CONSTANT_BUFFER_RING_BUFFER_SIZE, sizeof(uint32_t));
+-    uint32_t pipelineArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_VK::PipelineLayout), sizeof(uint32_t));
+-    uint32_t resourceArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_RESOURCE_COUNT * sizeof(BackendContext_VK::Resource), sizeof(uint32_t));
+-    uint32_t contextArraySize = FFX_ALIGN_UP(maxContexts * sizeof(BackendContext_VK::EffectContext), sizeof(uint32_t));
++    // IKV local patch: every sub-array is aligned for alignas(32) EffectContext (upstream: 4 bytes, so -O2 aligned vector
++    // stores into pEffectContexts faulted), plus slack to align the first array after the backend context.
++    const size_t alignment = alignof(BackendContext_VK::EffectContext);
++    uint32_t gpuJobDescArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_GPU_JOBS * sizeof(FfxGpuJobDescription), alignment);
++    uint32_t resourceViewArraySize = FFX_ALIGN_UP(((maxContexts * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + FFX_MAX_BINDLESS_DESCRIPTOR_COUNT) * sizeof(BackendContext_VK::VkResourceView), alignment);
++    uint32_t stagingRingBufferArraySize = FFX_ALIGN_UP(maxContexts * FFX_CONSTANT_BUFFER_RING_BUFFER_SIZE, alignment);
++    uint32_t pipelineArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_VK::PipelineLayout), alignment);
++    uint32_t resourceArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_RESOURCE_COUNT * sizeof(BackendContext_VK::Resource), alignment);
++    uint32_t contextArraySize = FFX_ALIGN_UP(maxContexts * sizeof(BackendContext_VK::EffectContext), alignment);
+     
+-    return FFX_ALIGN_UP(sizeof(BackendContext_VK) + extensionPropArraySize + gpuJobDescArraySize + resourceViewArraySize + stagingRingBufferArraySize +
++    return FFX_ALIGN_UP(sizeof(BackendContext_VK) + alignment + extensionPropArraySize + gpuJobDescArraySize + resourceViewArraySize + stagingRingBufferArraySize +
+                             pipelineArraySize + resourceArraySize + contextArraySize,
+                         sizeof(uint64_t));
+ }
+@@ -406,6 +409,11 @@
+     for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+         if ((memRequirements.memoryTypeBits & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & requestedProperties)) {
+ 
++            // IKV local patch: never select AMD device-coherent/uncached types (RADV lists them last) unless requested;
++            // they require the deviceCoherentMemory feature and bypass the GPU caches.
++            if ((memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD) && !(requestedProperties & VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD))
++                continue;
++
+             // if just device-local memory is requested, make sure this is the invisible heap to prevent over-subscribing the local heap
+             if (requestedProperties == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT && (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+                 continue;
+@@ -1402,13 +1410,15 @@
+         new (&backendContext->uniformBufferMutex) std::mutex();
+ 
+         // Map all of our pointers
+-        uint32_t gpuJobDescArraySize   = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_GPU_JOBS * sizeof(FfxGpuJobDescription), sizeof(uint32_t));
+-        uint32_t resourceViewArraySize = FFX_ALIGN_UP(((backendContext->maxEffectContexts * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + FFX_MAX_BINDLESS_DESCRIPTOR_COUNT) * sizeof(BackendContext_VK::VkResourceView), sizeof(uint32_t));
+-        uint32_t stagingRingBufferArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_CONSTANT_BUFFER_RING_BUFFER_SIZE, sizeof(uint32_t));
+-        uint32_t pipelineArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_VK::PipelineLayout), sizeof(uint32_t));
+-        uint32_t resourceArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_RESOURCE_COUNT * sizeof(BackendContext_VK::Resource), sizeof(uint32_t));
+-        uint32_t contextArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * sizeof(BackendContext_VK::EffectContext), sizeof(uint32_t));
+-        uint8_t* pMem = (uint8_t*)((BackendContext_VK*)(backendContext + 1));
++        // IKV local patch: sub-arrays aligned for alignas(32) EffectContext, see ffxGetScratchMemorySizeVK.
++        const size_t alignment = alignof(BackendContext_VK::EffectContext);
++        uint32_t gpuJobDescArraySize   = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_GPU_JOBS * sizeof(FfxGpuJobDescription), alignment);
++        uint32_t resourceViewArraySize = FFX_ALIGN_UP(((backendContext->maxEffectContexts * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + FFX_MAX_BINDLESS_DESCRIPTOR_COUNT) * sizeof(BackendContext_VK::VkResourceView), alignment);
++        uint32_t stagingRingBufferArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_CONSTANT_BUFFER_RING_BUFFER_SIZE, alignment);
++        uint32_t pipelineArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_VK::PipelineLayout), alignment);
++        uint32_t resourceArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_RESOURCE_COUNT * sizeof(BackendContext_VK::Resource), alignment);
++        uint32_t contextArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * sizeof(BackendContext_VK::EffectContext), alignment);
++        uint8_t* pMem = (uint8_t*)FFX_ALIGN_UP((uintptr_t)(backendContext + 1), alignment);
+ 
+         // Map gpu job array
+         backendContext->pGpuJobs = (FfxGpuJobDescription*)pMem;
+@@ -1529,7 +1539,8 @@
+         descriptorPoolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+         descriptorPoolCreateInfo.pNext = nullptr;
+         descriptorPoolCreateInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+-        descriptorPoolCreateInfo.poolSizeCount = 5;
++        // IKV local patch: all 6 entries (upstream passed 5, dropping STORAGE_BUFFER, which frame interpolation's counters use).
++        descriptorPoolCreateInfo.poolSizeCount = _countof(poolSizes);
+         descriptorPoolCreateInfo.pPoolSizes = poolSizes;
+         descriptorPoolCreateInfo.maxSets = backendContext->maxEffectContexts * FFX_MAX_PASS_COUNT * MAX_PIPELINE_USAGE_PER_FRAME * FFX_MAX_QUEUED_FRAMES;
+ 
+--- upstream/sdk/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp
++++ ikv/sdk/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp
+@@ -508,7 +508,6 @@
+ 
+     // Setup the data for implementation.
+     memset(context, 0, sizeof(FfxFsr3UpscalerContext_Private));
+-    context->device = contextDescription->backendInterface.device;
+ 
+     memcpy(&context->contextDescription, contextDescription, sizeof(FfxFsr3UpscalerContextDescription));
+ 
+@@ -519,6 +518,9 @@
+     // Create the context.
+     FfxErrorCode errorCode = context->contextDescription.backendInterface.fpCreateBackendContext(&context->contextDescription.backendInterface, FFX_EFFECT_FSR3UPSCALER, nullptr, &context->effectContextId);
+     FFX_RETURN_ON_ERROR(errorCode == FFX_OK, errorCode);
++    // IKV local patch: device marks a live backend context (moved here from before the version check) so a failed
++    // create can release it, see ffxFsr3UpscalerContextCreate.
++    context->device = contextDescription->backendInterface.device;
+ 
+     // call out for device caps.
+     errorCode = context->contextDescription.backendInterface.fpGetDeviceCapabilities(&context->contextDescription.backendInterface, &context->deviceCapabilities);
+@@ -1208,6 +1210,14 @@
+     FfxFsr3UpscalerContext_Private* contextPrivate = (FfxFsr3UpscalerContext_Private*)(context);
+     const FfxErrorCode errorCode = fsr3upscalerCreate(contextPrivate, contextDescription);
+ 
++    // IKV local patch: fsr3upscalerCreate returns early after creating the backend context, resources or pipelines;
++    // release that partial state (every release step is idempotent on zeroed or partially created objects).
++    if (errorCode != FFX_OK && contextPrivate->device)
++    {
++        fsr3upscalerRelease(contextPrivate);
++        contextPrivate->device = nullptr;
++    }
++
+     return errorCode;
+ }
+ 

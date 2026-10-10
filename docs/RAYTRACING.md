@@ -158,6 +158,43 @@ composite. On Demir level5 at 1920x1080 with the user-style RT setup (PBR, `shad
 reflections, denoise, bloom, SSAO, FXAA, TAA, fog) the mean luma gradient of the frame rises 1.75 -> 2.19
 (upscale alone 1.79), mean luma unchanged (21.21 -> 21.19).
 
+## Performance
+
+Measured 2026-10-10 on an RX 7900 XTX (RADV, Mesa 26.2.4): Demir in level5 (original save slot 01), standing,
+1920x1080, `--preset ultra` (MSAA 4, PBR, RT shadows/GI/rough reflections, denoise, bloom, TAA, volumetric fog,
+smooth normals, tessellation), immediate present, nested in a headless gamescope. `K22_GPU_TIMING=1` writes Vulkan
+timestamps between the renderer's passes and CPU frame times to stderr, averaged over 300 frames. GPU ms per pass:
+
+| Pass | RT before | RT `fsr=off` | RT `fsr=quality` (ultra) | raster before | raster `fsr=off` | raster `fsr=quality` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| BLAS refit + TLAS (`as_build`) | 0.21 | 0.21 | 0.21 | 0.00 | 0.00 | 0.00 |
+| G-buffer prepass | 0.26 | 0.27 | 0.22 | - | - | - |
+| RT signals (`rt_signals.comp`) | 1.61 | 1.65 | 0.77 | - | - | - |
+| denoiser (`rt_filter.comp`, 4 passes) | 1.42 | 1.44 | 0.62 | - | - | - |
+| scene draws | 0.89 | 0.87 | 0.58 | 0.51 | 0.50 | 0.45 |
+| shadow maps | - | - | - | 0.11 | 0.11 | 0.12 |
+| depth effects (volumetric fog) | 1.63 | 0.47 | 0.23 | 1.51 | 0.45 | 0.29 |
+| composite (bloom, tone map, TAA) | 0.27 | 0.25 | 0.02 | 0.28 | 0.26 | 0.02 |
+| FSR 3.1 (reactive + upscale) | - | - | 0.34 | - | - | 0.37 |
+| GPU frame total | 6.44 | 5.30 | 3.12 | 2.56 | 1.47 | 1.40 |
+| CPU recording | 1.55 | 1.46 | 1.54 | 1.17 | 1.17 | 1.27 |
+| frame time (ms) / FPS | 8.22 / 122 | 5.52 / 181 | 3.27 / 306 | 3.92 / 255 | 2.36 / 424 | 2.47 / 405 |
+
+Root causes found and fixed:
+- **CPU/GPU serialization.** The frame-latency limit (1 in a window, `TRIPLEBUFFER` fullscreen 2) waited for the
+  previous frame's fence before recording the next frame, so CPU recording (1.2-1.6 ms) and GPU work never overlapped
+  (RT: 8.2 ms frames for 6.4 ms of GPU work). The limit now bounds submissions only: the next frame records into the
+  other, idle slot while the previous one runs, and `finish()` waits before submitting. Alone: RT 122 -> 154 FPS,
+  raster 255 -> 380 FPS, same queue depth.
+- **Full-resolution volumetric fog** (24 steps x up to 32 lights per pixel) was the second-largest pass on both
+  backends. It now marches at half resolution (alpha keeps each sample's depth) and is added with a depth-aware
+  bilinear upsample (`effects.frag` modes 4/14): 1.6 -> 0.47 ms.
+- **Per-pixel RT cost at display resolution**: signals and denoiser scale with pixels. `ultra` now runs FSR 3.1
+  quality (2/3 per axis, 0.44x pixels), which halves them; the ultra preset is CPU-bound afterwards.
+- Not a cause: acceleration structures are already refit (BLAS update for changed poses, TLAS update when the instance
+  count is unchanged; 0.21 ms), there are no per-frame queue/device waits, readbacks or descriptor-set rebuilds
+  outside the per-slot arenas.
+
 ## Limits
 
 - Sun shadows (`shadows=rt` and `shadows=shadowmap` alike) make non-lightmapped models indoors much darker
@@ -166,7 +203,7 @@ reflections, denoise, bloom, SSAO, FXAA, TAA, fog) the mean luma gradient of the
 - A light placed inside solid level geometry (as in the Start4 test scene) is still occluded by
   `shadows=rt` for receivers whose path crosses another brush toward it.
 - One bounce, one sample per pixel; reflections hit with legacy shading.
-- The BLAS/TLAS are rebuilt per frame/camera (BLAS refit for changed poses) without compaction.
+- The TLAS is rebuilt per camera when its instance count changes (else updated), BLAS refit for changed poses, without compaction.
 - Particles, view-space entities and billboards are not in the acceleration structure.
 - With `tessellation=1` the BLAS still holds the base mesh: ray-traced shadows, GI and reflections see model
   silhouettes without the PN bulge.

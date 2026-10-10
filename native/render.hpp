@@ -25,6 +25,9 @@ struct GraphicsFeatures {
     bool gi{}, roughReflections{}, denoise{}, bloom{}, ssao{}, fxaa{}, taa{}, fog{};
     // Vulkan-only visual upgrades: smoothed vertex normals, PN-triangle tessellation, load-time texture upscaling, sharpening.
     bool smoothNormals{}, tessellation{}, upscale{}, sharpen{};
+    // AMD FSR 3.1.4 upscaling (Vulkan): 0 off, 1 native AA, 2 quality, 3 balanced, 4 performance, 5 ultra performance.
+    // Replaces TAA; scene/RT/denoise run at the render resolution, UI stays at the display resolution.
+    std::uint8_t fsr{};
     bool operator==(const GraphicsFeatures&) const = default;
 };
 struct RenderOptions { int width{1280}, height{720}, samples{4}; float anisotropy{8}; bool vsync{true}; WindowMode mode{WindowMode::Windowed}; std::string title{"Kabus 22"}; RendererBackend backend{RendererBackend::OpenGL}; bool rayTracing{true};
