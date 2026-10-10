@@ -30,6 +30,7 @@ Implemented `--graphics` keys:
 | `reflections` | `original`, `rough` | `original` | `vulkan-rt` only. |
 | `bloom`, `ssao`, `fxaa`, `volumetric_fog` | `0`, `1` | `0` | All backends. |
 | `taa` | `0`, `1` | `0` | Vulkan raster and RT only. |
+| `texture_upscale`, `sharpen` | `0`, `1` | `0` | Vulkan raster and RT only; on in `enhanced`/`ultra`. |
 
 Features a backend cannot run are dropped by `render_policy::admit_features` with one
 `kabus22: graphics: ...` notice each (also after a preset backend degrades). Capabilities list each
@@ -128,7 +129,7 @@ world camera; depth-based effects apply only to it.
   just for fog). No original level has fog: all 970 WMBs have fog range 0..0 and no script sets
   `fog_start`/`fog_end`. Original content therefore always gets the haze path (checked on the Start4 test
   view, light shaft around the script light, and saves 8 and 26).
-- **Composite** (`pbr`, `bloom`, `taa`, `fxaa`): background views render into an RGBA16F target. With
+- **Composite** (`pbr`, `bloom`, `taa`, `fxaa`, `sharpen`): background views render into an RGBA16F target. With
   PBR off the values stay LDR and the tone curve is identity (bloom/TAA/FXAA work in LDR). Bloom: soft
   threshold 0.7 (knee 0.2), 5-level down/up chain, strength 0.15. On saves 1 and 21 (dark streets) the
   capture is unchanged. On save 26 the torch and the white poster glow and the mean rises 13.21 -> 13.58.
@@ -137,9 +138,15 @@ world camera; depth-based effects apply only to it.
   through the previous view-projection, 3x3 neighborhood clamp, blend 0.1. Consecutive frames of a
   walking player under the following camera (save 19) show no ghost trail, only slight softening. FXAA
   was chosen over SMAA: single pass, no lookup textures, and MSAA already resolves geometric edges.
-- Upscaling: not implemented (not exposed).
+- **Sharpen** (`sharpen=1`, Vulkan): AMD FidelityFX CAS-style contrast-adaptive sharpening
+  (`effects.frag` mode 12, sharpness 0.4) as the last LDR composite pass, after TAA and FXAA (FXAA then
+  writes an extra RGBA16F target). Per-channel strength falls where the 3x3 cross is already contrasty
+  or near 0/1, so edges do not halo. It mainly restores texture detail that TAA softens.
+- **Texture upscale** (`texture_upscale=1`, Vulkan): 2x of original world/model skins ≤ 512 px at upload
+  (Scale2x or Lanczos-3 + mild unsharp, nearest alpha), see `docs/TEXTURE_RESTORATION.md`. No AI, no
+  pack needed; a pack hit wins. Screen-space upscaling (FSR/DLSS-style) is not implemented.
 
 ## Not implemented
 
 A prefiltered sky cubemap for IBL, PBR in ray-traced reflection hits, mirrored-UV bitangent signs, TAA on
-OpenGL, upscaling.
+OpenGL, screen-space upscaling.

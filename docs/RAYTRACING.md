@@ -127,6 +127,12 @@ The previous table had `shadows=shadowmap` at 22.83 ms (Vulkan) and `--preset ul
 | + `reflections=rough denoise=1` | 5.88 |
 | `--preset ultra` (no shadow maps: fog is unshadowed under `shadows=rt`) | 15.08 |
 
+`texture_upscale=1` and `sharpen=1` (see `GRAPHICS_ROADMAP.md`) work the same on `vulkan-rt`: ray-query
+material hits sample the same upscaled image views as raster, and CAS runs after TAA in the shared
+composite. On Demir level5 at 1920x1080 with the user-style RT setup (PBR, `shadows=rt`, GI, rough
+reflections, denoise, bloom, SSAO, FXAA, TAA, fog) the mean luma gradient of the frame rises 1.75 -> 2.19
+(upscale alone 1.79), mean luma unchanged (21.21 -> 21.19).
+
 ## Limits
 
 - Sun shadows (`shadows=rt` and `shadows=shadowmap` alike) make non-lightmapped models indoors much darker

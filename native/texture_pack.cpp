@@ -9,6 +9,8 @@ extern "C" {
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <numbers>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -17,6 +19,7 @@ extern "C" {
 #include <stdexcept>
 #include <unordered_set>
 #include <iconv.h>
+#include <thread>
 
 namespace k22 {
 namespace {
@@ -157,6 +160,92 @@ std::vector<std::uint8_t> encode_png(const Image& image) {
     check(avcodec_send_frame(codec.get(), nullptr), "Flushing PNG encoder");
     check(avcodec_receive_packet(codec.get(), packet.get()), "Encoding PNG");
     return {packet->data, packet->data + packet->size};
+}
+
+Image upscale_texture_2x(const Image& in, bool wrap) {
+    if (!valid_image(in)) throw std::runtime_error("Texture upscale requires a valid RGBA8 image");
+    const int w = int(in.width), h = int(in.height), W = w * 2, H = h * 2;
+    auto at = [wrap](int i, int n) { return wrap ? (i % n + n) % n : std::clamp(i, 0, n - 1); };
+    // upscale.py bleed(): visible colour grows 4 texels into alpha-0 texels, so colour-key RGB never reaches visible edges.
+    std::vector<std::uint8_t> src = in.rgba, seen(std::size_t(w) * h);
+    bool any = false, all = true;
+    for (std::size_t i = 0; i < seen.size(); ++i) { seen[i] = src[i * 4 + 3] > 0; any |= bool(seen[i]); all &= bool(seen[i]); }
+    for (int pass = 0; pass < 4 && any && !all; ++pass) {
+        auto next = seen; all = true;
+        for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+            const std::size_t i = std::size_t(y) * w + x; if (seen[i]) continue;
+            int sum[3]{}, n = 0;
+            for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) { const std::size_t j = std::size_t(at(y + dy, h)) * w + at(x + dx, w); if (seen[j]) { for (int c = 0; c < 3; ++c) sum[c] += src[j * 4 + c]; ++n; } }
+            if (n) { for (int c = 0; c < 3; ++c) src[i * 4 + c] = std::uint8_t((sum[c] + n / 2) / n); next[i] = 1; } else all = false;
+        }
+        seen.swap(next);
+    }
+    std::array<std::uint32_t, 17> colours{}; std::size_t distinct = 0;
+    for (std::size_t i = 0; i < in.rgba.size() && distinct <= 16; i += 4) { std::uint32_t v; std::memcpy(&v, &in.rgba[i], 4); if (std::find(colours.begin(), colours.begin() + distinct, v) == colours.begin() + distinct) colours[distinct++] = v; }
+    Image out{in.width * 2, in.height * 2, std::vector<std::uint8_t>(std::size_t(W) * H * 4), in.sourceDepth, in.nativeStorageBytes, in.nativeTextureAlpha, in.a6AlphaFormat};
+    auto texel = [&](int x, int y) { return src.data() + (std::size_t(at(y, h)) * w + at(x, w)) * 4; };
+    auto put = [&](int X, int Y, const std::uint8_t* rgb) { std::memcpy(&out.rgba[(std::size_t(Y) * W + X) * 4], rgb, 3); };
+    if (distinct <= 16) {
+        // Flat/low-colour art (signage, text): Scale2x/EPX, upscale.py scale2x(); only existing colours are emitted.
+        auto same = [](const std::uint8_t* a, const std::uint8_t* b) { return std::memcmp(a, b, 4) == 0; };
+        for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+            const auto *P = texel(x, y), *A = texel(x, y - 1), *B = texel(x + 1, y), *C = texel(x - 1, y), *D = texel(x, y + 1);
+            put(2 * x, 2 * y, same(C, A) && !same(C, D) && !same(A, B) ? A : P);
+            put(2 * x + 1, 2 * y, same(A, B) && !same(A, C) && !same(B, D) ? B : P);
+            put(2 * x, 2 * y + 1, same(D, C) && !same(D, B) && !same(C, A) ? C : P);
+            put(2 * x + 1, 2 * y + 1, same(B, D) && !same(B, A) && !same(D, C) ? D : P);
+        }
+    } else {
+        // Photographic surfaces: separable Lanczos-3 (2x phases at -/+0.25 texel), then upscale.py's mild unsharp mask
+        // (35 %, threshold 2). Deterministic and never invents structure.
+        float weights[2][6];
+        for (int ph = 0; ph < 2; ++ph) {
+            float total = 0;
+            for (int j = 0; j < 6; ++j) { const double p = std::numbers::pi * ((j - 3 + ph) - (ph ? 0.25 : -0.25)); total += weights[ph][j] = float(3 * std::sin(p) * std::sin(p / 3) / (p * p)); }
+            for (auto& v : weights[ph]) v /= total;
+        }
+        // Row bands on every core: this runs once per texture during level load.
+        auto bands = [](int count, const auto& fn) {
+            const int n = std::clamp(int(std::thread::hardware_concurrency()), 1, 16), step = (count + n - 1) / n;
+            if (count < 64 || n == 1) { fn(0, count); return; }
+            std::vector<std::jthread> pool;
+            for (int b = step; b < count; b += step) pool.emplace_back([&fn, b, step, count] { fn(b, std::min(count, b + step)); });
+            fn(0, step);
+        };
+        const std::size_t stride = std::size_t(W) * 3;
+        std::vector<int> taps(std::size_t(W) * 6), left(W), right(W);
+        for (int X = 0; X < W; ++X) { for (int j = 0; j < 6; ++j) taps[X * 6 + j] = at((X >> 1) + j - 3 + (X & 1), w) * 4; left[X] = at(X - 1, W) * 3; right[X] = at(X + 1, W) * 3; }
+        std::vector<float> row(stride * h), col(stride * H), tmp(stride * H);
+        bands(h, [&](int y0, int y1) {
+            for (int y = y0; y < y1; ++y) {
+                const auto* s = &src[std::size_t(y) * w * 4]; float* o = &row[y * stride];
+                for (int X = 0; X < W; ++X, o += 3) { const float* k = weights[X & 1]; const int* t = &taps[X * 6]; for (int j = 0; j < 6; ++j) for (int c = 0; c < 3; ++c) o[c] += k[j] * s[t[j] + c]; }
+            }
+        });
+        bands(H, [&](int y0, int y1) {
+            for (int Y = y0; Y < y1; ++Y) {
+                float* o = &col[Y * stride];
+                for (int j = 0; j < 6; ++j) { const float* r = &row[at((Y >> 1) + j - 3 + (Y & 1), h) * stride]; const float k = weights[Y & 1][j]; for (std::size_t i = 0; i < stride; ++i) o[i] += k * r[i]; }
+                float* b = &tmp[Y * stride];
+                for (int X = 0; X < W; ++X) for (int c = 0; c < 3; ++c) b[X * 3 + c] = (o[left[X] + c] + 2 * o[X * 3 + c] + o[right[X] + c]) * 0.25f;
+            }
+        });
+        bands(H, [&](int y0, int y1) {
+            for (int Y = y0; Y < y1; ++Y) {
+                const float *v = &col[Y * stride], *up = &tmp[at(Y - 1, H) * stride], *mid = &tmp[Y * stride], *down = &tmp[at(Y + 1, H) * stride];
+                auto* o = &out.rgba[std::size_t(Y) * W * 4];
+                for (int X = 0; X < W; ++X) for (int c = 0; c < 3; ++c) {
+                    const std::size_t i = std::size_t(X) * 3 + c; float x = v[i];
+                    const float d = x - (up[i] + 2 * mid[i] + down[i]) * 0.25f;
+                    if (std::abs(d) > 2) x += 0.35f * d;
+                    o[X * 4 + c] = std::uint8_t(std::clamp(x + 0.5f, 0.f, 255.f));
+                }
+            }
+        });
+    }
+    // Alpha is nearest-scaled: alpha-test coverage is identical at every threshold, including the game's references.
+    for (int Y = 0; Y < H; ++Y) for (int X = 0; X < W; ++X) out.rgba[(std::size_t(Y) * W + X) * 4 + 3] = in.rgba[(std::size_t(Y >> 1) * w + (X >> 1)) * 4 + 3];
+    return out;
 }
 
 fs::path texture_pack_root() {

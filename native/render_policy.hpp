@@ -303,8 +303,8 @@ inline GraphicsFeatures admit_features(GraphicsFeatures f,std::string_view backe
 // Preset-selected backends degrade along this chain with a stderr notice; explicit choices never do.
 inline std::string_view fallback_backend(std::string_view backend){return backend=="vulkan-rt"?"vulkan-raster":backend=="vulkan-raster"?"opengl":"";}
 // ---- Wave-2 effect helpers shared by OpenGL and Vulkan (CPU-tested in k22-render-check --policy). ----
-// Background views go through an offscreen composite (resolve, bloom, tone map, TAA, FXAA) only when needed.
-inline bool composite_enabled(bool pbr,const GraphicsFeatures&f){return pbr||f.bloom||f.fxaa||f.taa;}
+// Background views go through an offscreen composite (resolve, bloom, tone map, TAA, FXAA, sharpen) only when needed.
+inline bool composite_enabled(bool pbr,const GraphicsFeatures&f){return pbr||f.bloom||f.fxaa||f.taa||f.sharpen;}
 // Only shadows=shadowmap renders depth maps; volumetric fog reuses them then, and is unshadowed under shadows=rt
 // (no 7-pass depth render just for fog).
 inline bool shadow_maps_enabled(const GraphicsFeatures&f){return f.shadows==ShadowMode::ShadowMap;}

@@ -17,6 +17,10 @@ std::string texture_key_hex(std::uint64_t);
 // Lossless PNG through the existing FFmpeg dependency; any PNG pixel format decodes to RGBA8 top row first.
 Image decode_png(std::span<const std::uint8_t>);
 std::vector<std::uint8_t> encode_png(const Image&);
+// texture_upscale (Vulkan): 2x one original texture, docs/TEXTURE_RESTORATION.md --method auto without AI. <=16 colours:
+// Scale2x; else Lanczos-3 + mild unsharp. RGB is resampled after bleeding visible colour into alpha-0 texels; alpha is
+// nearest-scaled, so alpha-test coverage is identical at every threshold. wrap: tiling (world) vs edge (model atlas).
+Image upscale_texture_2x(const Image&, bool wrap);
 enum class PackKind { Albedo, Normal, Roughness, Metallic, AO };
 struct PackFile { std::filesystem::path path; std::uint32_t width{}, height{}; };
 struct TexturePack {
