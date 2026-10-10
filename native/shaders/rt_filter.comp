@@ -1,7 +1,7 @@
 #version 460
-// Ray-traced signal denoiser. Mode 0: temporal accumulation with reprojection (previous view-projection) and
-// disocclusion rejection (render_policy::history_valid). Mode 1: one edge-aware a-trous iteration (B3 kernel,
-// depth/normal stopping; mirror-smooth reflections are not blurred).
+// Ray-traced signal denoiser. Mode 0: temporal accumulation with reprojection (motion vectors of moving entities, the
+// previous view-projection elsewhere), disocclusion rejection (render_policy::history_valid) and a variance clip of the
+// history. Mode 1: one edge-aware a-trous iteration (B3 kernel, depth/normal stopping; mirror-smooth reflections are not blurred).
 layout(local_size_x=8,local_size_y=8) in;
 layout(set=0,binding=0,std140) uniform Signals { mat4 inverseViewProjection,previousViewProjection; vec4 eye,sun,params,camera; ivec4 config; } g;
 layout(push_constant) uniform Push { int mode,stride; } pc;
@@ -9,6 +9,7 @@ layout(set=0,binding=2) uniform sampler2D gDepth;
 layout(set=0,binding=3) uniform sampler2D gData;
 layout(set=0,binding=4) uniform sampler2D previousDepth;
 layout(set=0,binding=5) uniform sampler2D previousData;
+layout(set=0,binding=6) uniform sampler2D motionData;
 layout(set=0,binding=10,rgba16f) uniform readonly image2D inMask;
 layout(set=0,binding=11,rgba16f) uniform readonly image2D inGi;
 layout(set=0,binding=12,rgba16f) uniform readonly image2D inReflect;
@@ -23,22 +24,30 @@ layout(set=0,binding=20,r32f) uniform writeonly image2D outLength;
 vec3 decodeNormal(vec2 o){vec3 n=vec3(o,1.0-abs(o.x)-abs(o.y));if(n.z<0.0)n.xy=(1.0-abs(n.yx))*vec2(n.x>=0.0?1.0:-1.0,n.y>=0.0?1.0:-1.0);return normalize(n);}
 float linearDepth(float d){float n=g.params.w,f=g.eye.w,z=d*2.0-1.0;return 2.0*n*f/(f+n-z*(f-n));}
 bool use(int bit){return (g.config.x&bit)!=0;}
+// render_policy::variance_clip (gamma 2): history outside the current 3x3 signal mean +- 2 sigma is pulled onto that box,
+// so a shadow or bounce that moved with its caster does not linger on the receiver.
+vec4 clipHistory(vec4 history,vec4 m1,vec4 m2){vec4 mean=m1/9.0,d=history-mean,e=abs(d)/(sqrt(max(m2/9.0-mean*mean,0.0))*2.0+1e-4);float m=max(max(e.x,e.y),max(e.z,e.w));return m>1.0?mean+d/m:history;}
 void main(){
     ivec2 pixel=ivec2(gl_GlobalInvocationID.xy),size=g.config.yz;if(pixel.x>=size.x||pixel.y>=size.y)return;
     float depth=texelFetch(gDepth,pixel,0).r;vec4 data=texelFetch(gData,pixel,0);
     if(pc.mode==0){
         vec4 mask=use(1)?imageLoad(inMask,pixel):vec4(1),gi=use(2)?imageLoad(inGi,pixel):vec4(0),reflection=use(4)?imageLoad(inReflect,pixel):vec4(0);float count=0.0;
         if(depth<1.0&&g.config.w!=0){
-            vec2 uv=(vec2(pixel)+0.5)/vec2(size);vec4 world=g.inverseViewProjection*vec4(uv.x*2.0-1.0,1.0-uv.y*2.0,depth*2.0-1.0,1.0);vec4 previous=g.previousViewProjection*vec4(world.xyz/world.w,1.0);
-            if(previous.w>0.0){vec2 puv=vec2(previous.x/previous.w*0.5+0.5,0.5-previous.y/previous.w*0.5);ivec2 q=ivec2(floor(puv*vec2(size)));
+            // Moving entities follow their motion vector (rasterized like this G-buffer, so the view depths agree).
+            vec2 uv=(vec2(pixel)+0.5)/vec2(size),puv;float expected;vec4 motion=texelFetch(motionData,pixel,0);
+            if(motion.z>0.0&&abs(motion.z-linearDepth(depth))<=0.01*motion.z){puv=uv+motion.xy;expected=motion.w;}
+            else{vec4 world=g.inverseViewProjection*vec4(uv.x*2.0-1.0,1.0-uv.y*2.0,depth*2.0-1.0,1.0);vec4 previous=g.previousViewProjection*vec4(world.xyz/world.w,1.0);puv=vec2(previous.x/previous.w*0.5+0.5,0.5-previous.y/previous.w*0.5);expected=previous.w;}
+            if(expected>0.0){ivec2 q=ivec2(floor(puv*vec2(size)));
                 if(all(greaterThanEqual(q,ivec2(0)))&&all(lessThan(q,size))){
                     float before=linearDepth(texelFetch(previousDepth,q,0).r);float normalDot=dot(decodeNormal(data.xy),decodeNormal(texelFetch(previousData,q,0).xy));
                     // render_policy::history_valid: 5% relative view-depth change, normal cosine 0.9.
-                    if(abs(previous.w-before)<=0.05*max(previous.w,before)&&normalDot>=0.9){
+                    if(abs(expected-before)<=0.05*max(expected,before)&&normalDot>=0.9){
+                        vec4 m1[3]=vec4[3](vec4(0),vec4(0),vec4(0)),m2[3]=m1;
+                        for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x){ivec2 o=clamp(pixel+ivec2(x,y),ivec2(0),size-1);vec4 s=use(1)?imageLoad(inMask,o):vec4(0);m1[0]+=s;m2[0]+=s*s;s=use(2)?imageLoad(inGi,o):vec4(0);m1[1]+=s;m2[1]+=s*s;s=use(4)?imageLoad(inReflect,o):vec4(0);m1[2]+=s;m2[2]+=s*s;}
                         count=min(imageLoad(historyLength,q).r+1.0,64.0);
-                        if(use(1))mask=mix(imageLoad(historyMask,q),mask,max(1.0/(count+1.0),0.15));
-                        if(use(2))gi=mix(imageLoad(historyGi,q),gi,max(1.0/(count+1.0),0.06));
-                        if(use(4))reflection=mix(imageLoad(historyReflect,q),reflection,max(1.0/(count+1.0),0.15));
+                        if(use(1))mask=mix(clipHistory(imageLoad(historyMask,q),m1[0],m2[0]),mask,max(1.0/(count+1.0),0.15));
+                        if(use(2))gi=mix(clipHistory(imageLoad(historyGi,q),m1[1],m2[1]),gi,max(1.0/(count+1.0),0.06));
+                        if(use(4))reflection=mix(clipHistory(imageLoad(historyReflect,q),m1[2],m2[2]),reflection,max(1.0/(count+1.0),0.15));
                     }
                 }
             }

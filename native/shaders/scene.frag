@@ -30,6 +30,7 @@ layout(location=5) in vec3 effectLight;
 layout(location=6) in vec3 effectView;
 layout(location=7) in vec3 vertexMaterialDiffuse;
 layout(location=8) in vec3 vertexMaterialSpecular;
+layout(location=10) in vec4 previousClip;
 layout(location=0) out vec4 color;
 layout(set=0,binding=1) uniform sampler2D skin;
 layout(set=0,binding=2) uniform sampler2D lightmap;
@@ -70,6 +71,9 @@ vec4 gbufferData(vec2 coord){
     float flags=(hasLightmap?1.0:0.0)+(worldVertexLighting?2.0:0.0)+((unlit||explicitMaterial||effectKind!=0)?4.0:0.0)+(!portalEnabled&&reflectionWeight>0.0?8.0:0.0);
     return vec4(o,k22PbrOn&&k22RoughnessMap?texture(pbrOrm,coord).g:0.0,flags);
 }
+// Motion-vector pass (3): xy previous minus current UV, z current view depth (clip w), w previous view depth (<=0: behind
+// the previous camera, no history). The cleared target (z=0) marks texels without a moving entity (render_policy::previous_uv).
+vec4 motionData(){return vec4(vec2(previousClip.x,-previousClip.y)/previousClip.w*0.5+0.5-gl_FragCoord.xy*u.dataPass.zw,1.0/gl_FragCoord.w,previousClip.w);}
 #if K22_RAY_QUERY
 // A6 lights never occlude (D3D9 fixed-function lighting; static shadows live in the lightmaps): visibility rays run only
 // with the optional shadows=rt (k22RtShadowMode), never on the default ray-traced path.
@@ -133,8 +137,8 @@ void main(){
     vec2 coord=uv*uvScale+uvOffset;vec4 texel;
     // Sprite frame f sits at cell (f mod cols, f div cols); cols=1/uvScale.x (one row for an ordinary strip, engine.cpp load_entity_asset).
     if(spriteFrames>1){float cols=floor(1.0/uvScale.x+0.5),f0=float(frame0),f1=float(frame1);texel=mix(texture(skin,coord+vec2(mod(f0,cols)/cols,floor(f0/cols)*uvScale.y)),texture(skin,coord+vec2(mod(f1,cols)/cols,floor(f1/cols)*uvScale.y)),interpolation);}else texel=texture(skin,coord);
-    // Shadow-caster (depth only) and G-buffer prepass draws keep only the native alpha rejection below.
-    if(effectKind!=0&&k22Pass!=0){color=k22Pass==2?gbufferData(coord):vec4(0);return;}
+    // Shadow-caster (depth only), G-buffer and motion-vector prepass draws keep only the native alpha rejection below.
+    if(effectKind!=0&&k22Pass!=0){color=k22Pass==2?gbufferData(coord):k22Pass==3?motionData():vec4(0);return;}
     if(effectKind!=0){
         vec3 bump=2*texture(normalSkin,uv*normalUvScale+uvOffset).rgb-1;
         vec3 reflection=normalize(2*dot(bump,effectLight)*bump-effectLight);
@@ -146,7 +150,7 @@ void main(){
     if(overlay&&(max(max(texel.r,texel.g),texel.b)<0.001||texel.a<0.5))discard;
     if(flare&&!textureAlpha){float brightness=max(max(texel.r,texel.g),texel.b);texel.a*=invertFlare?1-brightness:brightness;}
     vec4 t=texel*tint;t.a*=alpha;if(t.a<0.01)discard;
-    if(k22Pass!=0){color=k22Pass==2?gbufferData(coord):vec4(0);return;}
+    if(k22Pass!=0){color=k22Pass==2?gbufferData(coord):k22Pass==3?motionData():vec4(0);return;}
 #if K22_RAY_QUERY
     bool signals=onSignalPixel();signalShadows=signals&&(k22RtSignals&1)!=0;
     if(signalShadows)mask=texelFetch(rtMask,ivec2(gl_FragCoord.xy),0);

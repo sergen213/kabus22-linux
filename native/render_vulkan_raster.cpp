@@ -27,6 +27,7 @@ struct alignas(16) Uniform {
     F4 pbr{}; // raster_uniform.glsl dataPbr.
     Matrix sunShadow{},inverseViewProjection{},previousViewProjection{};
     F4 shadowLight{},effects{},pass{},camera{},range{}; // raster_uniform.glsl wave-2 block; zero keeps the original path.
+    Matrix previousModel{}; // Motion-vector pass (3) only.
 };
 // Compute passes of the ray-traced screen-space signals (rt_signals.comp / rt_filter.comp).
 struct alignas(16) ComputeUniform { Matrix inverseViewProjection{},previousViewProjection{}; F4 eye{},sun{},params{},camera{}; std::array<std::int32_t,4> config{}; };
@@ -84,12 +85,15 @@ struct Raster {
         Image sharp; // sharpen with FXAA: FXAA output, read by the final CAS pass.
         Image sun,cube;std::array<VkImageView,6>faces{};
         std::array<Image,2>gdata,gdepth,length;std::array<Image,3>raw,tmp;std::array<std::array<Image,3>,2>history;
-        Matrix sunMatrix{},previousVP{},previousRtVP{},unjittered{},inverseVP{};float sunTexel{},shadowRange{},nearPlane{1},farPlane{1};Vec3 shadowLight{},eye{},forward{};int shadowIndex{-1};
-        unsigned taaIndex{},historyIndex{};bool taaValid{},historyValid{},linearValid{},shadowsValid{};
+        Image motion,motionDepth; // Motion vectors of moving/animated entities (scene pass 3) for TAA and the denoiser.
+        std::unordered_map<std::uint32_t,Matrix>previousModels,currentModels;std::uint64_t motionFrame{};
+        Matrix sunMatrix{},previousVP{},unjittered{},inverseVP{};float sunTexel{},shadowRange{},nearPlane{1},farPlane{1};Vec3 shadowLight{},eye{},forward{};int shadowIndex{-1};
+        unsigned taaIndex{},historyIndex{};bool taaValid{},historyValid{},linearValid{},shadowsValid{},motionValid{};
     } fx;
     VkDescriptorSetLayout computeSetLayout{};VkPipelineLayout computeLayout{};VkPipeline signalsPipeline{},filterPipeline{};
     std::uint64_t frameIndex{};const Camera*primary{};
     bool rtSignals()const{const auto&f=s.options.features;return s.rayEnabled&&(f.shadows==ShadowMode::RayTraced||f.gi||f.roughReflections);}
+    bool motionVectors()const{return s.options.features.taa||(rtSignals()&&s.options.features.denoise);}
     explicit Raster(VulkanBackend::State&state):s(state){
         try{
         // Bindings: 0 uniform, 1-4 skin/lightmap/portal/effect normal, 5-6 storage, 7-8 PBR normal/ORM, 9-14 wave-2 globals.
@@ -131,7 +135,7 @@ struct Raster {
     // Extent-dependent effect images are retired (fence-safe) on resize; shadow maps only on teardown.
     void free_effects(bool all){
         auto drop=[&](Image&i){if(all)s.destroy(i);else s.retire(i);};auto dropView=[&](VkImageView&v){if(!v)return;if(all)vkDestroyImageView(s.device,v,nullptr);else arenas[s.slotIndex].views.push_back(v);v=VK_NULL_HANDLE;};
-        dropView(fx.depthView);fx.depthSampled={};drop(fx.depth);drop(fx.linear);drop(fx.ao);drop(fx.ldr);for(auto*set:{&fx.taa,&fx.gdata,&fx.gdepth,&fx.length})for(auto&i:*set)drop(i);for(auto&i:fx.bloom)drop(i);for(auto&i:fx.raw)drop(i);for(auto&i:fx.tmp)drop(i);for(auto&h:fx.history)for(auto&i:h)drop(i);
+        dropView(fx.depthView);fx.depthSampled={};drop(fx.depth);drop(fx.linear);drop(fx.ao);drop(fx.ldr);drop(fx.motion);drop(fx.motionDepth);for(auto*set:{&fx.taa,&fx.gdata,&fx.gdepth,&fx.length})for(auto&i:*set)drop(i);for(auto&i:fx.bloom)drop(i);for(auto&i:fx.raw)drop(i);for(auto&i:fx.tmp)drop(i);for(auto&h:fx.history)for(auto&i:h)drop(i);
         drop(fx.sharp);
         fx.taaValid=fx.historyValid=fx.linearValid=false;fx.extent={};
         if(all){for(auto&v:fx.faces)dropView(v);drop(fx.sun);drop(fx.cube);}
@@ -464,6 +468,7 @@ struct Raster {
         if(f.fxaa&&f.sharpen)fx.sharp=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);
         if(f.taa)for(auto&i:fx.taa){i=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);readable(i);}
         if(f.bloom)for(unsigned i=0;i<fx.bloom.size();++i)fx.bloom[i]=s.image(std::max(1u,w>>(i+1)),std::max(1u,h>>(i+1)),VK_FORMAT_R16G16B16A16_SFLOAT,color);
+        if(motionVectors()){fx.motion=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);fx.motionDepth=s.image(w,h,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);readable(fx.motion);}
         if(rt){
             for(unsigned k=0;k<2;++k){fx.gdata[k]=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);fx.gdepth[k]=s.image(w,h,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);fx.length[k]=s.image(w,h,VK_FORMAT_R32_SFLOAT,storage);readable(fx.gdata[k]);readable(fx.gdepth[k]);general(fx.length[k]);}
             // Disabled signals keep 1x1 placeholders so every statically used storage binding stays valid.
@@ -561,31 +566,55 @@ struct Raster {
         const std::array<std::int32_t,2>push{mode,stride};vkCmdPushConstants(s.command,computeLayout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(push),push.data());vkCmdDispatch(s.command,(s.extent.width+7)/8,(s.extent.height+7)/8,1);
     }
     void compute_barrier(VkPipelineStageFlags source=VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VkAccessFlags written=VK_ACCESS_SHADER_WRITE_BIT){VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};b.srcAccessMask=written;b.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;vkCmdPipelineBarrier(s.command,source,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,1,&b,0,nullptr,0,nullptr);}
-    // Primary RT view: G-buffer prepass, stochastic ray-query signals, optional temporal + a-trous denoise (docs/RAYTRACING.md).
-    void rt_signals(const Camera&camera){
-        const auto&f=s.options.features;const int bits=(f.shadows==ShadowMode::RayTraced?1:0)|(f.gi?2:0)|(f.roughReflections?4:0);const unsigned cur=fx.historyIndex,prev=cur^1u;
-        auto saved=view;view.pass[0]=2;begin_offscreen(&fx.gdata[cur],fx.gdepth[cur],fx.gdepth[cur].view,s.extent.width,s.extent.height);auto retained=effects;
-        auto draw=[&](const DrawInstance&d,int queue){
-            if(!d.model||d.scale.x==0||d.scale.y==0||d.scale.z==0)return;auto found=prepared.find(&d);if(found==prepared.end())return;auto&m=mesh(*d.model);if(m.batches.empty())return;
-            auto*live=script_material(frame,d.materialIndex);if(d.alpha<=0&&(!live||live->effect==EffectKind::None))return;
-            auto model=model_matrix(d,&camera);VkDeviceSize offset=0;vkCmdBindVertexBuffers(s.command,0,1,&found->second.pose->vertices.handle,&offset);vkCmdBindIndexBuffer(s.command,m.indices.handle,0,VK_INDEX_TYPE_UINT32);
-            const NativeEntityLightState light{d.nativeLightScalar,d.nativeLightDelta,d.nativeLightBias};bool clockwise=(camera.horizontalFov<0)!=(camera.pixelAspect<0);clockwise^=d.model->clockwise;clockwise^=d.scale.x*d.scale.y*d.scale.z<0;
-            for(auto&b:m.batches){if(!batch_admitted(d,b,camera,queue))continue;auto mat=material(d,b,camera,true,light,retained,model,false);bind({Scene,0,1,1,0,0,0,!(d.doubleSided||d.billboard||camera.noCull),clockwise,0},mat.u,mat.images,mat.sampling);bool q=centroid&&b.centroidCount;vkCmdDrawIndexed(s.command,q?b.centroidCount:b.count,1,q?b.centroidFirst:b.first,0,0);}
-        };
-        if(camera.drawWorld&&frame->world&&(camera.layers&1))draw(worldDraw,-1);
+    // One depth-tested prepass draw (G-buffer pass 2, motion-vector pass 3); `previous` and `before` supply the motion pass's
+    // previous transform and previous GPU-deformed pose.
+    void prepass_draw(const DrawInstance&d,int queue,const Camera&camera,std::unordered_map<std::uint32_t,Effect>&retained,const Matrix&model,const Matrix*previous=nullptr,Pose*before=nullptr){
+        if(!d.model||d.scale.x==0||d.scale.y==0||d.scale.z==0)return;auto found=prepared.find(&d);if(found==prepared.end())return;auto&m=mesh(*d.model);if(m.batches.empty())return;
+        auto*live=script_material(frame,d.materialIndex);if(d.alpha<=0&&(!live||live->effect==EffectKind::None))return;
+        VkDeviceSize offset=0;vkCmdBindVertexBuffers(s.command,0,1,&found->second.pose->vertices.handle,&offset);vkCmdBindIndexBuffer(s.command,m.indices.handle,0,VK_INDEX_TYPE_UINT32);
+        const NativeEntityLightState light{d.nativeLightScalar,d.nativeLightDelta,d.nativeLightBias};bool clockwise=(camera.horizontalFov<0)!=(camera.pixelAspect<0);clockwise^=d.model->clockwise;clockwise^=d.scale.x*d.scale.y*d.scale.z<0;
+        const Allocation pose=before?Allocation{&before->vertices,0,before->vertices.size}:Allocation{};
+        for(auto&b:m.batches){if(!batch_admitted(d,b,camera,queue))continue;auto mat=material(d,b,camera,true,light,retained,model,false);if(previous){mat.u.previousModel=*previous;mat.u.pass[1]=before?1.f:0.f;}bind({Scene,0,1,1,0,0,0,!(d.doubleSided||d.billboard||camera.noCull),clockwise,0},mat.u,mat.images,mat.sampling,pose);bool q=centroid&&b.centroidCount;vkCmdDrawIndexed(s.command,q?b.centroidCount:b.count,1,q?b.centroidFirst:b.first,0,0);}
+    }
+    // Opaque primary-view entities of the prepasses (the world is drawn by the caller).
+    template<class F> void opaque_entities(const Camera&camera,F&&draw){
         for(auto&d:frame->instances){
             if(camera.noEntities||!frame->renderEntities||!(d.layers&camera.layers)||d.viewSpace||!d.visible||(camera.excludeEntityId&&d.objectId==camera.excludeEntityId))continue;
             if(camera.perDrawOpacity&&d.model&&model_has_entity_skins(*d.model)){if(model_queue(d)&1)draw(d,0);continue;}
             bool alpha=d.alpha<1||d.additive||d.translucent||d.flare;if(d.model)for(auto&mat:d.model->materials)alpha|=mat.alpha<1;if(!alpha)draw(d,-1);
         }
+    }
+    // Motion vectors (pass 3) of entities that moved or animated since the previous frame, for TAA and the denoiser; the
+    // rest of the scene reprojects through the camera. Transforms are keyed by entity id and trusted from the previous frame only.
+    void motion_vectors(const Camera&camera){
+        const bool consecutive=fx.motionFrame+1==frameIndex;fx.motionFrame=frameIndex;std::swap(fx.previousModels,fx.currentModels);fx.currentModels.clear();
+        // The previous frame's deformed poses (its compute writes) are read as vertex-shader storage.
+        end();VkMemoryBarrier poses{VK_STRUCTURE_TYPE_MEMORY_BARRIER};poses.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;poses.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;vkCmdPipelineBarrier(s.command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,0,1,&poses,0,nullptr,0,nullptr);
+        auto saved=view;view.pass={3,0,1.f/s.extent.width,1.f/s.extent.height};view.previousViewProjection=fx.previousVP;begin_offscreen(&fx.motion,fx.motionDepth,fx.motionDepth.view,s.extent.width,s.extent.height);auto retained=effects;
+        opaque_entities(camera,[&](const DrawInstance&d,int queue){
+            auto model=model_matrix(d,&camera);if(d.objectId)fx.currentModels.insert_or_assign(d.objectId,model);
+            auto previous=consecutive&&d.objectId?fx.previousModels.find(d.objectId):fx.previousModels.end();auto found=prepared.find(&d);
+            Pose*before=consecutive&&found!=prepared.end()?rt_previous_pose(*s.rays,*found->second.pose):nullptr;
+            if(!before&&(previous==fx.previousModels.end()||previous->second==model))return;
+            prepass_draw(d,queue,camera,retained,model,previous==fx.previousModels.end()?&model:&previous->second,before);
+        });
+        end();view=saved;s.transition(fx.motion,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);fx.motionValid=true;
+    }
+    // Primary RT view: G-buffer prepass, stochastic ray-query signals, optional temporal + a-trous denoise (docs/RAYTRACING.md).
+    void rt_signals(const Camera&camera){
+        const auto&f=s.options.features;const int bits=(f.shadows==ShadowMode::RayTraced?1:0)|(f.gi?2:0)|(f.roughReflections?4:0);const unsigned cur=fx.historyIndex,prev=cur^1u;
+        auto saved=view;view.pass[0]=2;begin_offscreen(&fx.gdata[cur],fx.gdepth[cur],fx.gdepth[cur].view,s.extent.width,s.extent.height);auto retained=effects;
+        auto draw=[&](const DrawInstance&d,int queue){prepass_draw(d,queue,camera,retained,model_matrix(d,&camera));};
+        if(camera.drawWorld&&frame->world&&(camera.layers&1))draw(worldDraw,-1);
+        opaque_entities(camera,draw);
         end();view=saved;
         for(auto*image:{&fx.gdata[cur],&fx.gdepth[cur]})s.transition(*image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
         for(auto*set:{&fx.raw,&fx.tmp})for(auto&image:*set)s.transition(image,VK_IMAGE_LAYOUT_GENERAL,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);
         // The TLAS and the GPU-deformed poses written this frame are read by compute ray queries.
         compute_barrier(VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_HOST_BIT,VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR|VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_HOST_WRITE_BIT);
-        ComputeUniform cu;cu.inverseViewProjection=inverse(view.viewProjection);cu.previousViewProjection=fx.previousRtVP;cu.eye=vec(camera.position,camera.farClip);cu.sun=vec(unit(frame->sunDirection),0.02f);
+        ComputeUniform cu;cu.inverseViewProjection=inverse(view.viewProjection);cu.previousViewProjection=fx.previousVP;cu.eye=vec(camera.position,camera.farClip);cu.sun=vec(unit(frame->sunDirection),0.02f);
         cu.params={float(frameIndex&0xffff),1500.f,40.f,camera.nearClip};cu.camera=vec(fx.forward,float(std::min<std::size_t>(frame->lights.size(),32)));cu.config={bits,int(s.extent.width),int(s.extent.height),fx.historyValid?1:0};
-        const auto nearest=sampler(false,true);const std::array<std::pair<Image*,VkSampler>,4>edges{{{&fx.gdepth[cur],nearest},{&fx.gdata[cur],nearest},{&fx.gdepth[prev],nearest},{&fx.gdata[prev],nearest}}};
+        const auto nearest=sampler(false,true);const std::array<std::pair<Image*,VkSampler>,5>edges{{{&fx.gdepth[cur],nearest},{&fx.gdata[cur],nearest},{&fx.gdepth[prev],nearest},{&fx.gdata[prev],nearest},{&fx.motion,nearest}}};
         dispatch(signalsPipeline,compute_set(cu,std::span(edges).first(2),std::array<Image*,3>{&fx.raw[0],&fx.raw[1],&fx.raw[2]}),0,0);
         std::array<Image,3>*result=&fx.raw;
         if(f.denoise){
@@ -595,7 +624,7 @@ struct Raster {
         }
         for(auto&image:*result)s.transition(image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
         globals[2]={&(*result)[0],nearest};globals[3]={&(*result)[1],nearest};globals[4]={&(*result)[2],nearest};globals[5]={&fx.gdepth[cur],nearest};view.effects[1]=float(bits|int(view.effects[1]));
-        fx.previousRtVP=fx.unjittered;fx.historyValid=true;fx.historyIndex=prev;
+        fx.historyValid=true;fx.historyIndex=prev;
     }
     // Background-view composite: resolve, bloom, tone map (PBR) or identity, TAA, FXAA, written into the LDR scene target.
     void composite(){
@@ -618,7 +647,7 @@ struct Raster {
         if(chain)pass(fx.ldr,8,compositeInputs,compositeSampling);else{begin(s.scene);set_region(full());u.pass={8,0,0,0};bind({EffectProgram},u,compositeInputs,compositeSampling);vkCmdDraw(s.command,3,1,0,0);}
         if(f.taa){
             auto&next=fx.taa[fx.taaIndex];auto&history=fx.taa[fx.taaIndex^1u];u.inverseViewProjection=fx.inverseVP;u.previousViewProjection=fx.previousVP;u.cameraPosition=vec(fx.eye,fx.farPlane);u.camera=vec(fx.forward,fx.nearPlane);u.range[3]=fx.taaValid&&fx.linearValid?1.f:0.f;
-            pass(next,9,{&fx.ldr,&history,fx.linearValid?&fx.linear:&white},{nearest,linear,nearest});current=&next;fx.taaIndex^=1u;fx.taaValid=fx.linearValid;fx.previousVP=fx.unjittered;
+            pass(next,9,{&fx.ldr,&history,fx.linearValid?&fx.linear:&white,fx.motionValid?&fx.motion:&black},{nearest,linear,nearest,nearest});current=&next;fx.taaIndex^=1u;fx.taaValid=fx.linearValid;
         }
         // sharpen: contrast-adaptive sharpening (effects.frag mode 12) is the last LDR pass, after TAA/FXAA.
         if(f.sharpen&&f.fxaa){pass(fx.sharp,10,{current},{linear});current=&fx.sharp;}
@@ -660,7 +689,7 @@ struct Raster {
             selectShadows(); // A6 cached-caster admission precedes every current-camera callback.
             encounters(Encounter::Prepare);
         }
-        ray_scene(camera);if(primaryView&&rtSignals())rt_signals(camera);begin(*destination);set_region(r);if(targetOnly&&(!camera.perDrawOpacity||!s.portalColorValid)){clear(camera.environmentOverride?camera.background:frame->clearColor,true,true,true,full());s.portalColorValid=true;}if(translucent)clear(seeded(camera.foreground?Color{0,0,0,0}:camera.environmentOverride?camera.background:frame->clearColor),true,true,true,full());if(camera.perDrawOpacity)clear(seeded(camera.environmentOverride?camera.background:frame->clearColor),camera.clearColor,camera.clearDepth,camera.clearStencil,r);else if(camera.clearDepth)clear({},false,true,false,r);
+        ray_scene(camera);if(primaryView&&motionVectors())motion_vectors(camera);if(primaryView&&rtSignals())rt_signals(camera);begin(*destination);set_region(r);if(targetOnly&&(!camera.perDrawOpacity||!s.portalColorValid)){clear(camera.environmentOverride?camera.background:frame->clearColor,true,true,true,full());s.portalColorValid=true;}if(translucent)clear(seeded(camera.foreground?Color{0,0,0,0}:camera.environmentOverride?camera.background:frame->clearColor),true,true,true,full());if(camera.perDrawOpacity)clear(seeded(camera.environmentOverride?camera.background:frame->clearColor),camera.clearColor,camera.clearDepth,camera.clearStencil,r);else if(camera.clearDepth)clear({},false,true,false,r);
         if(!s.rayEnabled)selectShadows();
         draw_sky(camera);encounters(s.rayEnabled?Encounter::Replay:Encounter::Live);
         particles(camera);if(primaryView)depth_effects(*destination,r);bool hasView=false;if(frame->renderEntities&&!camera.noEntities)for(auto&d:frame->instances)if(!targetOnly&&d.viewSpace&&(d.layers&camera.layers)&&d.visible&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId)){hasView=true;break;}if(hasView){clear({},false,true,false,r);view.fogParameters[0]=view.fogParameters[1]=0;for(auto&d:frame->instances)if(d.viewSpace&&(d.layers&camera.layers)&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId))draw_instance(d,camera);}
@@ -682,7 +711,7 @@ struct Raster {
         if(f.world&&!f.hardwareLighting)throw std::runtime_error("Legacy software world-light topology is not implemented by the native Vulkan hardware path");
         if(!s.command)throw std::runtime_error("Vulkan raster requires an admitted platform frame");
         frame=&f;metrics=m;centroid=centroid_lighting(f);reset_arena();prepared.clear();actorLights.clear();
-        ++frameIndex;ensure_dummies();fx.shadowsValid=fx.linearValid=false;reset_globals();ensure_effects();
+        ++frameIndex;ensure_dummies();fx.shadowsValid=fx.linearValid=fx.motionValid=false;reset_globals();ensure_effects();
         // scene.vert reads the caster push constant statically (selected only by shadow passes): define it for every draw.
         {const Matrix identity{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};vkCmdPushConstants(s.command,pipelineLayout,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(Matrix),identity.data());}
         // The primary view (effects owner): first full-window background world view that is not alpha-blended.
@@ -709,7 +738,7 @@ struct Raster {
         if(s.samples!=VK_SAMPLE_COUNT_1_BIT){s.transition(s.scene.color,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);s.transition(s.scene.resolve,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);VkImageResolve resolve{};resolve.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};resolve.dstSubresource=resolve.srcSubresource;resolve.extent={s.extent.width,s.extent.height,1};vkCmdResolveImage(s.command,s.scene.color.handle,s.scene.color.layout,s.scene.resolve.handle,s.scene.resolve.layout,1,&resolve);resolved=&s.scene.resolve;}
         s.transition(*resolved,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
         begin_image(s.finalImage);set_region(full());Uniform post;post.parameters[1][3]=adjustment.enabled;bind({Post},post,{resolved,&gamma},{sampler(true,true),sampler(false,true)});vkCmdDraw(s.command,3,1,0,0);end();
-        transparent.clear();shadowOrder.clear();particlePose=nullptr;
+        transparent.clear();shadowOrder.clear();particlePose=nullptr;if(primary)fx.previousVP=fx.unjittered;
     }
 };
 void RasterDelete::operator()(Raster*r)const{raster_destroy(r);}

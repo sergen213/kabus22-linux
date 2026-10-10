@@ -16,7 +16,10 @@ layout(location=6) out vec3 effectView;
 layout(location=7) out vec3 vertexMaterialDiffuse;
 layout(location=8) out vec3 vertexMaterialSpecular;
 layout(location=9) out vec3 worldTangent;
+layout(location=10) out vec4 previousClip; // Motion-vector pass (3): previous-frame clip position.
 layout(set=0,binding=5,std430) readonly buffer Lights { vec4 lightData[]; };
+// Pass 3 with dataPass.y set: the previous frame's GPU-deformed pose (PackedVertex, 13 floats per vertex).
+layout(set=0,binding=6,std430) readonly buffer PreviousPose { float previousPose[]; };
 // Shadow-caster pass (pass 1): the face view-projection is pushed per face; caster descriptor sets are shared by all faces.
 layout(push_constant) uniform CasterPush { mat4 casterViewProjection; } casterPush;
 vec3 nativeDynamic(vec3 p,vec3 n){
@@ -59,6 +62,7 @@ void main(){
     if(explicitMaterial&&effectKind==0)ordinaryMaterial(worldPosition,worldNormal,vertexMaterialDiffuse,vertexMaterialSpecular);
     if(effectKind!=0){mat3 basis=transpose(mat3(mat3(model)*tangent,mat3(model)*cross(tangent,normal),mat3(model)*normal));effectLight=normalize(basis*-(sunDirection+(effectKind==1?skillExtra.xyz:vec3(0))));effectView=normalize(basis*(cameraPosition-w.xyz));}
     uv=texcoord;lmuv=lightcoord;
+    int base=gl_VertexIndex*13;previousClip=k22Pass==3?u.dataPreviousViewProjection*(u.dataPreviousModel*vec4(u.dataPass.y!=0?vec3(previousPose[base],previousPose[base+1],previousPose[base+2]):position,1)):vec4(0);
     gl_Position=(k22Pass==1?casterPush.casterViewProjection:viewProjection)*w;
     gl_Position.y=-gl_Position.y;
     gl_Position.z=(gl_Position.z+gl_Position.w)*.5;

@@ -384,6 +384,20 @@ inline float temporal_weight(float historyLength,float minimum){return std::max(
 inline bool history_valid(float viewDepth,float previousViewDepth,float normalDot){
     return viewDepth>0&&previousViewDepth>0&&std::abs(viewDepth-previousViewDepth)<=historyDepthTolerance*std::max(viewDepth,previousViewDepth)&&normalDot>=historyNormalTolerance;
 }
+// Motion vectors (scene pass 3, scene.vert previousClip): an entity texel's history lies where its previous-frame
+// transform and pose project under the previous unjittered view-projection (Vulkan UV, y down).
+inline Vec2 previous_uv(const Matrix&previousViewProjection,const Matrix&previousModel,Vec3 local){auto n=project_ndc(product(previousViewProjection,previousModel),local);return {n.x*.5f+.5f,.5f-n.y*.5f};}
+// TAA uses the nearest motion sample of its 3x3 neighborhood unless the scene depth shows that surface is hidden;
+// the denoiser uses the pixel's own sample (same rasterization as its G-buffer) within a tighter tolerance.
+constexpr float motionDepthTolerance=0.03f;
+inline bool motion_visible(float motionDepth,float sceneDepth){return motionDepth>0&&motionDepth<=sceneDepth*(1+motionDepthTolerance);}
+// History clip (TAA in YCoCg, denoiser per signal): pull history toward the current neighborhood mean until it lies
+// inside mean +- gamma*sigma, so colours a moving object left behind cannot survive in its trail.
+constexpr float taaVarianceGamma=1.25f,signalVarianceGamma=2.f;
+inline Vec3 variance_clip(Vec3 history,Vec3 mean,Vec3 sigma,float gamma){
+    const Vec3 d=add(history,mul(mean,-1));const float m=std::max({std::abs(d.x)/(sigma.x*gamma+1e-4f),std::abs(d.y)/(sigma.y*gamma+1e-4f),std::abs(d.z)/(sigma.z*gamma+1e-4f)});
+    return m>1?add(mean,mul(d,1/m)):history;
+}
 // B3-spline a-trous kernel taps (1,4,6,4,1)/16 per axis.
 inline float atrous_tap(int offset){constexpr std::array<float,5>taps{1/16.f,4/16.f,6/16.f,4/16.f,1/16.f};return taps.at(std::size_t(std::clamp(offset,-2,2)+2));}
 }
