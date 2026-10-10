@@ -14,11 +14,12 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
-    env:
-      WORK: ${{ runner.temp }}/baseline
-      DIST: ${{ runner.temp }}/dist
     steps:
       - uses: actions/checkout@v4
+      - name: Work directories
+        run: |
+          echo "WORK=$RUNNER_TEMP/baseline" >> "$GITHUB_ENV"
+          echo "DIST=$RUNNER_TEMP/dist" >> "$GITHUB_ENV"
       - name: Check tag against project version
         run: |
           version=${GITHUB_REF_NAME#v}
