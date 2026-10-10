@@ -1,0 +1,12 @@
+# requires: saves
+# Inzar (Koruyucu), Tnel24 "Gaile Yolu" (slot 16 = kayit15.sav).
+realtime off
+load-save 15
+wait until LY_AktifLevelID == 39 && level_yuklendi_ok == 1 && player != 0 timeout 7200
+assert $level == "tnel24.wmb"
+assert Aktif_Player == 2
+assert $count(oyuncu_koruyucu) == 1
+assert koruyucu_mana == 230
+frames 300
+assert player != 0
+capture inzar_tnel24

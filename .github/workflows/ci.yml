@@ -1,0 +1,39 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config python3 python3-cryptography \
+            libsdl2-dev libepoxy-dev libavformat-dev libavcodec-dev libavutil-dev \
+            libswscale-dev libswresample-dev libfreetype6-dev libfontconfig1-dev \
+            libvulkan-dev glslang-tools libgtk-3-dev libarchive-dev \
+            libcurl4-openssl-dev libssl-dev nlohmann-json3-dev
+      - name: Build native engine
+        run: |
+          cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/native
+      - name: Build installer, launcher and updater
+        run: |
+          cmake -S installer -B build/installer -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/installer
+      # A public checkout has no game assets: fixture-dependent tests self-skip at configure time.
+      - name: Asset-free native tests
+        run: ctest --test-dir build/native --output-on-failure
+      - name: Installer, launcher and updater tests
+        run: ctest --test-dir build/installer --output-on-failure
+      - name: WRS2 format checks
+        run: python3 tools/check_wrs2.py
+      - name: Packaging policy self-check
+        run: python3 tools/package_kabus_appimage.py --self-check

@@ -1,0 +1,86 @@
+# requires: saves, live pad (tools/virtual-gamepad/run-live.sh ... modern modern.ini)
+# Modern controller mode on Demir at Cami (slot 2 = kayit1.sav, Aktif_Silah 3). Each "store pad_*" line is the
+# marker modern.vpad waits for before changing the pad state; the following frames measure the effect.
+pad live
+load-save 1
+wait until LY_AktifLevelID == 7 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 && oyun_ilk_basladi == 0 && EnvaterAcilabilirmi == 1 timeout 7200
+frames 60
+store joys num_joysticks
+# left stick 0.09 forward: inside the 0.15 radial deadzone, no movement
+store pad_deadzone player.x
+store y0 player.y
+frames 120
+assert player.x == @pad_deadzone && player.y == @y0
+# full forward: walks
+store pad_forward player.x
+store y1 player.y
+wait until player.x != @pad_forward || player.y != @y1 timeout 120
+frames 60
+print player.x - @pad_forward
+print player.y - @y1
+capture modern-walked
+store pad_stop player.x
+frames 90
+# walking + half right (LX 0.5 → 0.41 after the deadzone, × sensitivity): analog turn 9*(Sol-Sag)*time*1.4 (oyuncu2.wdl:820);
+# 60 frames to settle, then the turn over 60 frames
+store pad_turn_walk player.pan
+frames 60
+store p1 player.pan
+frames 60
+print player.pan - @p1
+# release, settle, then standing + LX 0.73 (0.69 after the deadzone): in place only Key_Sag==1 turns (oyuncu2.wdl:1560),
+# so modern mode turns digitally past half
+store pad_turn_stop player.pan
+frames 120
+store pad_turn_place player.pan
+frames 60
+store p2 player.pan
+frames 60
+print player.pan - @p2
+assert player.pan != @p2
+# standing + full right
+store pad_turn_full player.pan
+frames 60
+store p3 player.pan
+frames 60
+print player.pan - @p3
+assert player.pan != @p3
+store pad_turn_end player.pan
+frames 60
+# left trigger (aim, original button 1) raises the weapon; right trigger (fire, button 2) fires
+store pad_aim Aktif_Silah
+wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 600
+store ammo S_Kursun_Sayisi[3]
+store pad_fire S_Kursun_Sayisi[3]
+wait until S_Kursun_Sayisi[3] < @ammo timeout 300
+capture modern-fired
+store pad_lower S_Kursun_Sayisi[3]
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 timeout 900
+frames 30
+# Start (button 4) opens the inventory, again closes it
+store pad_start EM_Acik
+wait until EM_Acik == 1 timeout 300
+capture modern-start-inventory
+frames 30
+store pad_start_close EM_Acik
+wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
+frames 30
+# Back (button 5) opens the map, again closes it
+store pad_back h_menu_aktifmi
+wait until h_menu_aktifmi == 1 timeout 300
+frames 30
+capture modern-back-map
+store pad_back_close h_menu_aktifmi
+wait until h_menu_aktifmi == 0 timeout 300
+frames 60
+# hotplug: destroy the device, recreate it, walk again
+store pad_unplug num_joysticks
+wait until num_joysticks < @joys timeout 600
+store pad_plug num_joysticks
+wait until num_joysticks == @joys timeout 600
+frames 30
+store pad_replug_forward player.x
+store y2 player.y
+wait until player.x != @pad_replug_forward || player.y != @y2 timeout 180
+store pad_done player.x
+frames 30

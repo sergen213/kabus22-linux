@@ -1,0 +1,106 @@
+# requires: saves
+# Demir at the mosque (cam1, level 7) from original kayit1.sav: item pickup, a permanently locked door, the full-screen
+# video_camitaci_f movie (A/V and subtitle timing), the chained toilet door opened with item 12 (bolt cutter) and its
+# in-engine Video_Cam cutscene, return to control, the unlocked door to camtuvalet (24) and a second pickup there.
+# Pickup: NS_Nesne/NS_AlTarama (Nesneler.wdl:418-488) on the D scan (oyuncu2.wdl PL_KapiTara, skill88 2).
+# Locked door: LY_KilitliKapi skill1 32 (LevelYonetim.wdl:1131-1176) only ever reports "locked" and marks kapi_acikmi[32]/[49]=2;
+# no script unlocks it. The key-to-unlocked door is kilit_camiwc_ctrl (Ornek_Yasin.wdl:2394-2451).
+# Movie: video_camitaci_f (cinematic.wdl:2446-2541) fires at player.y<1400 && x>312 and plays video_ismi_str03 (veca/vtca.k22:
+# Indeo5 640x480, 1007 frames at 25 fps = 40.28 s, MP3 audio decodes to 40.28 s). Subtitles are indexed by decoded frame
+# (sub_titles_tr.wdl:153 sub_cam_fx: 283-375, 375-427, ..., gap 599-604, ..., 963-986). Media clocks video from the audio voice.
+realtime off
+load-save 1
+wait until LY_AktifLevelID == 7 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+wait until oyun_ilk_basladi == 0 && EnvaterAcilabilirmi == 1 timeout 1200
+assert v_asmacami_ok == 0 && v_camitaci_oldumu == 0
+capture cam1_loaded
+# Pickup: energy item 5 (NS_Nesne at -1932,2015) behind the mosque wall.
+store n0 NS_NesneSayisi
+walk-to -1932 2015 50 path run timeout 5000
+turn-to -1932 2015 6
+press-until D NS_NesneSayisi == @n0 + 1 timeout 300
+assert NS_Nesneler[10] == 5
+capture cam1_pickup
+# LY_KilitliKapi (-555,1245): locked message (LV_HataGoster(skill2 1)), map state 2.
+walk-to -555 1270 25 path run timeout 5000
+turn-to -555 1245 6
+press-until D kapi_acikmi[32] == 2 timeout 300
+assert kapi_acikmi[49] == 2 && aktif_hata_kapi == 32 && LYT_AltYazi.visible == 1
+capture cam1_locked_door
+# Movie with frame-indexed subtitles, played in real time.
+store docs DO_DokumanSayisi
+walk-to 348 1460 20 path run timeout 6000
+realtime on
+down Up
+wait until v_camitaci_yuru == 1 timeout 600
+up Up
+wait until $movie == 1 timeout 600
+store w0 $wall
+assert $movieframe <= 2
+wait until $movieframe >= 283 timeout 1800
+store w283 $wall
+frames 3
+assert VST_AltText.visible == 1
+store s1 VidSub_AltYazi
+wait until $movieframe >= 380 timeout 600
+frames 3
+assert VST_AltText.visible == 1 && VidSub_AltYazi != @s1
+capture cam1_movie_subtitle
+wait until $movieframe >= 600 timeout 1200
+assert VST_AltText.visible == 0
+wait until $movieframe >= 963 timeout 1800
+store w963 $wall
+frames 3
+assert VST_AltText.visible == 1
+wait until $movie == 0 timeout 1200
+store wend $wall
+# Decoded frame N is presented at (N-1)/25 s: 282/25 = 11.28, (963-283)/25 = 27.2, whole movie 40.28 s.
+print @w283 - @w0
+print @w963 - @w283
+print @wend - @w0
+assert @w283 - @w0 > 10.78 && @w283 - @w0 < 11.78
+assert @w963 - @w283 > 26.7 && @w963 - @w283 < 27.7
+assert @wend - @w0 > 39.78 && @wend - @w0 < 40.98
+wait until oyuncu_pasif == 0 && v_camitaci_oldumu == 1 && EnvaterAcilabilirmi == 1 timeout 1200
+realtime off
+assert DO_DokumanSayisi == @docs + 1
+# The chained toilet door: D reports "padlocked" (error 27) while v_asmacami_ok is 0.
+walk-to 350 992 12 path timeout 3000
+turn-to 350 959 6
+press-until D kapi_acikmi[17] == 2 timeout 300
+assert aktif_hata_kapi == 17 && v_asmacami_ok == 0
+capture cam1_padlocked
+# Use item 12 from the original inventory: M -> Nesneler -> slot -> Kullan (KuBiGoMenu.wdl EM_KuBiGoNMenu). Opening the
+# inventory compacts it (EM_OrganizeNesneler), so the bolt cutter sits in slot 6.
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+press-until Down EM_CursorSiNeDo == 1 timeout 120
+press Return
+wait until EM_Bolge == 3 timeout 300
+assert NS_Nesneler[6] == 12
+press-until Right EM_CursorNesne+EM_NesneKafa >= 6 timeout 600
+assert EM_CursorNesne+EM_NesneKafa == 6
+press Return
+wait until EM_Bolge == 7 && EM_CursorKuBiGo == 0 timeout 300
+press Return
+wait until v_asmacami_basla == 1 && kapi_acikmi[17] == 1 timeout 300
+# video_asmacami_d (cinematic.wdl:12671-12786): Video_Cam replaces the camera while the padlock is cut.
+wait until Video_Cam.visible == 1 && camera.visible == 0 && oyuncu_pasif == 1 timeout 600
+frames 90
+capture cam1_videocam_cutscene
+wait until v_asmacami_ok == 1 timeout 3000
+wait until oyuncu_pasif == 0 && camera.visible == 1 && Video_Cam.visible == 0 && EnvaterAcilabilirmi == 1 timeout 1200
+capture cam1_after_cutscene
+# Unlocked: the same D now sets LY_HedefLevel 24.
+press-until D LY_AktifLevelID == 24 timeout 600
+wait until $level == "camtuvalet.wmb" && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 3600
+assert v_asmacami_ok == 1
+# Second pickup: item 21 in the toilet.
+find item NS_Nesne
+assert @item.skill1 == 21
+store n1 NS_NesneSayisi
+walk-to @item 30 timeout 600
+turn-to @item 6
+press-until D NS_NesneSayisi == @n1 + 1 timeout 300
+assert @item.invisible == 1
+capture camtuvalet_pickup

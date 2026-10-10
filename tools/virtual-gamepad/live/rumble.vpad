@@ -1,0 +1,2 @@
+# The pad only has to exist; ff.log records what the game sends.
+wait scenario: rumble.k22s

@@ -74,17 +74,20 @@ int main(int argc,char** argv) {
         rejects([&]{locale.mount("turkce.k22");});
         locale.mount("mode.wrs");
         if(locale.text("mode.txt")!="m")throw std::runtime_error("WRS3 archive member decoding");
+        // A6 0041fd20 appends every member; 00420120 returns the first match, so a later archive never replaces it.
         locale.mount("mode_patch.wrs");locale.mount("mode.wrs");
-        if(locale.text("mode.txt")!="p")throw std::runtime_error("WRS3 remount overwrote patch");
+        if(locale.text("mode.txt")!="m")throw std::runtime_error("campaign later archive replaced earlier member");
         Assets bonus(root,true);bonus.mount("mode.wrs");bonus.mount("mode_patch.wrs");bonus.mount("mode.wrs");
         if(bonus.text("mode.txt")!="m")throw std::runtime_error("Bonus later archive replaced earlier member");
+        Assets patched(root);patched.mount("mode_patch.wrs");patched.mount("mode.wrs");
+        if(patched.text("mode.txt")!="p")throw std::runtime_error("first-mounted (start-up) archive lost priority");
         rejects([&]{locale.mount("unknown.wrs");});
         locale.mount("YAZI_EN.K22");locale.mount("ses_tr.k22");
         if(locale.text("text.txt")!="e"||locale.text("audio.txt")!="t")throw std::runtime_error("explicit independent locale archives");
         rejects([&]{(void)locale.read("multi_lang.wdl");});
         rejects([&]{locale.mount("language_english.wrs");});
         locale.mount("patch.k22");locale.mount("yazi_en.k22");
-        if(locale.text("text.txt")!="p")throw std::runtime_error("archive remount overwrote patch");
+        if(locale.text("text.txt")!="e")throw std::runtime_error("later archive replaced first-mounted member");
         locale.mount("paths.k22");
         if(locale.text("dir////text.txt")!="s"||locale.text("dir\\text.txt")!="s")throw std::runtime_error("repeated archive member separators");
         if(locale.text("dir/text.txt . . ")!="s")throw std::runtime_error("terminal DOS filename spaces and periods");
@@ -116,7 +119,8 @@ int main(int argc,char** argv) {
             if(source->text("ENTRY.WDL")!=loose)throw std::runtime_error("ordinary text lost loose precedence");
             rejects([&]{(void)source->archive_text("loose-only.wdl");});
         }
-        if(campaign.archive_text("ENTRY.WDL")!=second||bonus.archive_text("entry.wdl . ")!=first)
+        // A6 00420120 .WDL with 0062119c!=0 (ISO 0x70aa, patch 0xdf02) is archive-only, first match.
+        if(campaign.archive_text("ENTRY.WDL")!=first||bonus.archive_text("entry.wdl . ")!=first)
             throw std::runtime_error("archive-only WDL source or duplicate archive priority changed");
     }
     {
@@ -162,6 +166,9 @@ int main(int argc,char** argv) {
         if(high24->nativeStorageBytes!=3||high32->nativeStorageBytes!=4||
            high24->nativeTextureAlpha||high32->nativeTextureAlpha)
             throw std::runtime_error("default/A6 TGA native alpha depth");
+        // A6 0040e2b0 sets BMAP0x100 for every 4-byte TGA, including fully opaque ones; never for 24-bit TGA.
+        if(high24->a6AlphaFormat||!high32->a6AlphaFormat||!high.image_ptr("32-no-attributes.tga")->a6AlphaFormat)
+            throw std::runtime_error("A6 TGA32 BMAP0x100 source flag");
         high.set_native_alpha_depth(16);
         if(high.image_ptr("24.tga")!=high24||high.image_ptr("32.tga")!=high32||
            high24->nativeStorageBytes!=3||high32->nativeStorageBytes!=4)
@@ -180,7 +187,7 @@ int main(int argc,char** argv) {
             Assets bonus(tgaRoot,true);bonus.set_native_alpha_depth(depth);
             const auto rgb=bonus.image_ptr("24.tga"),argb=bonus.image_ptr("32.tga");
             const auto noAttributes=bonus.image_ptr("32-no-attributes.tga");
-            if(rgb->nativeTextureAlpha || !argb->nativeTextureAlpha || !noAttributes->nativeTextureAlpha ||
+            if(rgb->nativeTextureAlpha || !argb->nativeTextureAlpha || !noAttributes->nativeTextureAlpha || argb->a6AlphaFormat ||
                argb->nativeStorageBytes!=(depth<=16?2:4) || noAttributes->nativeStorageBytes!=(depth<=16?2:4))
                 throw std::runtime_error("A7 TGA32 source alpha flag/depth/attribute contract");
             if(argb->rgba[3]!=255 || noAttributes->rgba[3]!=255)
@@ -659,7 +666,7 @@ int main(int argc,char** argv) {
                 const auto& entity=world.entities[i];const bool modern=i==4;
                 const std::string_view action=modern?std::string_view(modernAction):i==1?std::string_view(shortAction):std::string_view{};
                 if(entity.type!=(modern?7u:3u)||entity.name!=std::string(modern?33:20,'n')||
-                   entity.file!=files[i]||entity.action!=action||entity.rawFlags!=1||entity.ambient.r!=0.5f||
+                   entity.file!=files[i]||entity.action!=action||entity.flags!=1||entity.ambient.r!=0.5f||
                    entity.metadata.size()!=(modern?modernSize:legacySize))
                     throw std::runtime_error("entity filename/action or packed/padded fields changed");
                 for(size_t skill=0;skill<(modern?20u:8u);++skill)

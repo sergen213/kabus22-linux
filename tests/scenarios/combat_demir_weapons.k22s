@@ -1,0 +1,230 @@
+# requires: saves
+# Demir's arsenal at Tüneller (slot 12 = kayit11.sav, 12 inventory entries). Every weapon is selected through the original
+# inventory: M → Silahlar → weapon → Kullan (Envantermenu.wdl EM_TusKontrol/EM_Kernel, NesneMenu.wdl EM_NesneSiMenu, KuBiGoMenu.wdl:40-49).
+# Firearms: hold S (raise, oyuncu2.wdl:2108-2196), D fires (silah.wdl Ates_Et:533 S_Kursun_Sayisi-=1), Enter reloads from the
+# reserve (oyuncu2.wdl:2529 → silah.wdl Oy_Kursun_Doldur). Grenade/mine: D throws/places (oyuncu2.wdl:2555ff). S+Q kicks (oyuncu2.wdl:2240).
+# The inventory only opens after EM_Kernel's post-load delay (oyun_ilk_basladi → 0) and while the weapon is lowered (EnvaterAcilabilirmi).
+realtime off
+load-save 11
+wait until LY_AktifLevelID == 41 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 && EnvaterAcilabilirmi == 1 && oyun_ilk_basladi == 0 timeout 7200
+assert SilahSayisi == 12
+# weapon 1: inventory slot 0
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+press Return
+wait until EM_Bolge == 2 timeout 300
+press Up
+press-until Right EM_CursorNesne+EM_NesneKafa >= 0 timeout 600
+press-until Left EM_CursorNesne+EM_NesneKafa <= 0 timeout 600
+assert Silahlar[0] == 1
+press Return
+wait until EM_Bolge == 6 timeout 300
+press Return
+wait until Aktif_Silah == 1 && EM_Bolge == 2 timeout 300
+press M
+wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 600
+store ammo1 S_Kursun_Sayisi[1]
+press D 8
+wait until S_Kursun_Sayisi[1] < @ammo1 timeout 300
+frames 20
+capture demir_pistol_fired
+store fired1 S_Kursun_Sayisi[1]
+store reserve1 Kursun_Sayisi[1]
+press-until Return S_Kursun_Sayisi[1] > @fired1 timeout 600
+assert S_Kursun_Sayisi[1] == Silah_Kapasite[1]
+assert S_Kursun_Sayisi[1] + Kursun_Sayisi[1] == @fired1 + @reserve1
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 timeout 900
+# weapon 3: inventory slot 2
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+press Return
+wait until EM_Bolge == 2 timeout 300
+press Up
+press-until Right EM_CursorNesne+EM_NesneKafa >= 2 timeout 600
+press-until Left EM_CursorNesne+EM_NesneKafa <= 2 timeout 600
+assert Silahlar[2] == 3
+press Return
+wait until EM_Bolge == 6 timeout 300
+press Return
+wait until Aktif_Silah == 3 && EM_Bolge == 2 timeout 300
+press M
+wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 600
+store ammo3 S_Kursun_Sayisi[3]
+press D 8
+wait until S_Kursun_Sayisi[3] < @ammo3 timeout 300
+frames 20
+capture demir_machinegun_fired
+store fired3 S_Kursun_Sayisi[3]
+store reserve3 Kursun_Sayisi[3]
+press-until Return S_Kursun_Sayisi[3] > @fired3 timeout 600
+assert S_Kursun_Sayisi[3] == Silah_Kapasite[3]
+assert S_Kursun_Sayisi[3] + Kursun_Sayisi[3] == @fired3 + @reserve3
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 timeout 900
+# weapon 2: inventory slot 6
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+press Return
+wait until EM_Bolge == 2 timeout 300
+press Up
+press-until Right EM_CursorNesne+EM_NesneKafa >= 6 timeout 600
+press-until Left EM_CursorNesne+EM_NesneKafa <= 6 timeout 600
+assert Silahlar[6] == 2
+press Return
+wait until EM_Bolge == 6 timeout 300
+press Return
+wait until Aktif_Silah == 2 && EM_Bolge == 2 timeout 300
+press M
+wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 600
+store ammo2 S_Kursun_Sayisi[2]
+press D 8
+wait until S_Kursun_Sayisi[2] < @ammo2 timeout 300
+frames 20
+capture demir_shotgun_fired
+store fired2 S_Kursun_Sayisi[2]
+store reserve2 Kursun_Sayisi[2]
+press-until Return S_Kursun_Sayisi[2] > @fired2 timeout 600
+assert S_Kursun_Sayisi[2] == Silah_Kapasite[2]
+assert S_Kursun_Sayisi[2] + Kursun_Sayisi[2] == @fired2 + @reserve2
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 timeout 900
+# weapon 4: inventory slot 9
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+press Return
+wait until EM_Bolge == 2 timeout 300
+press Down
+press-until Right EM_CursorNesne+EM_NesneKafa >= 9 timeout 600
+press-until Left EM_CursorNesne+EM_NesneKafa <= 9 timeout 600
+assert Silahlar[9] == 4
+press Return
+wait until EM_Bolge == 6 timeout 300
+press Return
+wait until Aktif_Silah == 4 && EM_Bolge == 2 timeout 300
+press M
+wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 600
+store ammo4 S_Kursun_Sayisi[4]
+press D 8
+wait until S_Kursun_Sayisi[4] < @ammo4 timeout 300
+frames 20
+capture demir_akrep_fired
+store fired4 S_Kursun_Sayisi[4]
+store reserve4 Kursun_Sayisi[4]
+press-until Return S_Kursun_Sayisi[4] > @fired4 timeout 600
+assert S_Kursun_Sayisi[4] == Silah_Kapasite[4]
+assert S_Kursun_Sayisi[4] + Kursun_Sayisi[4] == @fired4 + @reserve4
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 timeout 900
+# weapon 5: inventory slot 11
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+press Return
+wait until EM_Bolge == 2 timeout 300
+press Down
+press-until Right EM_CursorNesne+EM_NesneKafa >= 11 timeout 600
+press-until Left EM_CursorNesne+EM_NesneKafa <= 11 timeout 600
+assert Silahlar[11] == 5
+press Return
+wait until EM_Bolge == 6 timeout 300
+press Return
+wait until Aktif_Silah == 5 && EM_Bolge == 2 timeout 300
+press M
+wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 600
+store ammo5 S_Kursun_Sayisi[5]
+press D 8
+wait until S_Kursun_Sayisi[5] < @ammo5 timeout 300
+frames 20
+capture demir_agir_fired
+store fired5 S_Kursun_Sayisi[5]
+store reserve5 Kursun_Sayisi[5]
+press-until Return S_Kursun_Sayisi[5] > @fired5 timeout 600
+assert S_Kursun_Sayisi[5] == Silah_Kapasite[5]
+assert S_Kursun_Sayisi[5] + Kursun_Sayisi[5] == @fired5 + @reserve5
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 timeout 900
+# weapon 6: inventory slot 7
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+press Return
+wait until EM_Bolge == 2 timeout 300
+press Down
+press-until Right EM_CursorNesne+EM_NesneKafa >= 7 timeout 600
+press-until Left EM_CursorNesne+EM_NesneKafa <= 7 timeout 600
+assert Silahlar[7] == 6
+press Return
+wait until EM_Bolge == 6 timeout 300
+press Return
+wait until Aktif_Silah == 6 && EM_Bolge == 2 timeout 300
+press M
+wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 600
+store ammo6 S_Kursun_Sayisi[6]
+press D 8
+wait until S_Kursun_Sayisi[6] < @ammo6 timeout 300
+frames 20
+capture demir_grenade_thrown
+frames 120
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 timeout 900
+# weapon 7: inventory slot 5
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+press Return
+wait until EM_Bolge == 2 timeout 300
+press Down
+press-until Right EM_CursorNesne+EM_NesneKafa >= 5 timeout 600
+press-until Left EM_CursorNesne+EM_NesneKafa <= 5 timeout 600
+assert Silahlar[5] == 7
+press Return
+wait until EM_Bolge == 6 timeout 300
+press Return
+wait until Aktif_Silah == 7 && EM_Bolge == 2 timeout 300
+press M
+wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 600
+store ammo7 S_Kursun_Sayisi[7]
+press D 8
+wait until S_Kursun_Sayisi[7] < @ammo7 timeout 300
+frames 20
+capture demir_mine_placed
+frames 120
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 timeout 900
+# weapon 1: inventory slot 0
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+press Return
+wait until EM_Bolge == 2 timeout 300
+press Up
+press-until Right EM_CursorNesne+EM_NesneKafa >= 0 timeout 600
+press-until Left EM_CursorNesne+EM_NesneKafa <= 0 timeout 600
+assert Silahlar[0] == 1
+press Return
+wait until EM_Bolge == 6 timeout 300
+press Return
+wait until Aktif_Silah == 1 && EM_Bolge == 2 timeout 300
+press M
+wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 600
+# kick (Key_Buyu with D released)
+press Q 6
+wait until player.skill32 < 50 timeout 120
+wait until player.skill32 > 40 timeout 300
+capture demir_kick
+wait until player.skill32 >= 100 timeout 600
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 timeout 900

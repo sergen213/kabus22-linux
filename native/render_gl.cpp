@@ -1,5 +1,8 @@
 #include "render_gl.hpp"
 #include "render_policy.hpp"
+#include "render_pbr_glsl.hpp"
+#include "render_effects_glsl.hpp"
+#include "texture_pack.hpp"
 #include <epoxy/gl.h>
 #include <algorithm>
 #include <bit>
@@ -12,6 +15,7 @@
 #include <stdexcept>
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace k22 {
@@ -25,7 +29,8 @@ GLuint program(const char*vs,const char*fs,const char*gs=nullptr) {
     GLuint v=shader(GL_VERTEX_SHADER,vs),f=shader(GL_FRAGMENT_SHADER,fs),g=gs?shader(GL_GEOMETRY_SHADER,gs):0,p=glCreateProgram();glAttachShader(p,v);glAttachShader(p,f);if(g)glAttachShader(p,g);glLinkProgram(p);glDeleteShader(v);glDeleteShader(f);if(g)glDeleteShader(g);
     GLint ok{};glGetProgramiv(p,GL_LINK_STATUS,&ok);if(!ok){GLint n{};glGetProgramiv(p,GL_INFO_LOG_LENGTH,&n);std::string log(n,'\0');glGetProgramInfoLog(p,n,nullptr,log.data());glDeleteProgram(p);throw std::runtime_error("OpenGL link: "+log);}return p;
 }
-const char* sceneVS=R"(#version 330 core
+// Prefixed with "#version 330 core\n" (plus "#define K22_SHADOW_MAPS 1\n" when shadow maps are on).
+const char* sceneVS=R"(
 layout(location=0) in vec3 position;layout(location=1) in vec3 normal;layout(location=2) in vec2 texcoord;layout(location=3) in vec2 lightcoord;
 layout(location=4) in vec3 nextPosition;layout(location=5) in vec3 nextNormal;
 layout(location=12) in vec3 tangent;layout(location=13) in vec3 nextTangent;
@@ -35,9 +40,15 @@ uniform int frame0,frame1,vertexCount;uniform float interpolation;uniform bool f
 uniform bool particleInstanced;
 uniform int effectKind;uniform vec3 sunDirection,cameraPosition;uniform vec4 skillExtra;
 out vec3 effectLight,effectView;
-out vec3 worldPosition,worldNormal;out vec2 uv,lmuv;
+out vec3 worldPosition,worldNormal,worldTangent;out vec2 uv,lmuv;
 uniform samplerBuffer lights;uniform int lightCount;uniform bool worldVertexLighting,hasLightmap;
 out vec3 vertexDynamicLight;
+uniform bool explicitMaterial;uniform vec4 preparedAmbient;uniform vec3 preparedDiffuse,preparedSpecular,preparedEmissive,ambientLight,infiniteViewer;
+uniform float materialPower,materialSunStrength;uniform int selectedLight;
+out vec3 vertexMaterialDiffuse,vertexMaterialSpecular;
+#ifdef K22_SHADOW_MAPS
+uniform int shadowLight;out vec3 vertexDynamicRaw,vertexShadowLight; // Unclamped sum and the shadow light's own term.
+#endif
 vec3 nativeDynamic(vec3 p,vec3 n){
     vec3 result=vec3(0);
     for(int i=0;i<lightCount;++i){
@@ -49,34 +60,84 @@ vec3 nativeDynamic(vec3 p,vec3 n){
         float attenuation=d.w==3?1:(distance<=a.w?1/max(e.x+e.y*distance+e.z*distance*distance,.0001):0);
         if(d.w==2){float rho=dot(-direction,d.xyz);attenuation*=rho>=c.x?1:rho<=c.y?0:pow((rho-c.y)/max(c.x-c.y,.0001),e.w);}
         result+=b.rgb*abs(b.a)*attenuation*max(dot(n,direction),0);
+#ifdef K22_SHADOW_MAPS
+        if(i==shadowLight)vertexShadowLight=b.rgb*abs(b.a)*attenuation*max(dot(n,direction),0);
+#endif
     }
+#ifdef K22_SHADOW_MAPS
+    vertexDynamicRaw=result;
+#endif
     return clamp(result,0,1);
+}
+void ordinaryMaterial(vec3 p,vec3 n,out vec3 diffuse,out vec3 specular){
+    diffuse=preparedEmissive+preparedAmbient.rgb*ambientLight;specular=vec3(0);
+    for(int i=0;i<lightCount;++i){
+        vec4 a=texelFetch(lights,i*5),b=texelFetch(lights,i*5+1),d=texelFetch(lights,i*5+2),e=texelFetch(lights,i*5+3),c=texelFetch(lights,i*5+4);
+        if(b.a<0)continue;
+        vec3 delta=a.xyz-p;float distance=length(delta);
+        vec3 direction=d.w==3?-d.xyz:delta/max(distance,.0001);
+        float attenuation=d.w==3?1:(distance<=a.w?1/max(e.x+e.y*distance+e.z*distance*distance,.0001):0);
+        if(d.w==2){float rho=dot(-direction,d.xyz);attenuation*=rho>=c.x?1:rho<=c.y?0:pow((rho-c.y)/max(c.x-c.y,.0001),e.w);}
+        vec3 light=b.rgb*b.a*attenuation*(i==selectedLight?materialSunStrength:1);
+        diffuse+=preparedDiffuse*light*max(dot(n,direction),0);
+        vec3 halfVector=direction+infiniteViewer;float magnitude=length(halfVector);
+        if(any(notEqual(preparedSpecular,vec3(0)))){
+            float power=magnitude>0?(materialPower==0?1:pow(max(dot(n,halfVector/magnitude),0),materialPower)):0;
+            specular+=preparedSpecular*light*power;
+        }
+    }
+    diffuse=clamp(diffuse,0,1);specular=clamp(specular,0,1);
 }
 out vec4 instanceColor;flat out vec3 instanceFlags;
 void main(){
     instanceColor=vec4(1);instanceFlags=vec3(0);
-    vertexDynamicLight=vec3(0);
+    vertexDynamicLight=vec3(0);vertexMaterialDiffuse=vec3(0);vertexMaterialSpecular=vec3(0);
+    worldTangent=vec3(0);
+#ifdef K22_SHADOW_MAPS
+    vertexDynamicRaw=vertexShadowLight=vec3(0);
+#endif
     if(particleInstanced){vec4 w=particleModel*vec4(position,1);worldPosition=w.xyz;worldNormal=vec3(1,0,0);uv=texcoord;lmuv=lightcoord;instanceColor=particleColor;instanceFlags=particleFlags;gl_Position=viewProjection*w;gl_ClipDistance[0]=dot(clipPlane,w);return;}
     vec3 p0=position,n0=normal,p1=position,n1=normal,t0=tangent,t1=tangent;
     if(vertexCount>0){int a=frame0*vertexCount*3+gl_VertexID,b=frame1*vertexCount*3+gl_VertexID;p0=texelFetch(poses,a).xyz;p1=texelFetch(poses,b).xyz;n0=texelFetch(poses,a+vertexCount).xyz;n1=texelFetch(poses,b+vertexCount).xyz;t0=texelFetch(poses,a+vertexCount*2).xyz;t1=texelFetch(poses,b+vertexCount*2).xyz;}
     if(firstOverride)p0=position;if(firstNormalOverride)n0=normal;if(firstOverride||firstNormalOverride)t0=tangent;
     if(nextOverride)p1=nextPosition;if(nextNormalOverride)n1=nextNormal;if(nextOverride||nextNormalOverride)t1=nextTangent;
-    vec4 w=model*vec4(mix(p0,p1,interpolation),1);worldPosition=w.xyz;worldNormal=normalize(normalMatrix*mix(n0,n1,interpolation))*normalOrientation;
+    vec4 w=model*vec4(mix(p0,p1,interpolation),1);worldPosition=w.xyz;worldNormal=normalize(normalMatrix*mix(n0,n1,interpolation))*normalOrientation;worldTangent=mat3(model)*mix(t0,t1,interpolation);
     if(worldVertexLighting)vertexDynamicLight=nativeDynamic(worldPosition,worldNormal);
+    if(explicitMaterial&&effectKind==0)ordinaryMaterial(worldPosition,worldNormal,vertexMaterialDiffuse,vertexMaterialSpecular);
     if(effectKind!=0){vec3 localN=mix(n0,n1,interpolation),localT=mix(t0,t1,interpolation);mat3 basis=transpose(mat3(mat3(model)*localT,mat3(model)*cross(localT,localN),mat3(model)*localN));effectLight=normalize(basis*-(sunDirection+(effectKind==1?skillExtra.xyz:vec3(0))));effectView=normalize(basis*(cameraPosition-w.xyz));}
     uv=texcoord;lmuv=lightcoord;gl_Position=viewProjection*w;gl_ClipDistance[0]=dot(clipPlane,w);
 })";
-const char* sceneFS=R"(#version 330 core
-in vec3 worldPosition,worldNormal;in vec2 uv,lmuv;out vec4 color;
+const char* sceneFS=R"(
+in vec3 worldPosition,worldNormal,worldTangent;in vec2 uv,lmuv;out vec4 color;
+uniform bool pbr,toneInShader,roughnessMap;uniform float legacyRoughness,normalOrientation;uniform sampler2D pbrNormal,pbrOrm;
 in vec3 vertexDynamicLight;uniform bool worldVertexLighting;
+in vec3 vertexMaterialDiffuse,vertexMaterialSpecular;
 in vec4 instanceColor;flat in vec3 instanceFlags;uniform bool particleInstanced;
-uniform sampler2D skin,lightmap;uniform samplerBuffer lights;uniform int lightCount,spriteFrames,frame0,frame1;uniform float interpolation;uniform bool hasLightmap,unlit,flare,overlay,invertFlare,textureAlpha,noFog;
+uniform sampler2D skin,lightmap;uniform int spriteFrames,frame0,frame1;uniform float interpolation;uniform bool hasLightmap,unlit,flare,overlay,invertFlare,textureAlpha,noFog;
 uniform vec4 tint;uniform vec3 sunDirection,cameraPosition,fogColor;uniform vec2 uvScale,uvOffset,fogRange;uniform float alpha,materialAmbient,surfaceAmbient;uniform bool skyMask;
 uniform sampler2D portalImage;uniform mat4 portalProjection;uniform vec4 portalViewport,portalPlane;uniform bool portalEnabled;uniform float reflectionWeight;
 in vec3 effectLight,effectView;uniform int effectKind;uniform sampler2D normalSkin;uniform vec2 normalUvScale;
 uniform vec4 skillMain,skillExtra,preparedAmbient;uniform bool explicitMaterial;
-uniform vec3 preparedDiffuse,preparedSpecular,preparedEmissive;uniform float materialPower;
-uniform vec3 ambientLight;uniform float materialSunStrength;
+#ifdef K22_SHADOW_MAPS
+// Sun depth map plus one point/spot depth cube (shadowLight, -1 none); casterPass renders depth only.
+uniform bool shadowMaps,casterPass;uniform int shadowLight;uniform mat4 sunShadowMatrix;uniform float sunShadowTexel;uniform sampler2DShadow sunShadowMap;uniform samplerCubeShadow cubeShadowMap;
+in vec3 vertexDynamicRaw,vertexShadowLight;
+float lightShadow(int i,vec3 p,vec3 n){if(!shadowMaps||i!=shadowLight)return 1.0;vec4 a=texelFetch(lights,i*5);return k22CubeShadow(cubeShadowMap,a.xyz,p,n,k22CubeShadowNear,a.w);}
+// Vertex nativeDynamic with the shadow light's interpolated term occluded per fragment; scales the Gouraud result per
+// channel (as the ray-traced visibleNativeDynamic does).
+vec3 shadowedDynamic(vec3 p,vec3 n){
+    if(!shadowMaps||shadowLight<0||all(lessThanEqual(vertexShadowLight,vec3(0))))return vertexDynamicLight;
+    vec3 unshadowed=clamp(vertexDynamicRaw,0,1),result=clamp(vertexDynamicRaw-vertexShadowLight*(1-lightShadow(shadowLight,p,n)),0,1);
+    return vertexDynamicLight*vec3(unshadowed.x>0?result.x/unshadowed.x:1,unshadowed.y>0?result.y/unshadowed.y:1,unshadowed.z>0?result.z/unshadowed.z:1);
+}
+#define K22_SUN_SHADOW(p,n) (shadowMaps&&!hasLightmap?k22SunShadow(sunShadowMap,sunShadowMatrix,p,n,sunShadowTexel):1.0)
+#define K22_LIGHT_SHADOW(i,p,n) lightShadow(i,p,n)
+#define K22_DYNAMIC(p,n) shadowedDynamic(p,n)
+#else
+#define K22_SUN_SHADOW(p,n) 1.0
+#define K22_LIGHT_SHADOW(i,p,n) 1.0
+#define K22_DYNAMIC(p,n) vertexDynamicLight
+#endif
 vec3 enhancedBaked(vec3 p,vec3 n){
     if(hasLightmap)return vec3(0);
     vec3 result=vec3(0);
@@ -91,7 +152,7 @@ vec3 enhancedBaked(vec3 p,vec3 n){
 void main(){
     if(skyMask){color=vec4(1);return;}
     vec2 coord=uv*uvScale+uvOffset;vec4 texel;
-    if(spriteFrames>1)texel=mix(texture(skin,coord+vec2(float(frame0)/spriteFrames,0)),texture(skin,coord+vec2(float(frame1)/spriteFrames,0)),interpolation);else texel=texture(skin,coord);
+    if(spriteFrames>1){float cols=floor(1.0/uvScale.x+0.5),f0=float(frame0),f1=float(frame1);texel=mix(texture(skin,coord+vec2(mod(f0,cols)/cols,floor(f0/cols)*uvScale.y)),texture(skin,coord+vec2(mod(f1,cols)/cols,floor(f1/cols)*uvScale.y)),interpolation);}else texel=texture(skin,coord); // sprite grid cells (engine.cpp load_entity_asset)
     if(effectKind!=0){
         vec3 bump=2*texture(normalSkin,uv*normalUvScale+uvOffset).rgb-1;
         vec3 reflection=normalize(2*dot(bump,effectLight)*bump-effectLight);
@@ -104,28 +165,24 @@ void main(){
     if(useOverlay&&(max(max(texel.r,texel.g),texel.b)<0.001||texel.a<0.5))discard;
     if(useFlare&&!textureAlpha){float brightness=max(max(texel.r,texel.g),texel.b);texel.a*=useInversion?1-brightness:brightness;}
     vec4 t=texel*tint*instanceColor;t.a*=alpha;if(t.a<0.01)discard;
-    vec3 illumination=vec3(1);
+#ifdef K22_SHADOW_MAPS
+    if(casterPass){color=vec4(0);return;}
+#endif
+    vec3 illumination=vec3(1);float sunVisibility=1.0;
     if(!unlit&&!explicitMaterial){
         illumination=hasLightmap?2*clamp(texture(lightmap,lmuv).rgb+vec3(surfaceAmbient),0,1):vec3(materialAmbient);
-        vec3 n=normalize(worldNormal);if(!hasLightmap)illumination+=vec3(max(dot(n,sunDirection),0));
-        if(worldVertexLighting)illumination+=vertexDynamicLight+enhancedBaked(worldPosition,n);
-        else for(int i=0;i<lightCount;++i){vec4 a=texelFetch(lights,i*5),b=texelFetch(lights,i*5+1);if(hasLightmap&&b.a<0)continue;vec3 d=a.xyz-worldPosition;float distance=length(d);float attenuation=max(1-distance/max(a.w,0.0001),0);illumination+=b.rgb*abs(b.a)*attenuation*attenuation*max(dot(n,d/max(distance,0.0001)),0);}
+        vec3 n=normalize(worldNormal);sunVisibility=K22_SUN_SHADOW(worldPosition,n);if(!hasLightmap)illumination+=vec3(max(dot(n,sunDirection),0))*sunVisibility;
+        if(worldVertexLighting)illumination+=K22_DYNAMIC(worldPosition,n)+enhancedBaked(worldPosition,n);
+        else for(int i=0;i<lightCount;++i){vec4 a=texelFetch(lights,i*5),b=texelFetch(lights,i*5+1);if((texelFetch(lights,i*5+4).z>0.5&&b.a>=0&&texelFetch(lights,i*5+2).w==3)||(hasLightmap&&b.a<0))continue;vec3 d=a.xyz-worldPosition;float distance=length(d);float attenuation=max(1-distance/max(a.w,0.0001),0);illumination+=b.rgb*abs(b.a)*attenuation*attenuation*max(dot(n,d/max(distance,0.0001)),0)*K22_LIGHT_SHADOW(i,worldPosition,n);}
     }
-    if(explicitMaterial){
-        float sunIntensity=length(sunDirection);
-        vec3 n=normalize(worldNormal),light=sunIntensity>0?sunDirection/sunIntensity:vec3(0),view=normalize(cameraPosition-worldPosition);
-        float diffuse=max(dot(n,light),0),specular=sunIntensity>0&&any(notEqual(preparedSpecular,vec3(0)))?pow(max(dot(reflect(-light,n),view),0),materialPower):0;
-        illumination=preparedEmissive+preparedAmbient.rgb*ambientLight;
-        illumination+=(preparedDiffuse*diffuse+preparedSpecular*specular)*(materialSunStrength*sunIntensity);
-        if(worldVertexLighting)illumination+=preparedDiffuse*(vertexDynamicLight+enhancedBaked(worldPosition,n));
-        else for(int i=0;i<lightCount;++i){vec4 a=texelFetch(lights,i*5),b=texelFetch(lights,i*5+1);if(hasLightmap&&b.a<0)continue;vec3 d=a.xyz-worldPosition;float distance=length(d),attenuation=max(1-distance/max(a.w,.0001),0);illumination+=preparedDiffuse*b.rgb*abs(b.a)*attenuation*attenuation*max(dot(n,d/max(distance,.0001)),0);}
-    }
-    vec3 rgb=t.rgb*illumination*(explicitMaterial?2:1);
+    vec3 rgb=explicitMaterial?clamp(clamp(t.rgb*vertexMaterialDiffuse*2,0,1)+vertexMaterialSpecular,0,1):t.rgb*illumination;
+    if(pbr&&!unlit&&!explicitMaterial&&!particleInstanced)rgb=k22Pbr(t.rgb,illumination,worldPosition,normalize(worldNormal),worldTangent,normalOrientation,texture(pbrNormal,coord).rgb,texture(pbrOrm,coord),roughnessMap,legacyRoughness,cameraPosition,sunDirection,sunVisibility,!hasLightmap);
     if(!noFog&&fogRange.y>fogRange.x){float f=clamp((length(worldPosition-cameraPosition)-fogRange.x)/(fogRange.y-fogRange.x),0,1);rgb=mix(rgb,fogColor,f);}
     if(portalEnabled&&reflectionWeight>0&&abs(dot(portalPlane,vec4(worldPosition,1)))<0.1){
         vec4 reflected=portalProjection*vec4(worldPosition,1);
         if(reflected.w>0){vec2 coord=(reflected.xy/reflected.w*.5+.5)*portalViewport.zw+portalViewport.xy;rgb=mix(rgb,texture(portalImage,coord).rgb,reflectionWeight);}
     }
+    if(pbr&&toneInShader)rgb=k22ToneMap(rgb);
     color=vec4(rgb,t.a);
 })";
 const char* shadowVS=R"(#version 330 core
@@ -212,10 +269,27 @@ void main(){
 const char* cloudFS=R"(#version 330 core
 uniform sampler2DArray original;uniform int level,layer;uniform bool convertAlpha;out vec4 color;
 void main(){vec4 c=texelFetch(original,ivec3(ivec2(gl_FragCoord.xy),layer),level);if(convertAlpha){ivec3 rgb=ivec3(c.rgb*255+.5)>>4;int a=min(15,int(float(rgb.r+rgb.g+rgb.b)*(24.0/45.0)));c=vec4(vec3(rgb)/15,float(a)/15);}color=c;})";
+const char* sceneFSPrelude="#version 330 core\nuniform samplerBuffer lights;uniform int lightCount;\n#define K22_LIGHT(i) texelFetch(lights,i)\n";
+const char* tonemapFSPrelude="#version 330 core\n#define K22_LIGHT(i) vec4(0)\nconst int lightCount=0;\n";
+const char* tonemapFS="in vec2 uv;out vec4 color;uniform sampler2D image;void main(){vec4 c=texture(image,uv);color=vec4(k22ToneMap(c.rgb),c.a);}";
+// Wave-2 screen effects (effects.glsl), built on tonemapFSPrelude+pbrGLSL+effectsGLSL; the fog program reads the scene lights.
+const char* linearizeFS="in vec2 uv;out vec4 color;uniform sampler2D depth;uniform float nearPlane,farPlane;void main(){float d=texelFetch(depth,ivec2(gl_FragCoord.xy),0).r;color=vec4(d<1.0?k22LinearDepth(d,nearPlane,farPlane):0.0);}";
+const char* ssaoFS="in vec2 uv;out vec4 color;uniform sampler2D linearDepth;uniform mat4 viewProjection,inverseViewProjection;uniform vec3 eye,forward;uniform vec2 texel;void main(){color=vec4(k22Ssao(linearDepth,uv,texel,inverseViewProjection,viewProjection,eye,forward,k22Noise(gl_FragCoord.xy)));}";
+// 4x4 box (four bilinear taps) over the noisy AO, multiplied into the view color by the blend.
+const char* aoApplyFS="in vec2 uv;out vec4 color;uniform sampler2D ao;uniform vec2 texel;void main(){float a=0.0;for(int i=0;i<4;++i)a+=texture(ao,uv+texel*vec2((i&1)!=0?0.5:-1.5,(i&2)!=0?0.5:-1.5)).r;color=vec4(vec3(a*0.25),1);}";
+const char* fogFSPrelude="#version 330 core\nuniform samplerBuffer lights;uniform int lightCount;\n#define K22_LIGHT(i) texelFetch(lights,i)\nfloat fogVisibility(int i,vec3 x);\n#define K22_FOG_VISIBILITY(i,x) fogVisibility(i,x)\n";
+const char* fogFS="in vec2 uv;out vec4 color;uniform sampler2D linearDepth;uniform mat4 inverseViewProjection;uniform vec3 eye,forward;uniform vec2 fogRange;uniform float farPlane;uniform bool shadowMaps;uniform int shadowLight;uniform samplerCubeShadow cubeShadowMap;\n"
+    "float fogVisibility(int i,vec3 x){if(!shadowMaps||i!=shadowLight)return 1.0;vec4 a=K22_LIGHT(i*5);return k22CubeShadow(cubeShadowMap,a.xyz,x,vec3(0),k22CubeShadowNear,a.w);}\n"
+    "void main(){float d=texture(linearDepth,uv).r;if(d<=0.0)d=farPlane;color=vec4(k22FogInscatter(eye,eye+k22ViewRay(k22NdcFromUv(uv),inverseViewProjection,eye,forward)*d,fogRange,k22Noise(gl_FragCoord.xy)),0);}";
+// mode 0: prefiltered 4x4 downsample of the HDR scene, 1: downsample, 2: tent upsample (additively blended).
+const char* bloomFS="in vec2 uv;out vec4 color;uniform sampler2D image;uniform vec2 texel;uniform int mode;void main(){color=vec4(mode==0?k22BloomPrefilter(k22BloomDown(image,uv,texel)):mode==1?k22BloomDown(image,uv,texel):k22BloomUp(image,uv,texel),1);}";
+const char* compositeFS="in vec2 uv;out vec4 color;uniform sampler2D image,bloom;uniform bool bloomEnabled,toneMap;void main(){vec4 c=texture(image,uv);if(bloomEnabled)c.rgb+=k22BloomStrength*texture(bloom,uv).rgb;color=vec4(toneMap?k22ToneMap(c.rgb):c.rgb,c.a);}";
+const char* fxaaFS="in vec2 uv;out vec4 color;uniform sampler2D image;uniform vec2 texel;void main(){color=vec4(k22Fxaa(image,uv,texel),texture(image,uv).a);}";
 struct UIVertex { float x,y,u,v,r,g,b,a; };
 struct Batch { GLuint first{},count{};std::uint32_t material{};GLuint centroidFirst{},centroidCount{}; };
 struct MeshGPU { GLuint vao{},vertices{},indices{},tangents{},poseBuffer{},poses{};std::vector<Batch> batches;int frameCount{},primaryMax{},skinLayers{};Bounds bounds;std::vector<Bounds> frameBounds; };
-struct TextureGPU {GLuint id{};std::uint32_t width{},height{};std::uint64_t serial{};bool dynamic{},alpha{},mipsValid{};};
+// width/height stay the original image's; pack replacements change only GPU storage, never UV policy.
+struct TextureGPU {GLuint id{};std::uint32_t width{},height{};std::uint64_t serial{};bool dynamic{},alpha{},mipsValid{};GLuint normal{},orm{};bool roughness{};};
 struct MeshOverride {
     GLuint positions{},normals{},tangents{};
     std::uint64_t revision{~0ull},tangentRevision{~0ull},boundsRevision{~0ull};
@@ -255,6 +329,16 @@ struct ParticleGPU { Matrix model; Color color; std::array<float,3> flags; };
 struct WarpGPU {GLuint texture{},offsetBuffer{},offsetTexture{};std::uint32_t width{},height{};std::uint64_t serial{~0ull};int phase{-1};float range{};bool mipsValid{};};
 struct SkyGPU {GLuint texture{};std::uint32_t frames{};};
 GLint effective_mip_filter(double mode){return mode<1?GL_LINEAR:mode<=2?GL_LINEAR_MIPMAP_NEAREST:GL_LINEAR_MIPMAP_LINEAR;}
+// Single-level clamped 2D render target with its own framebuffer (depth attachments draw no color).
+void render_target(GLuint&fbo,GLuint&texture,GLint format,GLenum pixels,GLenum type,int w,int h,GLenum attachment=GL_COLOR_ATTACHMENT0){
+    glGenTextures(1,&texture);glBindTexture(GL_TEXTURE_2D,texture);glTexImage2D(GL_TEXTURE_2D,0,format,w,h,0,pixels,type,nullptr);
+    for(auto [name,value]:{std::pair{GL_TEXTURE_MIN_FILTER,GL_NEAREST},{GL_TEXTURE_MAG_FILTER,GL_NEAREST},{GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE},{GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE}})glTexParameteri(GL_TEXTURE_2D,name,value);
+    glGenFramebuffers(1,&fbo);glBindFramebuffer(GL_FRAMEBUFFER,fbo);glFramebufferTexture2D(GL_FRAMEBUFFER,attachment,GL_TEXTURE_2D,texture,0);
+    if(attachment!=GL_COLOR_ATTACHMENT0){glDrawBuffer(GL_NONE);glReadBuffer(GL_NONE);}
+    if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)throw std::runtime_error("Incomplete OpenGL effect framebuffer");
+}
+bool blended(const DrawInstance&d){bool transparent=d.alpha<1||d.additive||d.translucent||d.flare;if(d.model)for(const auto&material:d.model->materials)transparent|=material.alpha<1;return transparent;}
+GLint uniform(GLuint program,const char*name){return glGetUniformLocation(program,name);}
 } // namespace
 struct GLBackend::Impl {
     SDL_Window* window{};SDL_GLContext context{};bool portalPass{};
@@ -264,6 +348,26 @@ struct GLBackend::Impl {
     GLint minificationFilter{GL_LINEAR_MIPMAP_LINEAR};bool mipsEnabled{true};
     GLuint alphaFbo{},alphaColor{},alphaDepth{};
     GLuint portalFbo{},portalColor{},portalDepth{};
+    // PBR/composite (composite_enabled): background views render to an MSAA RGBA16F target, resolved, bloomed, tone mapped
+    // (PBR only) and FXAA'd into the LDR scene before UI/foreground.
+    GLuint hdrFbo{},hdrColor{},hdrDepth{},hdrResolveFbo{},hdrResolveColor{},tonemapProgram{},flatNormal{},defaultOrm{};GLint tonemapImage{};
+    bool composite{},shadowMapsOn{},shadowsReady{},casterPass{};int shadowLight{-1};
+    // Shadow casters: the world's ~thousands of WMB batches reduce to one multi-draw per alpha-rejection state, grouped by
+    // the first caster pass of a frame and replayed by the other faces (casterWorld marks the world draw).
+    struct CasterGroup{GLuint texture,sampler;bool textureAlpha;Color tint;float alpha;Vec2 uvScale,uvOffset;std::vector<GLsizei>counts;std::vector<const void*>offsets;};
+    std::vector<CasterGroup> worldCasters;bool casterWorld{},worldCastersReady{};
+    void draw_world_casters(){
+        for(const auto&g:worldCasters){
+            glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,g.texture);glBindSampler(0,g.sampler);glUniform1i(su.textureAlpha,g.textureAlpha);
+            glUniform4f(su.tint,g.tint.r,g.tint.g,g.tint.b,g.tint.a);glUniform1f(su.alpha,g.alpha);glUniform2f(su.uvScale,g.uvScale.x,g.uvScale.y);glUniform2f(su.uvOffset,g.uvOffset.x,g.uvOffset.y);
+            glMultiDrawElements(GL_TRIANGLES,g.counts.data(),GL_UNSIGNED_INT,g.offsets.data(),GLsizei(g.counts.size()));
+        }
+    }
+    GLuint compositeProgram{},bloomProgram{},fxaaProgram{},linearizeProgram{},ssaoProgram{},aoApplyProgram{},fogProgram{};
+    std::array<GLuint,5> bloomFbo{},bloomTexture{};GLuint ldrFbo{},ldrColor{};
+    // Primary-view screen effects (SSAO, volumetric fog), sized to that view.
+    GLuint effectDepthFbo{},effectDepth{},linearFbo{},linearDepth{},aoFbo{},aoTexture{};int effectWidth{},effectHeight{};
+    GLuint sunShadowFbo{},sunShadowMap{},cubeShadowFbo{},cubeShadowMap{};
     bool retainedColorValid{},portalColorValid{},finalFrameValid{};
     GLuint videoTexture{};int videoWidth{},videoHeight{};std::uint64_t videoSerial{~0ull};
     std::unordered_map<std::uint32_t,EffectBindings> effectBindings;
@@ -273,6 +377,7 @@ struct GLBackend::Impl {
     bool gammaUploaded{};
     std::unordered_map<const Image*,std::array<TextureGPU,3>> textures;
     std::unordered_map<const Image*,WarpGPU> warps;
+    std::unordered_set<const Image*> turbulent; // Never pack-replaced: the native warp table addresses original texels.
     std::vector<std::int32_t> turbulenceOffsets;
     const RenderFrame* currentFrame{};
     Matrix viewProjection{};
@@ -309,6 +414,9 @@ struct GLBackend::Impl {
         GLint surfaceAmbient,skyMask;
         GLint effectKind,normalSkin,normalUvScale,skillMain,skillExtra,preparedAmbient,explicitMaterial,preparedDiffuse,preparedSpecular,preparedEmissive,materialPower,ambientLight,materialSunStrength;
         GLint worldVertexLighting;
+        GLint infiniteViewer,selectedLight;
+        GLint pbr,toneInShader,roughnessMap,legacyRoughness,pbrNormal,pbrOrm;
+        GLint shadowMaps,casterPass,shadowLight,sunShadowMatrix,sunShadowTexel,sunShadowMap,cubeShadowMap;
     } su{};
     GLint uiViewport{},uiImage{},uiOverlay{},uiTextKey{},uiCursorKey{},uiAlphaRef{},postImage{},postRamp{},postEnabled{};
     explicit Impl(SDL_Window* w,RenderOptions o):window(w),options(std::move(o)) {
@@ -319,9 +427,21 @@ struct GLBackend::Impl {
             requestedSwapInterval=options.vsync?1:0;
             std::cerr<<"kabus22: GL_VENDOR="<<reinterpret_cast<const char*>(glGetString(GL_VENDOR))<<"\nGL_RENDERER="<<reinterpret_cast<const char*>(glGetString(GL_RENDERER))<<"\nGL_VERSION="<<reinterpret_cast<const char*>(glGetString(GL_VERSION))<<"\nSDL_GL_GetSwapInterval="<<SDL_GL_GetSwapInterval()<<'\n';
             GLint maxSamples{};glGetIntegerv(GL_MAX_SAMPLES,&maxSamples);samples=std::clamp(options.samples,1,maxSamples);
+            if(options.samples>maxSamples)std::cerr<<"kabus22: graphics: MSAA "<<options.samples<<" unsupported, using "<<maxSamples<<'\n';
             glGetIntegerv(GL_MAX_TEXTURE_SIZE,&maxTextureSize);
-            if(epoxy_gl_version()>=46||epoxy_has_gl_extension("GL_EXT_texture_filter_anisotropic")||epoxy_has_gl_extension("GL_ARB_texture_filter_anisotropic")){GLfloat maximum{};glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT,&maximum);preferredAnisotropy=anisotropy=std::clamp(options.anisotropy,1.0f,maximum);}
-            scene=program(sceneVS,sceneFS);ui=program(uiVS,uiFS);post=program(postVS,postFS);
+            if(epoxy_gl_version()>=46||epoxy_has_gl_extension("GL_EXT_texture_filter_anisotropic")||epoxy_has_gl_extension("GL_ARB_texture_filter_anisotropic")){GLfloat maximum{};glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT,&maximum);preferredAnisotropy=anisotropy=std::clamp(options.anisotropy,1.0f,maximum);if(options.anisotropy>maximum)std::cerr<<"kabus22: graphics: anisotropy "<<options.anisotropy<<" unsupported, using "<<maximum<<'\n';}
+            else if(options.forceAnisotropy&&options.anisotropy>1)std::cerr<<"kabus22: graphics: anisotropic filtering unsupported by this OpenGL context; disabled\n";
+            const auto&fx=options.features;composite=composite_enabled(options.pbr,fx);shadowMapsOn=shadow_maps_enabled(fx);
+            const std::string shadowDefine=shadowMapsOn?"#define K22_SHADOW_MAPS 1\n":"";
+            scene=program(("#version 330 core\n"+shadowDefine+sceneVS).c_str(),(std::string(sceneFSPrelude)+(shadowMapsOn?shadowDefine+effectsGLSL+"float lightShadow(int i,vec3 p,vec3 n);\n#define K22_PBR_LIGHT_VISIBILITY(i) lightShadow(i,p,Ng)\n":std::string())+pbrGLSL+sceneFS).c_str());ui=program(uiVS,uiFS);post=program(postVS,postFS);
+            tonemapProgram=program(postVS,(std::string(tonemapFSPrelude)+pbrGLSL+tonemapFS).c_str());tonemapImage=glGetUniformLocation(tonemapProgram,"image");
+            auto effect=[&](const char*fs){return program(postVS,(std::string(tonemapFSPrelude)+pbrGLSL+effectsGLSL+fs).c_str());};
+            if(composite&&(fx.bloom||!options.pbr))compositeProgram=effect(compositeFS);
+            if(fx.bloom)bloomProgram=effect(bloomFS);
+            if(fx.fxaa)fxaaProgram=effect(fxaaFS);
+            if(fx.ssao||fx.fog)linearizeProgram=effect(linearizeFS);
+            if(fx.ssao){ssaoProgram=effect(ssaoFS);aoApplyProgram=effect(aoApplyFS);}
+            if(fx.fog)fogProgram=program(postVS,(std::string(fogFSPrelude)+effectsGLSL+fogFS).c_str());
             shadowProgram=program(shadowVS,shadowFS,shadowGS);
 #define S(field,name) shu.field=glGetUniformLocation(shadowProgram,name)
             S(model,"model");S(projection,"projection");S(vp,"viewProjection");S(poses,"poses");S(frame0,"frame0");S(frame1,"frame1");S(vertexCount,"vertexCount");S(interpolation,"interpolation");S(firstOverride,"firstOverride");S(nextOverride,"nextOverride");S(clipPlane,"clipPlane");S(viewport,"viewport");S(areaThreshold,"areaThreshold");S(alpha,"alpha");S(reversed,"reversed");
@@ -343,11 +463,16 @@ struct GLBackend::Impl {
             U(effectKind,"effectKind");U(normalSkin,"normalSkin");U(normalUvScale,"normalUvScale");U(skillMain,"skillMain");U(skillExtra,"skillExtra");U(preparedAmbient,"preparedAmbient");U(explicitMaterial,"explicitMaterial");U(preparedDiffuse,"preparedDiffuse");U(preparedSpecular,"preparedSpecular");U(preparedEmissive,"preparedEmissive");U(materialPower,"materialPower");
             U(ambientLight,"ambientLight");U(materialSunStrength,"materialSunStrength");
             U(worldVertexLighting,"worldVertexLighting");
+            U(infiniteViewer,"infiniteViewer");U(selectedLight,"selectedLight");
+            U(pbr,"pbr");U(toneInShader,"toneInShader");U(roughnessMap,"roughnessMap");U(legacyRoughness,"legacyRoughness");U(pbrNormal,"pbrNormal");U(pbrOrm,"pbrOrm");
+            U(shadowMaps,"shadowMaps");U(casterPass,"casterPass");U(shadowLight,"shadowLight");U(sunShadowMatrix,"sunShadowMatrix");U(sunShadowTexel,"sunShadowTexel");U(sunShadowMap,"sunShadowMap");U(cubeShadowMap,"cubeShadowMap");
 #undef U
+            if(shadowMapsOn){glUseProgram(scene);glUniform1i(su.sunShadowMap,8);glUniform1i(su.cubeShadowMap,9);} // Distinct units from the 2D samplers.
             uiViewport=glGetUniformLocation(ui,"viewport");uiImage=glGetUniformLocation(ui,"image");uiOverlay=glGetUniformLocation(ui,"overlay");uiAlphaRef=glGetUniformLocation(ui,"alphaRef");postImage=glGetUniformLocation(post,"image");postRamp=glGetUniformLocation(post,"ramp");postEnabled=glGetUniformLocation(post,"enabled");
             uiTextKey=glGetUniformLocation(ui,"textKey");
             uiCursorKey=glGetUniformLocation(ui,"cursorKey");
             glGenTextures(1,&white);glBindTexture(GL_TEXTURE_2D,white);const std::uint8_t pixel[4]={255,255,255,255};glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,pixel);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+            for(auto [id,value]:{std::pair{&flatNormal,std::array<std::uint8_t,4>{128,128,255,255}},std::pair{&defaultOrm,std::array<std::uint8_t,4>{255,255,0,255}}}){glGenTextures(1,id);glBindTexture(GL_TEXTURE_2D,*id);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,value.data());glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);}
             glGenVertexArrays(1,&uiVao);glGenBuffers(1,&uiVbo);glBindVertexArray(uiVao);glBindBuffer(GL_ARRAY_BUFFER,uiVbo);
             glEnableVertexAttribArray(0);glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,sizeof(UIVertex),(void*)0);glEnableVertexAttribArray(1);glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,sizeof(UIVertex),(void*)(2*sizeof(float)));glEnableVertexAttribArray(2);glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,sizeof(UIVertex),(void*)(4*sizeof(float)));
             glGenVertexArrays(1,&postVao);glGenBuffers(1,&lightBuffer);glGenTextures(1,&lightTexture);glBindTexture(GL_TEXTURE_BUFFER,lightTexture);glBindBuffer(GL_TEXTURE_BUFFER,lightBuffer);glBufferData(GL_TEXTURE_BUFFER,sizeof(float)*8,nullptr,GL_STREAM_DRAW);glTexBuffer(GL_TEXTURE_BUFFER,GL_RGBA32F,lightBuffer);
@@ -391,13 +516,16 @@ struct GLBackend::Impl {
         ++completionCount;++completionSubmissions;glFlush();
     }
     void destroy() {
-        if(context){SDL_GL_MakeCurrent(window,context);drain_completion(false);for(auto&[key,m]:meshes){glDeleteVertexArrays(1,&m.vao);glDeleteBuffers(1,&m.vertices);glDeleteBuffers(1,&m.indices);glDeleteBuffers(1,&m.tangents);glDeleteBuffers(1,&m.poseBuffer);glDeleteTextures(1,&m.poses);}for(auto&[key,variants]:textures)for(auto&t:variants)glDeleteTextures(1,&t.id);
+        if(context){SDL_GL_MakeCurrent(window,context);drain_completion(false);for(auto&[key,m]:meshes){glDeleteVertexArrays(1,&m.vao);glDeleteBuffers(1,&m.vertices);glDeleteBuffers(1,&m.indices);glDeleteBuffers(1,&m.tangents);glDeleteBuffers(1,&m.poseBuffer);glDeleteTextures(1,&m.poses);}for(auto&[key,variants]:textures)for(auto&t:variants){glDeleteTextures(1,&t.id);glDeleteTextures(1,&t.normal);glDeleteTextures(1,&t.orm);}
             for(auto&[key,m]:overrides){glDeleteBuffers(1,&m.positions);glDeleteBuffers(1,&m.normals);glDeleteBuffers(1,&m.tangents);}glDeleteTextures(1,&gammaTexture);glDeleteSamplers(1,&sceneSampler);glDeleteSamplers(1,&uiNearestSampler);glDeleteSamplers(1,&uiLinearSampler);
             glDeleteBuffers(1,&particleVbo);glDeleteSamplers(1,&lightmapSampler);
             glDeleteSamplers(1,&dynamicSceneSampler);
             for(auto&[image,warp]:warps){glDeleteTextures(1,&warp.texture);glDeleteTextures(1,&warp.offsetTexture);glDeleteBuffers(1,&warp.offsetBuffer);}glDeleteProgram(warpProgram);glDeleteFramebuffers(1,&warpFbo);
             for(auto&[image,sky]:skies)glDeleteTextures(1,&sky.texture);glDeleteProgram(skyProgram);glDeleteProgram(cloudProgram);glDeleteSamplers(1,&skyClampSampler);
             glDeleteProgram(shadowProgram);
+            glDeleteProgram(tonemapProgram);glDeleteTextures(1,&flatNormal);glDeleteTextures(1,&defaultOrm);
+            for(GLuint p:{compositeProgram,bloomProgram,fxaaProgram,linearizeProgram,ssaoProgram,aoApplyProgram,fogProgram})glDeleteProgram(p);
+            glDeleteFramebuffers(1,&sunShadowFbo);glDeleteTextures(1,&sunShadowMap);glDeleteFramebuffers(1,&cubeShadowFbo);glDeleteTextures(1,&cubeShadowMap);
             glDeleteProgram(scene);glDeleteProgram(ui);glDeleteProgram(post);glDeleteTextures(1,&white);glDeleteTextures(1,&videoTexture);glDeleteVertexArrays(1,&uiVao);glDeleteVertexArrays(1,&postVao);glDeleteBuffers(1,&uiVbo);glDeleteBuffers(1,&lightBuffer);glDeleteTextures(1,&lightTexture);free_targets();SDL_GL_DeleteContext(context);context=nullptr;}
     }
     ~Impl(){destroy();}
@@ -407,7 +535,7 @@ struct GLBackend::Impl {
             for(GLuint sampler:{sceneSampler,lightmapSampler,skyClampSampler})glSamplerParameteri(sampler,GL_TEXTURE_MIN_FILTER,filter);
             minificationFilter=filter;mipsEnabled=filter!=GL_LINEAR;
         }
-        float factor=effective_anisotropy(enabledAnisotropy,preferredAnisotropy);
+        float factor=effective_anisotropy(options.forceAnisotropy?1:enabledAnisotropy,preferredAnisotropy);
         if(factor!=anisotropy){
             if(preferredAnisotropy>1)for(GLuint sampler:{sceneSampler,lightmapSampler,skyClampSampler,dynamicSceneSampler})glSamplerParameterf(sampler,GL_TEXTURE_MAX_ANISOTROPY_EXT,factor);
             anisotropy=factor;
@@ -418,17 +546,131 @@ struct GLBackend::Impl {
         glDeleteFramebuffers(1,&msaaFbo);glDeleteRenderbuffers(1,&msaaColor);glDeleteRenderbuffers(1,&msaaDepth);glDeleteFramebuffers(1,&resolveFbo);glDeleteTextures(1,&resolveColor);
         glDeleteFramebuffers(1,&alphaFbo);glDeleteTextures(1,&alphaColor);glDeleteRenderbuffers(1,&alphaDepth);
         glDeleteFramebuffers(1,&portalFbo);glDeleteTextures(1,&portalColor);glDeleteRenderbuffers(1,&portalDepth);portalFbo=portalColor=portalDepth=0;
+        glDeleteFramebuffers(1,&hdrFbo);glDeleteRenderbuffers(1,&hdrColor);glDeleteRenderbuffers(1,&hdrDepth);glDeleteFramebuffers(1,&hdrResolveFbo);glDeleteTextures(1,&hdrResolveColor);hdrFbo=hdrColor=hdrDepth=hdrResolveFbo=hdrResolveColor=0;
+        glDeleteFramebuffers(5,bloomFbo.data());glDeleteTextures(5,bloomTexture.data());bloomFbo={};bloomTexture={};glDeleteFramebuffers(1,&ldrFbo);glDeleteTextures(1,&ldrColor);ldrFbo=ldrColor=0;
+        free_effects();
         msaaFbo=msaaColor=msaaDepth=resolveFbo=resolveColor=alphaFbo=alphaColor=alphaDepth=0;
         retainedColorValid=portalColorValid=finalFrameValid=false;targetWidth=targetHeight=0;
+    }
+    void free_effects(){
+        for(GLuint*fbo:{&effectDepthFbo,&linearFbo,&aoFbo})glDeleteFramebuffers(1,fbo);
+        for(GLuint*texture:{&effectDepth,&linearDepth,&aoTexture})glDeleteTextures(1,texture);
+        effectDepthFbo=linearFbo=aoFbo=effectDepth=linearDepth=aoTexture=0;effectWidth=effectHeight=0;
     }
     void targets(int w,int h){if(w==targetWidth&&h==targetHeight)return;free_targets();targetWidth=w;targetHeight=h;
         glGenFramebuffers(1,&msaaFbo);glBindFramebuffer(GL_FRAMEBUFFER,msaaFbo);glGenRenderbuffers(1,&msaaColor);glBindRenderbuffer(GL_RENDERBUFFER,msaaColor);glRenderbufferStorageMultisample(GL_RENDERBUFFER,samples,GL_RGBA8,w,h);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_RENDERBUFFER,msaaColor);glGenRenderbuffers(1,&msaaDepth);glBindRenderbuffer(GL_RENDERBUFFER,msaaDepth);glRenderbufferStorageMultisample(GL_RENDERBUFFER,samples,GL_DEPTH24_STENCIL8,w,h);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_RENDERBUFFER,msaaDepth);if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)throw std::runtime_error("Incomplete multisample game framebuffer");
         glGenFramebuffers(1,&resolveFbo);glBindFramebuffer(GL_FRAMEBUFFER,resolveFbo);glGenTextures(1,&resolveColor);glBindTexture(GL_TEXTURE_2D,resolveColor);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,w,h,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,resolveColor,0);if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)throw std::runtime_error("Incomplete game resolve framebuffer");
+        if(!composite)return;
+        glGenFramebuffers(1,&hdrFbo);glBindFramebuffer(GL_FRAMEBUFFER,hdrFbo);glGenRenderbuffers(1,&hdrColor);glBindRenderbuffer(GL_RENDERBUFFER,hdrColor);glRenderbufferStorageMultisample(GL_RENDERBUFFER,samples,GL_RGBA16F,w,h);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_RENDERBUFFER,hdrColor);glGenRenderbuffers(1,&hdrDepth);glBindRenderbuffer(GL_RENDERBUFFER,hdrDepth);glRenderbufferStorageMultisample(GL_RENDERBUFFER,samples,GL_DEPTH24_STENCIL8,w,h);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_RENDERBUFFER,hdrDepth);if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)throw std::runtime_error("Incomplete HDR game framebuffer");
+        glGenFramebuffers(1,&hdrResolveFbo);glBindFramebuffer(GL_FRAMEBUFFER,hdrResolveFbo);glGenTextures(1,&hdrResolveColor);glBindTexture(GL_TEXTURE_2D,hdrResolveColor);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA16F,w,h,0,GL_RGBA,GL_HALF_FLOAT,nullptr);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,hdrResolveColor,0);if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)throw std::runtime_error("Incomplete HDR resolve framebuffer");
+        if(options.features.bloom)for(int level=0;level<5;++level)render_target(bloomFbo[level],bloomTexture[level],GL_RGBA16F,GL_RGBA,GL_HALF_FLOAT,std::max(1,w>>(level+1)),std::max(1,h>>(level+1)));
+        if(options.features.fxaa)render_target(ldrFbo,ldrColor,GL_RGBA8,GL_RGBA,GL_UNSIGNED_BYTE,w,h);
+    }
+    // Shadow maps for the primary view: sun depth map and the shadow light's depth cube. Casters reuse the scene program
+    // and draw_instance (poses, overrides, alpha-test discard) depth-only, back faces culled from the light: world plus opaque, non-view entities.
+    void shadow_pass(const RenderFrame&f,const Camera&camera,float aspect){
+        if(!sunShadowFbo){
+            auto compare=[](GLenum target){for(auto [name,value]:{std::pair{GL_TEXTURE_MIN_FILTER,GL_LINEAR},{GL_TEXTURE_MAG_FILTER,GL_LINEAR},{GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE},{GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE},{GL_TEXTURE_WRAP_R,GL_CLAMP_TO_EDGE},{GL_TEXTURE_COMPARE_MODE,GL_COMPARE_REF_TO_TEXTURE},{GL_TEXTURE_COMPARE_FUNC,GL_LEQUAL}})glTexParameteri(target,name,value);};
+            render_target(sunShadowFbo,sunShadowMap,GL_DEPTH_COMPONENT32F,GL_DEPTH_COMPONENT,GL_FLOAT,sunShadowResolution,sunShadowResolution,GL_DEPTH_ATTACHMENT);compare(GL_TEXTURE_2D);
+            glGenTextures(1,&cubeShadowMap);glBindTexture(GL_TEXTURE_CUBE_MAP,cubeShadowMap);
+            for(int face=0;face<6;++face)glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X+face,0,GL_DEPTH_COMPONENT32F,cubeShadowResolution,cubeShadowResolution,0,GL_DEPTH_COMPONENT,GL_FLOAT,nullptr);
+            compare(GL_TEXTURE_CUBE_MAP);glGenFramebuffers(1,&cubeShadowFbo);glBindFramebuffer(GL_FRAMEBUFFER,cubeShadowFbo);glDrawBuffer(GL_NONE);glReadBuffer(GL_NONE);
+        }
+        const Matrix sun=sun_shadow_matrix(camera,aspect,f.sunDirection,f.world?mesh(f.world->mesh).bounds:Bounds{},sunShadowDistance,sunShadowResolution);
+        // Lights often sit inside lamp/pole geometry: the cube near plane (cubeShadowNear) clips those fixtures out.
+        shadowLight=shadow_light_index(f.lights,camera.position);
+        glUseProgram(scene);glUniform1i(su.casterPass,1);glUniform1i(su.shadowMaps,0);glUniform1i(su.lightCount,0);glUniform1i(su.skyMask,0);
+        glUniform1i(su.skin,0);glUniform1i(su.lightmap,1);glUniform1i(su.poses,2);glUniform1i(su.pbr,0);glBindSampler(0,sceneSampler);glBindSampler(1,lightmapSampler);
+        glActiveTexture(GL_TEXTURE8);glBindTexture(GL_TEXTURE_2D,0);glActiveTexture(GL_TEXTURE9);glBindTexture(GL_TEXTURE_CUBE_MAP,0);
+        geometryClipPlane={};glUniform4fv(su.clipPlane,1,geometryClipPlane.data());portalPass=false;casterPass=true;worldCasters.clear();worldCastersReady=false;
+        glDisable(GL_SCISSOR_TEST);glDisable(GL_CLIP_DISTANCE0);glDisable(GL_BLEND);glDisable(GL_STENCIL_TEST);glEnable(GL_DEPTH_TEST);glDepthFunc(GL_LEQUAL);glCullFace(GL_BACK);glDepthMask(GL_TRUE);glColorMask(GL_FALSE,GL_FALSE,GL_FALSE,GL_FALSE);
+        auto casters=[&](const Matrix&vp,int size){
+            glViewport(0,0,size,size);glClear(GL_DEPTH_BUFFER_BIT);viewProjection=vp;glUniformMatrix4fv(su.vp,1,GL_FALSE,vp.data());
+            if(camera.drawWorld&&f.world&&(camera.layers&1)){DrawInstance world;world.model=&f.world->mesh;casterWorld=true;draw_instance(world,f.skinBindings,&camera);casterWorld=false;}
+            if(f.renderEntities&&!camera.noEntities)for(const auto&d:f.instances){
+                if(!d.visible||!d.model||d.viewSpace||d.billboard||!(d.layers&camera.layers)||(camera.excludeEntityId&&d.objectId==camera.excludeEntityId))continue;
+                if(camera.perDrawOpacity&&model_has_entity_skins(*d.model)){if(model_queue(d,f.skinBindings)&1)draw_instance(d,f.skinBindings,&camera,true,0);}
+                else if(!blended(d))draw_instance(d,f.skinBindings,&camera);
+            }
+        };
+        glBindFramebuffer(GL_FRAMEBUFFER,sunShadowFbo);casters(sun,sunShadowResolution);
+        if(shadowLight>=0){
+            const auto&light=f.lights[shadowLight];glBindFramebuffer(GL_FRAMEBUFFER,cubeShadowFbo);
+            for(int face=0;face<6;++face){glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_CUBE_MAP_POSITIVE_X+face,cubeShadowMap,0);casters(cube_face_matrix(light.position,face,cubeShadowNear,light.range),cubeShadowResolution);}
+        }
+        casterPass=false;glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);glEnable(GL_BLEND);
+        // Ortho rows are scaled by 1/radius: one shadow texel spans 2*radius/resolution world units.
+        const float radius=1/std::sqrt(sun[0]*sun[0]+sun[4]*sun[4]+sun[8]*sun[8]);
+        glUniform1i(su.casterPass,0);glUniform1i(su.shadowMaps,1);glUniform1i(su.shadowLight,shadowLight);glUniformMatrix4fv(su.sunShadowMatrix,1,GL_FALSE,sun.data());glUniform1f(su.sunShadowTexel,2*radius/sunShadowResolution);
+        glActiveTexture(GL_TEXTURE8);glBindTexture(GL_TEXTURE_2D,sunShadowMap);glBindSampler(8,0);glActiveTexture(GL_TEXTURE9);glBindTexture(GL_TEXTURE_CUBE_MAP,cubeShadowMap);glBindSampler(9,0);
+        shadowsReady=true;
+    }
+    // Primary-view SSAO and volumetric fog, before view-space entities clear depth. Depth is copied to a single-sample
+    // texture and linearized; AO multiplies into the view color, fog in-scattering adds to it (HDR before tone mapping).
+    void screen_effects(const RenderFrame&f,const Camera&camera,int x,int y,int w,int h){
+        const auto&fx=options.features;GLint destination{};glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&destination);
+        if(effectWidth!=w||effectHeight!=h){
+            free_effects();effectWidth=w;effectHeight=h;
+            render_target(effectDepthFbo,effectDepth,GL_DEPTH24_STENCIL8,GL_DEPTH_STENCIL,GL_UNSIGNED_INT_24_8,w,h,GL_DEPTH_STENCIL_ATTACHMENT);
+            render_target(linearFbo,linearDepth,GL_R32F,GL_RED,GL_FLOAT,w,h);
+            if(fx.ssao)render_target(aoFbo,aoTexture,GL_R8,GL_RED,GL_UNSIGNED_BYTE,w,h);
+        }
+        const bool clip=glIsEnabled(GL_CLIP_DISTANCE0);glDisable(GL_SCISSOR_TEST);glDisable(GL_DEPTH_TEST);glDisable(GL_BLEND);glDisable(GL_CULL_FACE);glDisable(GL_CLIP_DISTANCE0);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,destination);glBindFramebuffer(GL_DRAW_FRAMEBUFFER,effectDepthFbo);glBlitFramebuffer(x,y,x+w,y+h,0,0,w,h,GL_DEPTH_BUFFER_BIT,GL_NEAREST);
+        glBindVertexArray(postVao);glBindFramebuffer(GL_FRAMEBUFFER,linearFbo);glViewport(0,0,w,h);glUseProgram(linearizeProgram);
+        glActiveTexture(GL_TEXTURE10);glBindTexture(GL_TEXTURE_2D,effectDepth);glBindSampler(10,uiNearestSampler);
+        glUniform1i(uniform(linearizeProgram,"depth"),10);glUniform1f(uniform(linearizeProgram,"nearPlane"),camera.nearClip);glUniform1f(uniform(linearizeProgram,"farPlane"),camera.farClip);glDrawArrays(GL_TRIANGLES,0,3);
+        glBindTexture(GL_TEXTURE_2D,linearDepth);
+        const Matrix inverseVP=inverse(viewProjection),basis=transform({},camera.angles,{1,1,1});
+        auto view=[&](GLuint p){glUseProgram(p);glUniform1i(uniform(p,"linearDepth"),10);glUniformMatrix4fv(uniform(p,"inverseViewProjection"),1,GL_FALSE,inverseVP.data());glUniform3f(uniform(p,"eye"),camera.position.x,camera.position.y,camera.position.z);glUniform3f(uniform(p,"forward"),basis[0],basis[1],basis[2]);};
+        if(fx.ssao){
+            glBindFramebuffer(GL_FRAMEBUFFER,aoFbo);view(ssaoProgram);glUniformMatrix4fv(uniform(ssaoProgram,"viewProjection"),1,GL_FALSE,viewProjection.data());glUniform2f(uniform(ssaoProgram,"texel"),1.f/w,1.f/h);glDrawArrays(GL_TRIANGLES,0,3);
+            glBindFramebuffer(GL_FRAMEBUFFER,destination);glViewport(x,y,w,h);glUseProgram(aoApplyProgram);glActiveTexture(GL_TEXTURE11);glBindTexture(GL_TEXTURE_2D,aoTexture);glBindSampler(11,uiLinearSampler);
+            glUniform1i(uniform(aoApplyProgram,"ao"),11);glUniform2f(uniform(aoApplyProgram,"texel"),1.f/w,1.f/h);glEnable(GL_BLEND);glBlendFuncSeparate(GL_ZERO,GL_SRC_COLOR,GL_ZERO,GL_ONE);glDrawArrays(GL_TRIANGLES,0,3);glDisable(GL_BLEND);
+        }
+        if(fx.fog){
+            glBindFramebuffer(GL_FRAMEBUFFER,destination);glViewport(x,y,w,h);view(fogProgram);
+            glUniform1i(uniform(fogProgram,"lights"),3);glUniform1i(uniform(fogProgram,"lightCount"),lightData.size()/5);glUniform1i(uniform(fogProgram,"cubeShadowMap"),9);
+            glUniform1i(uniform(fogProgram,"shadowMaps"),shadowsReady&&shadowLight>=0);glUniform1i(uniform(fogProgram,"shadowLight"),shadowLight);glUniform1f(uniform(fogProgram,"farPlane"),camera.farClip);
+            glUniform2f(uniform(fogProgram,"fogRange"),camera.environmentOverride?camera.fogStart:f.fogStart,camera.environmentOverride?camera.fogEnd:f.fogEnd);
+            glEnable(GL_BLEND);glBlendFuncSeparate(GL_ONE,GL_ONE,GL_ZERO,GL_ONE);glDrawArrays(GL_TRIANGLES,0,3);
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER,destination);glViewport(x,y,w,h);glEnable(GL_SCISSOR_TEST);glEnable(GL_DEPTH_TEST);glEnable(GL_BLEND);if(clip)glEnable(GL_CLIP_DISTANCE0);glUseProgram(scene);
+    }
+    // Background composite: HDR resolve, bloom, tone map (PBR only, else identity) and FXAA into the LDR scene target.
+    void composite_pass(int w,int h){
+        const auto&fx=options.features;post_state();
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,hdrFbo);glBindFramebuffer(GL_DRAW_FRAMEBUFFER,hdrResolveFbo);glBlitFramebuffer(0,0,w,h,0,0,w,h,GL_COLOR_BUFFER_BIT,GL_NEAREST);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER,msaaFbo);glBlitFramebuffer(0,0,w,h,0,0,w,h,GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT,GL_NEAREST);
+        glBindVertexArray(postVao);glActiveTexture(GL_TEXTURE0);
+        if(fx.bloom){
+            // Prefiltered half-resolution level, four more downsamples, then tent upsamples accumulated back into level 0.
+            glUseProgram(bloomProgram);glUniform1i(uniform(bloomProgram,"image"),0);glBindSampler(0,uiLinearSampler);
+            auto size=[&](int level){return std::array<int,2>{std::max(1,w>>(level+1)),std::max(1,h>>(level+1))};};
+            auto pass=[&](int target,int source,int mode){
+                auto [tw,th]=size(target);auto [sw,sh]=source<0?std::array<int,2>{w,h}:size(source);
+                glBindFramebuffer(GL_FRAMEBUFFER,bloomFbo[target]);glViewport(0,0,tw,th);glBindTexture(GL_TEXTURE_2D,source<0?hdrResolveColor:bloomTexture[source]);
+                glUniform2f(uniform(bloomProgram,"texel"),1.f/sw,1.f/sh);glUniform1i(uniform(bloomProgram,"mode"),mode);glDrawArrays(GL_TRIANGLES,0,3);
+            };
+            pass(0,-1,0);for(int level=1;level<5;++level)pass(level,level-1,1);
+            glEnable(GL_BLEND);glBlendFunc(GL_ONE,GL_ONE);for(int level=3;level>=0;--level)pass(level,level+1,2);glDisable(GL_BLEND);glViewport(0,0,w,h);
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER,fx.fxaa?ldrFbo:msaaFbo);glBindTexture(GL_TEXTURE_2D,hdrResolveColor);glBindSampler(0,uiNearestSampler);
+        if(compositeProgram){
+            glUseProgram(compositeProgram);glUniform1i(uniform(compositeProgram,"image"),0);glUniform1i(uniform(compositeProgram,"bloom"),1);glUniform1i(uniform(compositeProgram,"bloomEnabled"),fx.bloom);glUniform1i(uniform(compositeProgram,"toneMap"),options.pbr);
+            glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,fx.bloom?bloomTexture[0]:white);glBindSampler(1,uiLinearSampler);
+        }else{glUseProgram(tonemapProgram);glUniform1i(tonemapImage,0);}
+        glDrawArrays(GL_TRIANGLES,0,3);
+        if(fx.fxaa){
+            glBindFramebuffer(GL_FRAMEBUFFER,msaaFbo);glUseProgram(fxaaProgram);glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,ldrColor);glBindSampler(0,uiLinearSampler);
+            glUniform1i(uniform(fxaaProgram,"image"),0);glUniform2f(uniform(fxaaProgram,"texel"),1.f/w,1.f/h);glDrawArrays(GL_TRIANGLES,0,3);
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER,msaaFbo);
     }
     void alpha_target(){
         if(alphaFbo)return;
         glGenFramebuffers(1,&alphaFbo);glBindFramebuffer(GL_FRAMEBUFFER,alphaFbo);glGenTextures(1,&alphaColor);glBindTexture(GL_TEXTURE_2D,alphaColor);
-        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,targetWidth,targetHeight,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+        glTexImage2D(GL_TEXTURE_2D,0,options.pbr?GL_RGBA16F:GL_RGBA8,targetWidth,targetHeight,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
         glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,alphaColor,0);
         glGenRenderbuffers(1,&alphaDepth);glBindRenderbuffer(GL_RENDERBUFFER,alphaDepth);glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH24_STENCIL8,targetWidth,targetHeight);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_RENDERBUFFER,alphaDepth);
         if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)throw std::runtime_error("Incomplete translucent game-view framebuffer");
@@ -490,18 +732,25 @@ struct GLBackend::Impl {
             return sampled&&mode==UICommand::TextureMode::Default?sampled_texture(image,gpu):gpu.id;
         }
         check_image(*image);GLuint id{};glGenTextures(1,&id);glBindTexture(GL_TEXTURE_2D,id);
-        upload_texture(*image,mode,true);
+        // Packs replace immutable Default-mode images only; turbulent surfaces keep their native source for the CPU-table warp.
+        auto pack=options.packs&&!dynamic&&mode==UICommand::TextureMode::Default&&!turbulent.contains(image)?options.packs->find(*image):std::nullopt;
+        if(pack&&pack->albedo&&(pack->albedo->width>static_cast<std::uint32_t>(maxTextureSize)||pack->albedo->height>static_cast<std::uint32_t>(maxTextureSize))){std::cerr<<"kabus22: texture pack: "<<texture_key_hex(texture_key(*image))<<" exceeds GPU texture size; using original\n";pack.reset();}
+        upload_texture(pack&&pack->albedo?*pack->albedo:*image,mode,true);
         bool mipsValid=mipsEnabled&&!dynamic&&mode==UICommand::TextureMode::Default;if(mipsValid)glGenerateMipmap(GL_TEXTURE_2D);
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
         bool alpha=dynamic||mode!=UICommand::TextureMode::Default;for(std::size_t index=3;!alpha&&index<image->rgba.size();index+=4)alpha=image->rgba[index]!=255;
-        gpu={id,image->width,image->height,serial,dynamic,alpha,mipsValid};return sampled&&mode==UICommand::TextureMode::Default?sampled_texture(image,gpu):gpu.id;
+        auto map=[&](const std::shared_ptr<const Image>&source)->GLuint{
+            if(!source)return 0;GLuint map{};glGenTextures(1,&map);glBindTexture(GL_TEXTURE_2D,map);upload_texture(*source,mode,true);glGenerateMipmap(GL_TEXTURE_2D);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);glBindTexture(GL_TEXTURE_2D,id);return map;
+        };
+        gpu={id,image->width,image->height,serial,dynamic,alpha,mipsValid,pack?map(pack->normal):0,pack?map(pack->orm):0,pack&&pack->roughness};return sampled&&mode==UICommand::TextureMode::Default?sampled_texture(image,gpu):gpu.id;
     }
     void prepare_turbulence(const Image*image,bool dynamic,std::uint64_t serial,GLuint vao){
         if(!image)throw std::runtime_error("Turbulent game surface has no decoded bitmap");
         if(image->nativeStorageBytes==255)throw std::runtime_error("Native turbulent bitmap CPU storage is unavailable");
         if(image->nativeStorageBytes!=2)return;
-        glActiveTexture(GL_TEXTURE0);texture(image,dynamic,serial,false);const auto&original=textures.at(image)[0];
+        turbulent.insert(image);glActiveTexture(GL_TEXTURE0);texture(image,dynamic,serial,false);const auto&original=textures.at(image)[0];
         if(image->height>image->width)throw std::runtime_error("Turbulent bitmap rows exceed native displacement table");
         if(image->width==1)return;
         const auto&frame=*currentFrame;
@@ -576,8 +825,10 @@ struct GLBackend::Impl {
         }
         return meshes.emplace(&model,std::move(gpu)).first->second;
     }
-    SkyGPU& sky_texture(const Image&image){
-        auto found=skies.find(&image);if(found!=skies.end())return found->second;
+    SkyGPU& sky_texture(const Image&sourceImage){
+        auto found=skies.find(&sourceImage);if(found!=skies.end())return found->second;
+        auto pack=options.packs?options.packs->find(sourceImage):std::nullopt;
+        const Image&image=pack&&pack->albedo?*pack->albedo:sourceImage;
         check_image(image);std::uint32_t frames=image.width==image.height*6?6:image.width==image.height*2?2:0;
         if(!frames)throw std::runtime_error("Bitmap is not a native sky strip");
         if(image.width/frames>static_cast<std::uint32_t>(maxTextureSize)||image.height>static_cast<std::uint32_t>(maxTextureSize))throw std::runtime_error("Sky face exceeds GPU texture size");
@@ -610,7 +861,7 @@ struct GLBackend::Impl {
             glDeleteTextures(1,&original);
         }
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER,framebuffer);glViewport(viewport[0],viewport[1],viewport[2],viewport[3]);for(std::size_t index=0;index<capabilities.size();++index)if(enabled[index])glEnable(capabilities[index]);
-        glUseProgram(scene);return skies.emplace(&image,sky).first->second;
+        glUseProgram(scene);return skies.emplace(&sourceImage,sky).first->second;
     }
     void draw_sky(const RenderFrame&frame,const Camera&camera,int width,int height){
         if(!camera.drawWorld||!frame.world||!(camera.layers&1))return;
@@ -647,7 +898,7 @@ struct GLBackend::Impl {
         glUniformMatrix3fv(su.normalMatrix,1,GL_FALSE,normal.data());
     }
     void material_uniforms(const ScriptMaterialState*material){
-        glUniform1i(su.explicitMaterial,material!=nullptr);glUniform1i(su.effectKind,material?static_cast<int>(material->effect):0);
+        glUniform1i(su.explicitMaterial,material&&currentFrame&&currentFrame->hardwareLighting);glUniform1i(su.effectKind,material?static_cast<int>(material->effect):0);
         if(!material)return;
         constexpr float channel=1.0f/255;
         glUniform4f(su.preparedAmbient,material->ambient.r*channel,material->ambient.g*channel,material->ambient.b*channel,1);
@@ -727,7 +978,7 @@ struct GLBackend::Impl {
             auto next=!gpu.frameCount&&d.nextPositions.empty()?first:poseBounds(d.nextMeshId,d.nextMeshRevision,d.nextPositions,d.nextFrame);
             if(!geometry_eligible(interpolated_bounds(first,next,d.interpolation),m,viewProjection,geometryClipPlane))return;
         }
-        const auto light=!maskPass&&camera&&currentFrame&&currentFrame->prepareEntityLight?currentFrame->prepareEntityLight(currentFrame->lightContext,d,*camera):NativeEntityLightState{d.nativeLightScalar,d.nativeLightDelta,d.nativeLightBias};
+        const auto light=!maskPass&&!casterPass&&camera&&currentFrame&&currentFrame->prepareEntityLight?currentFrame->prepareEntityLight(currentFrame->lightContext,d,*camera):NativeEntityLightState{d.nativeLightScalar,d.nativeLightDelta,d.nativeLightBias};
         if(!d.visible)return;
         const auto*live=script_material(currentFrame,d.materialIndex);
         if(d.alpha<=0&&(!live||live->effect==EffectKind::None))return;
@@ -738,15 +989,18 @@ struct GLBackend::Impl {
         for(int attribute:{0,4}){glEnableVertexAttribArray(attribute);glVertexAttribPointer(attribute,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)offsetof(Vertex,position));}
         for(int attribute:{1,5}){glEnableVertexAttribArray(attribute);glVertexAttribPointer(attribute,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)offsetof(Vertex,normal));}
         glBindBuffer(GL_ARRAY_BUFFER,gpu.tangents);for(int attribute:{12,13}){glEnableVertexAttribArray(attribute);glVertexAttribPointer(attribute,3,GL_FLOAT,GL_FALSE,sizeof(Vec3),nullptr);}
-        bind_override(d,gpu,liveEffectKind,d.meshId,d.meshRevision,d.positions,d.normals,0,1,12,d.frame);
-        bind_override(d,gpu,liveEffectKind,d.nextMeshId,d.nextMeshRevision,d.nextPositions,d.nextNormals,4,5,13,d.nextFrame);
+        // PBR normal mapping consumes the same per-pose tangent stream as effect materials.
+        const EffectKind tangentKind=options.pbr&&liveEffectKind==EffectKind::None?EffectKind::NormalMix:liveEffectKind;
+        bind_override(d,gpu,tangentKind,d.meshId,d.meshRevision,d.positions,d.normals,0,1,12,d.frame);
+        bind_override(d,gpu,tangentKind,d.nextMeshId,d.nextMeshRevision,d.nextPositions,d.nextNormals,4,5,13,d.nextFrame);
         glUniform1i(su.firstOverride,!d.positions.empty());glUniform1i(su.nextOverride,!d.nextPositions.empty());
         glUniform1i(su.firstNormalOverride,!d.normals.empty());glUniform1i(su.nextNormalOverride,!d.nextNormals.empty());
         glUniform1f(su.interpolation,std::clamp(d.interpolation,0.0f,1.0f));
         glUniform1i(su.vertexCount,gpu.frameCount?d.model->vertices.size():0);
         if(gpu.frameCount){if(d.frame>=static_cast<std::uint32_t>(gpu.frameCount)||d.nextFrame>=static_cast<std::uint32_t>(gpu.frameCount))throw std::runtime_error("Entity animation frame index outside model");glUniform1i(su.frame0,d.frame);glUniform1i(su.frame1,d.nextFrame);glActiveTexture(GL_TEXTURE2);glBindTexture(GL_TEXTURE_BUFFER,gpu.poses);}
         glUniform1i(su.unlit,d.unlit);if(d.doubleSided||d.billboard||(camera&&camera->noCull))glDisable(GL_CULL_FACE);else glEnable(GL_CULL_FACE);glBlendFuncSeparate(GL_SRC_ALPHA,d.additive?GL_ONE:GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
-        bool flipped=camera&&((camera->horizontalFov<0)!=(camera->pixelAspect<0));flipped^=d.model->clockwise;flipped^=d.scale.x*d.scale.y*d.scale.z<0;glFrontFace(flipped?GL_CW:GL_CCW);
+        // Shadow casters cull back faces as seen from the light (one-sided BSP faces, lights inside fixtures); camera mirroring does not apply.
+        bool flipped=camera&&!casterPass&&((camera->horizontalFov<0)!=(camera->pixelAspect<0));flipped^=d.model->clockwise;flipped^=d.scale.x*d.scale.y*d.scale.z<0;glFrontFace(flipped?GL_CW:GL_CCW);
         glUniform1f(su.normalOrientation,d.model->clockwise?-1:1);glUniform1i(su.noFog,d.noFog);
         glUniform1i(su.flare,d.flare);glUniform1i(su.overlay,d.overlay);
         glUniform1i(su.invertFlare,d.invertFlare);glUniform1i(su.spriteFrames,d.spriteFrames);
@@ -756,6 +1010,8 @@ struct GLBackend::Impl {
         }
         const bool nativeSubsets=camera&&camera->perDrawOpacity&&d.model->formatVersion==7;
         const bool nativeModelPass=camera&&camera->perDrawOpacity&&model_has_entity_skins(*d.model)&&!maskPass;
+        const bool recordCasters=casterPass&&casterWorld&&!worldCastersReady;bool cacheable=true;
+        if(casterPass&&casterWorld&&worldCastersReady){draw_world_casters();return;}
         for(const auto&b:gpu.batches){
             const Material*mat=nativeSubsets&&b.material>0?&d.model->materials[b.material]:model_material(*d.model,b.material,d.skinIndex);
             if(nativeSubsets&&b.material>0&&(!mat->texture||!mat->nativePrimarySubset))continue;
@@ -766,7 +1022,7 @@ struct GLBackend::Impl {
             int nativeAmbient=worldSurface&&mat?static_cast<std::int8_t>(mat->raw[42]):0,nativeAlbedo=worldSurface&&mat?static_cast<std::int8_t>(mat->raw[43]):0;
             float reflection=worldSurface&&mat&&(mat->flags&0x2000)?surface_reflection(nativeAlbedo,d.reflectivity,d.objectId!=0):0;
             glUniform1f(su.reflectionWeight,reflection);glUniform1f(su.surfaceAmbient,surface_ambient(nativeAmbient,camera?static_cast<int>(camera->nativeAmbient):0,d.objectId!=0));
-            glUniform1i(su.unlit,d.unlit||(worldSurface&&mat&&(mat->flags&15)==3));
+            glUniform1i(su.unlit,d.unlit||(currentFrame&&!currentFrame->hardwareLighting)||(worldSurface&&mat&&(mat->flags&15)==3));
             if(mat&&!mat->textureName.empty()&&!mat->texture)throw std::runtime_error("Unresolved game skin: "+mat->textureName);
             if(mat&&!mat->lightmapName.empty()&&!mat->lightmap)throw std::runtime_error("Unresolved game lightmap: "+mat->lightmapName);
             const auto entitySkin=resolved_skin(mat&&mat->texture?mat->texture.get():nullptr,skinBindings);
@@ -779,6 +1035,27 @@ struct GLBackend::Impl {
             }
             const auto skin=entitySkin.image?entitySkin:resolved_skin(live?live->skins[0]:nullptr,skinBindings);
             const Image*image=skin.image;bool dynamicSkin=skin.dynamic;std::uint64_t skinSerial=skin.serial;
+            glUniform1i(su.overlay,overlay_keyed(d,image));
+            if(casterPass&&!(live&&live->effect!=EffectKind::None)){
+                // Depth-only caster: only the alpha-rejection inputs (texel, tint, opacity, UV) reach the shader.
+                const GLuint tex=texture(image,dynamicSkin,skinSerial),sampler=image&&textures.at(image)[0].dynamic?dynamicSceneSampler:sceneSampler;const bool textureAlpha=image&&textures.at(image)[0].alpha;
+                Color t=live?Color{1,1,1,d.tint.a}:d.tint;if(mat&&!worldSurface){t.r*=mat->albedo.r;t.g*=mat->albedo.g;t.b*=mat->albedo.b;t.a*=mat->albedo.a;}
+                const float opacity=draw_opacity(d.alpha*(mat?mat->alpha:1),camera);
+                const Vec2 uvScale=model_uv_scale(d.model->formatVersion,mat?mat->uvScale:Vec2{1,1},image),uvOffset=mat?mat->uvOffset:Vec2{};
+                const bool centroid=centroidLighting&&b.centroidCount;const GLsizei count=centroid?b.centroidCount:b.count;
+                const void*offset=reinterpret_cast<void*>(std::uintptr_t(centroid?b.centroidFirst:b.first)*sizeof(std::uint32_t));
+                if(recordCasters){
+                    auto same=[&](const CasterGroup&g){return g.texture==tex&&g.sampler==sampler&&g.textureAlpha==textureAlpha&&g.tint.r==t.r&&g.tint.g==t.g&&g.tint.b==t.b&&g.tint.a==t.a&&g.alpha==opacity&&g.uvScale.x==uvScale.x&&g.uvScale.y==uvScale.y&&g.uvOffset.x==uvOffset.x&&g.uvOffset.y==uvOffset.y;};
+                    auto group=std::find_if(worldCasters.begin(),worldCasters.end(),same);
+                    if(group==worldCasters.end())group=worldCasters.insert(worldCasters.end(),CasterGroup{tex,sampler,textureAlpha,t,opacity,uvScale,uvOffset,{},{}});
+                    group->counts.push_back(count);group->offsets.push_back(offset);continue;
+                }
+                glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,tex);glBindSampler(0,sampler);glUniform1i(su.textureAlpha,textureAlpha);
+                glUniform4f(su.tint,t.r,t.g,t.b,t.a);glUniform1f(su.alpha,opacity);glUniform2f(su.uvScale,uvScale.x,uvScale.y);glUniform2f(su.uvOffset,uvOffset.x,uvOffset.y);
+                glDrawElements(GL_TRIANGLES,count,GL_UNSIGNED_INT,offset);
+                continue;
+            }
+            if(recordCasters)cacheable=false;
             if(worldSurface&&mat&&(mat->flags&15)==9)prepare_turbulence(image,dynamicSkin,skinSerial,gpu.vao);
             bool effect=live&&live->effect!=EffectKind::None;EffectBindings*retained=nullptr;
             if(effect){
@@ -796,6 +1073,12 @@ struct GLBackend::Impl {
             }else{
                 glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,texture(image,dynamicSkin,skinSerial));glBindSampler(0,image&&textures.at(image)[0].dynamic?dynamicSceneSampler:sceneSampler);
                 glUniform1i(su.textureAlpha,image&&textures.at(image)[0].alpha);
+                if(options.pbr){
+                    const TextureGPU*maps=image?&textures.at(image)[0]:nullptr;
+                    glActiveTexture(GL_TEXTURE6);glBindTexture(GL_TEXTURE_2D,maps&&maps->normal?maps->normal:flatNormal);glBindSampler(6,sceneSampler);
+                    glActiveTexture(GL_TEXTURE7);glBindTexture(GL_TEXTURE_2D,maps&&maps->orm?maps->orm:defaultOrm);glBindSampler(7,sceneSampler);
+                    glUniform1i(su.roughnessMap,maps&&maps->roughness);glUniform1f(su.legacyRoughness,legacy_roughness(mat?mat->power:0));
+                }
             }
             glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,texture(mat?mat->lightmap.get():nullptr));glUniform1i(su.hasLightmap,mat&&mat->lightmap);
             glUniform1i(su.worldVertexLighting,worldSurface&&!d.unlit&&type!=3&&!maskPass);
@@ -804,7 +1087,7 @@ struct GLBackend::Impl {
             glUniform4f(su.tint,t.r,t.g,t.b,t.a);glUniform1f(su.alpha,draw_opacity(d.alpha*(mat?mat->alpha:1),camera));
             int viewAmbient=camera?static_cast<int>(camera->nativeAmbient):0;
             glUniform1f(su.materialAmbient,worldSurface?surface_light(nativeAmbient,viewAmbient,d.objectId!=0)/255.0f:model_ambient(d.ambient,viewAmbient));
-            if(live&&!effect){auto ambient=material_ambient_light(d,camera,&light);glUniform3f(su.ambientLight,ambient.r,ambient.g,ambient.b);glUniform1f(su.materialSunStrength,material_light_strength(live->albedo,light.scalar,camera&&camera->perDrawOpacity));}
+            if(live&&!effect){auto ambient=material_ambient_light(d,camera,&light);glUniform3f(su.ambientLight,ambient.r,ambient.g,ambient.b);glUniform1f(su.materialSunStrength,material_light_strength(live->albedoRaw,light.scalar,currentFrame&&currentFrame->bonusProfile,!currentFrame||currentFrame->nativeFixedLightBank));}
             Vec2 baseScale=mat?mat->uvScale:Vec2{1,1};
             Vec2 uvScale=retained&&retained->banks[0].texture?model_uv_scale(d.model->formatVersion,baseScale,retained->banks[0].width,retained->banks[0].height):model_uv_scale(d.model->formatVersion,baseScale,image);
             glUniform2f(su.uvScale,uvScale.x,uvScale.y);glUniform2f(su.uvOffset,mat?mat->uvOffset.x:0,mat?mat->uvOffset.y:0);
@@ -812,6 +1095,7 @@ struct GLBackend::Impl {
             const bool centroid=centroidLighting&&b.centroidCount;
             glDrawElements(GL_TRIANGLES,centroid?b.centroidCount:b.count,GL_UNSIGNED_INT,reinterpret_cast<void*>(std::uintptr_t(centroid?b.centroidFirst:b.first)*sizeof(std::uint32_t)));
         }
+        if(recordCasters){draw_world_casters();worldCastersReady=cacheable;if(!cacheable)worldCasters.clear();}
         if(nativeModelPass){glEnable(GL_BLEND);glDepthMask(depthWrite);}
     }
     void draw_planar(const DrawInstance&d,const Camera&camera,int width,int height){
@@ -897,6 +1181,7 @@ GLBackend::~GLBackend()=default;
 void GLBackend::drain(){impl_->drain_completion();}
 void GLBackend::invalidate(WindowMode mode){impl_->options.mode=mode;impl_->finalFrameValid=false;}
 int GLBackend::shader_version()const{return impl_->scene&&impl_->su.effectKind>=0&&impl_->su.normalSkin>=0&&impl_->su.skillMain>=0&&impl_->su.skillExtra>=0&&impl_->su.preparedAmbient>=0?2020:0;}
+std::string GLBackend::description()const{return std::string("OpenGL ")+reinterpret_cast<const char*>(glGetString(GL_VERSION))+"; "+reinterpret_cast<const char*>(glGetString(GL_RENDERER));}
 PresentationState GLBackend::presentation_state()const{const auto&i=*impl_;return {i.completionLimit,i.completionCount,i.completionSubmissions,i.completionWaits,SDL_GL_GetSwapInterval(),i.samples};}
 void GLBackend::purge_model(const Model*model){
     auto&i=*impl_;i.drain_completion();auto found=i.meshes.find(model);
@@ -917,16 +1202,17 @@ void GLBackend::release_scene(){
     i.overrides.clear();
     i.lightData.clear();
     i.effectBindings.clear();
-    for(auto&[key,variants]:i.textures)for(auto&texture:variants)glDeleteTextures(1,&texture.id);
+    for(auto&[key,variants]:i.textures)for(auto&texture:variants){glDeleteTextures(1,&texture.id);glDeleteTextures(1,&texture.normal);glDeleteTextures(1,&texture.orm);}
     i.textures.clear();
-    for(auto&[image,warp]:i.warps){glDeleteTextures(1,&warp.texture);glDeleteTextures(1,&warp.offsetTexture);glDeleteBuffers(1,&warp.offsetBuffer);}i.warps.clear();
+    for(auto&[image,warp]:i.warps){glDeleteTextures(1,&warp.texture);glDeleteTextures(1,&warp.offsetTexture);glDeleteBuffers(1,&warp.offsetBuffer);}i.warps.clear();i.turbulent.clear();
     for(auto&[image,sky]:i.skies)glDeleteTextures(1,&sky.texture);i.skies.clear();
 }
 void GLBackend::purge_image(const Image*image){
     auto&i=*impl_;auto it=i.textures.find(image);
-    if(it!=i.textures.end()){for(auto&texture:it->second){i.forget_effect_texture(texture.id);glDeleteTextures(1,&texture.id);}i.textures.erase(it);}
+    if(it!=i.textures.end()){for(auto&texture:it->second){i.forget_effect_texture(texture.id);glDeleteTextures(1,&texture.id);glDeleteTextures(1,&texture.normal);glDeleteTextures(1,&texture.orm);}i.textures.erase(it);}
     auto warp=i.warps.find(image);if(warp!=i.warps.end()){i.forget_effect_texture(warp->second.texture);glDeleteTextures(1,&warp->second.texture);glDeleteTextures(1,&warp->second.offsetTexture);glDeleteBuffers(1,&warp->second.offsetBuffer);i.warps.erase(warp);}
     auto sky=i.skies.find(image);if(sky!=i.skies.end()){glDeleteTextures(1,&sky->second.texture);i.skies.erase(sky);}
+    i.turbulent.erase(image);
 }
 void Renderer::boundary_check(){
     if(effective_mip_filter(-1)!=GL_LINEAR||effective_mip_filter(0)!=GL_LINEAR||effective_mip_filter(1-1.0/1024)!=GL_LINEAR||
@@ -1060,7 +1346,7 @@ void Renderer::boundary_check(){
     require(near(color.r,1.0f/255)&&near(color.g,1.0f/255)&&color.b==0,"Special color out-of-range OR contamination was clamped or rescaled");
     special.nativeSpecialColor={-1,0,0};color=material_ambient_light(special,nullptr);
     require(color.r==1&&color.g==1&&color.b==1,"Negative special color packing lost unsigned OR contamination");
-    require(near(material_light_strength(50,cached.scalar,false),127.0f/255),"Special color changed independent DTO ALBEDO strength");
+    require(near(material_light_strength(51200,cached.scalar,false,true),127.0f/255),"Special color changed independent DTO ALBEDO strength");
     }
     {
     Bounds bounds;include_point(bounds,{-1,-1,-1});include_point(bounds,{1,1,1});
@@ -1146,9 +1432,9 @@ void Renderer::boundary_check(){
     lighting=material_ambient_light(lit,&lightView,&returnedLight);
     require(near(lighting.r,83.0f/255)&&near(lighting.g,79.0f/255)&&near(lighting.b,75.0f/255),
         "Returned entity light DTO did not override stored scalar, BGR delta and BGR bias");
-    require(near(material_light_strength(50,returnedLight.scalar,false),40.0f/255)&&
-        near(material_light_strength(50,returnedLight.scalar,true),40.0f/127)&&
-        !near(material_light_strength(50,returnedLight.scalar,true),material_light_strength(50,lit.nativeLightScalar,true)),
+    require(near(material_light_strength(51200,returnedLight.scalar,false,true),40.0f/255)&&
+        near(material_light_strength(51200,returnedLight.scalar,true,true),40.0f/128)&&
+        !near(material_light_strength(51200,returnedLight.scalar,true,true),material_light_strength(51200,lit.nativeLightScalar,true,true)),
         "MATERIAL ALBEDO strength lost the same returned entity light sample");
     lit.unlit=true;lighting=material_ambient_light(lit,&lightView);
     require(near(lighting.r,63.0f/255)&&near(lighting.g,52.0f/255)&&near(lighting.b,41.0f/255),
@@ -1166,13 +1452,25 @@ void Renderer::boundary_check(){
     require(near(material_ambient_light(lit,&lightView).r,80.0f/255),"A7 material view ambient lost its signed contribution");
     lit.nativeLightScalar=200;lit.ambient=32768;lightView.nativeAmbient=0;
     require(near(material_ambient_light(lit,&lightView).r,73.0f/255),"Material entity ambient lost source signed-short conversion");
-    require(near(material_light_strength(50,127,false),127.0f/255)&&material_light_strength(50,127,true)==1,
-        "Material light strength conflated A6 255 and A7 127 denominators");
-    require(material_light_strength(0,255,false)==0&&material_light_strength(0,255,true)==0&&
-        near(material_light_strength(-8,127,false),11.0f/255)&&material_light_strength(-8,127,true)==0,
-        "Material light strength lost profile-specific signed ALBEDO enable gates");
-    require(near(material_light_strength(0.49f,127,false),27.0f/255)&&
-        near(material_light_strength(0.5f,127,false),28.0f/255),"Material light strength rounded its doubled public ALBEDO");
+    require(near(material_light_strength(51200,127,false,true),127.0f/255)&&
+        near(material_light_strength(51200,127,true,true),127.0f/128)&&material_light_strength(51200,127,true,false)==1,
+        "Material light strength conflated A6 255, A7 fixed128 and linked/direct127 denominators");
+    require(material_light_strength(0,255,false,true)==0&&material_light_strength(0,255,true,true)==0&&
+        near(material_light_strength(-8192,127,false,true),11.0f/255)&&
+        near(material_light_strength(-8192,127,true,true),11.0f/128)&&material_light_strength(-8192,127,true,false)==0,
+        "Material light strength lost source-specific signed ALBEDO enable gates");
+    require(near(material_light_strength(501,127,false,true),27.0f/255)&&
+        near(material_light_strength(512,127,false,true),28.0f/255),"Material light strength rounded its doubled raw ALBEDO");
+    require(near(material_light_strength(INT32_MAX,127,false,true),26.0f/255)&&
+        near(material_light_strength(INT32_MIN,127,false,true),27.0f/255),"Material ALBEDO lost original wrapping multiply before arithmetic SAR10");
+    std::array<RenderLight,3> selectedLights{};
+    selectedLights[0].baked=selectedLights[0].synthetic=true;
+    selectedLights[0].type=3;
+    selectedLights[2].synthetic=true;selectedLights[2].type=3;
+    RenderFrame selectedFrame;selectedFrame.lights=selectedLights;
+    require(material_selected_light(selectedFrame)==2,"Selected SUN identity followed compact slot0 or serialized baked light");
+    selectedFrame.lights=std::span(selectedLights).first(2);
+    require(material_selected_light(selectedFrame)==-1,"Absent SUN silently selected an actor or baked light");
 
     Image colorSource,normalSource,colorReplacement,normalReplacement;
     colorReplacement.width=30;colorReplacement.height=18;
@@ -1297,13 +1595,27 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
     if(f.world&&!f.hardwareLighting)throw std::runtime_error("Legacy software world-light topology is not implemented by the native OpenGL hardware path");
     i.admit_frame(f.tripleBufferRaw,f.bonusProfile);i.centroidLighting=centroid_lighting(f);
     i.configure_sampling(f.mipmapping,f.anisotropy);
-    i.targets(m.drawableWidth,m.drawableHeight);glBindFramebuffer(GL_FRAMEBUFFER,i.msaaFbo);
+    i.targets(m.drawableWidth,m.drawableHeight);
+    // Primary view: first full-window background world view. Shadow maps, SSAO and volumetric fog follow it.
+    const Camera*primary=nullptr;
+    for(const auto&camera:f.cameras)if(!camera.foreground&&!camera.portalTarget&&camera.drawWorld){
+        const Rect v=camera.viewport;if(v.width<=0||v.height<=0||(v.x<=0&&v.y<=0&&v.x+v.width>=m.width&&v.y+v.height>=m.height)){primary=&camera;break;}
+    }
+    // Shadow maps render before the scene targets are bound and cleared (switching away from a fresh MSAA clear is costly).
+    i.shadowsReady=false;i.shadowLight=-1;
+    if(i.shadowMapsOn){
+        if(primary){Rect v=primary->viewport;if(v.width<=0||v.height<=0)v={0,0,float(m.width),float(m.height)};i.shadow_pass(f,*primary,float(std::lround(v.width*m.scaleX))/float(std::lround(v.height*m.scaleY)));}
+        else{glUseProgram(i.scene);glUniform1i(i.su.shadowMaps,0);}
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER,i.composite?i.hdrFbo:i.msaaFbo);
+    // PBR background views composite through the tone curve; seed clears with its inverse so untouched pixels round-trip.
+    auto seed=[&](Color c){return i.options.pbr?inverse_tone_map(c):c;};
     glViewport(0,0,m.drawableWidth,m.drawableHeight);glDisable(GL_SCISSOR_TEST);
     glDepthMask(GL_TRUE);glStencilMask(255);glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);glClearDepth(1);glClearStencil(0);
     bool nativeCameraPasses=std::any_of(f.cameras.begin(),f.cameras.end(),[](const Camera&camera){return camera.perDrawOpacity;});
     if(!nativeCameraPasses||!i.retainedColorValid){
         // Deterministic native seed; original D3D DISCARD retention is unspecified.
-        glClearColor(f.clearColor.r,f.clearColor.g,f.clearColor.b,f.clearColor.a);
+        const auto clearColor=seed(f.clearColor);glClearColor(clearColor.r,clearColor.g,clearColor.b,clearColor.a);
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT);i.retainedColorValid=true;
     }
     if(nativeCameraPasses&&f.clearScreen){
@@ -1314,13 +1626,14 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
         bool fullScreen=firstCamera&&(viewport.width<=0||viewport.height<=0||(viewport.x<=0&&viewport.y<=0&&viewport.x+viewport.width>=m.width&&viewport.y+viewport.height>=m.height));
         if(!fullScreen){
             // The recovered outer clear covers the screen, not just viewport margins.
-            glClearColor(f.screenColor.r,f.screenColor.g,f.screenColor.b,f.screenColor.a);glClear(GL_COLOR_BUFFER_BIT);
+            const auto screen=seed(f.screenColor);glClearColor(screen.r,screen.g,screen.b,screen.a);glClear(GL_COLOR_BUFFER_BIT);
         }
     }
     glEnable(GL_MULTISAMPLE);glDepthFunc(GL_LEQUAL);glCullFace(GL_BACK);
     // Engine packets retain native source-slot order first, then enhanced baked lights.
     // Preserve that priority within the existing 32-light shader upload budget.
     const auto uploadedLightCount=std::min<std::size_t>(f.lights.size(),32);
+    const int selectedLight=material_selected_light(f);
     bool changed=i.lightData.size()!=uploadedLightCount*5;
     i.lightData.resize(uploadedLightCount*5);
     i.lightCones.resize(uploadedLightCount,{std::numeric_limits<float>::quiet_NaN(),std::numeric_limits<float>::quiet_NaN()});
@@ -1332,7 +1645,7 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
         }
         const std::array<std::array<float,4>,5>data{{
             {l.position.x,l.position.y,l.position.z,l.range},
-            {l.color.r,l.color.g,l.color.b,l.baked?-l.intensity:l.synthetic?0:l.intensity},
+            {l.color.r,l.color.g,l.color.b,l.baked?-l.intensity:l.intensity},
             {l.direction.x,l.direction.y,l.direction.z,float(l.type)},
             {l.attenuation.x,l.attenuation.y,l.attenuation.z,l.falloff},
             {cone[0],cone[1],l.synthetic?1.f:0.f,0}}};
@@ -1352,10 +1665,13 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
         if(command.clip.width>0&&command.clip.height>0){glEnable(GL_SCISSOR_TEST);glScissor(std::lround(command.clip.x*m.scaleX),std::lround((m.height-command.clip.y-command.clip.height)*m.scaleY),std::lround(command.clip.width*m.scaleX),std::lround(command.clip.height*m.scaleY));}
         i.ui_command(command);
     };
+    const auto&fx=i.options.features;
     auto draw_camera=[&](auto&self,const Camera&camera,bool targetOnly,const PortalSurface*targetPlane)->void{
         Rect v=camera.viewport;if(v.width<=0||v.height<=0)v={0,0,float(m.width),float(m.height)};
         int x=std::lround(v.x*m.scaleX),y=std::lround((m.height-v.y-v.height)*m.scaleY),w=std::lround(v.width*m.scaleX),h=std::lround(v.height*m.scaleY);
         if(w<=0||h<=0||(!camera.perDrawOpacity&&camera.alpha<=0))return;
+        const bool hdrView=i.composite&&!camera.foreground&&!targetOnly;const GLuint destination=hdrView?i.hdrFbo:i.msaaFbo;
+        auto seeded=[&](Color c){return hdrView&&i.options.pbr?inverse_tone_map(c):c;};
         const Camera*portalCamera=nullptr;std::optional<PortalSurface>surface;
         if(!targetOnly&&camera.portalId){
             for(const auto&candidate:f.cameras)if(candidate.sourceId==camera.portalId){portalCamera=&candidate;break;}
@@ -1364,7 +1680,7 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
             if(surface){
                 i.portal_target();
                 self(self,*portalCamera,true,&*surface);
-                glBindFramebuffer(GL_FRAMEBUFFER,i.msaaFbo);
+                glBindFramebuffer(GL_FRAMEBUFFER,destination);
             }
         }
         bool translucent=!targetOnly&&!camera.perDrawOpacity&&camera.alpha<1;
@@ -1376,11 +1692,12 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
         }
         if(translucent){
             i.alpha_target();glBindFramebuffer(GL_FRAMEBUFFER,i.alphaFbo);glDisable(GL_SCISSOR_TEST);glDepthMask(GL_TRUE);
-            Color background=camera.foreground?Color{0,0,0,0}:(camera.environmentOverride?camera.background:f.clearColor);
+            Color background=seeded(camera.foreground?Color{0,0,0,0}:(camera.environmentOverride?camera.background:f.clearColor));
             glClearColor(background.r,background.g,background.b,background.a);
             glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT);
         }
         glUseProgram(i.scene);glEnable(GL_DEPTH_TEST);glEnable(GL_BLEND);glDepthMask(GL_TRUE);
+        glUniform1i(i.su.pbr,i.options.pbr);glUniform1i(i.su.toneInShader,i.options.pbr&&!hdrView);glUniform1i(i.su.pbrNormal,6);glUniform1i(i.su.pbrOrm,7);
         i.portalPass=targetOnly;
         glBindSampler(0,i.sceneSampler);glBindSampler(1,i.lightmapSampler);
         glFrontFace((camera.horizontalFov<0) != (camera.pixelAspect<0)?GL_CW:GL_CCW);
@@ -1411,11 +1728,13 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
         glViewport(x,y,w,h);glEnable(GL_SCISSOR_TEST);glScissor(x,y,w,h);
         if(camera.perDrawOpacity){
             GLbitfield clear=(camera.clearColor?GL_COLOR_BUFFER_BIT:0)|(camera.clearDepth?GL_DEPTH_BUFFER_BIT:0)|(camera.clearStencil?GL_STENCIL_BUFFER_BIT:0);
-            Color background=camera.environmentOverride?camera.background:f.clearColor;
+            Color background=seeded(camera.environmentOverride?camera.background:f.clearColor);
             glClearColor(background.r,background.g,background.b,background.a);glStencilMask(255);
             if(clear)glClear(clear);
         }else if(camera.clearDepth)glClear(GL_DEPTH_BUFFER_BIT);
         i.viewProjection=camera_matrix(camera,float(w)/h);glUniformMatrix4fv(i.su.vp,1,GL_FALSE,i.viewProjection.data());glUniform3f(i.su.cameraPosition,camera.position.x,camera.position.y,camera.position.z);
+        // Original D3D VIEW is LH: LOCALVIEWER=false +Z is world forward, not GL VIEW +Z.
+        auto basis=transform({},camera.angles,{1,1,1});glUniform3f(i.su.infiniteViewer,basis[0],basis[1],basis[2]);glUniform1i(i.su.selectedLight,selectedLight);
         // A6 queue membership observes the existing cache before this view's ordinary updater.
         i.shadowOrder.clear();
         if(camera.drawWorld&&!camera.noShadow&&!camera.noEntities&&f.renderEntities&&(!f.bonusProfile||f.planarCapable)&&!f.shadows.empty()){
@@ -1442,9 +1761,7 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
                 if(queues&2)i.transparent.push_back(&d);
                 continue;
             }
-            bool transparent=d.alpha<1||d.additive||d.translucent||d.flare;
-            if(d.model)for(const auto&material:d.model->materials)transparent|=material.alpha<1;
-            if(transparent)i.transparent.push_back(&d);else i.draw_instance(d,f.skinBindings,&camera);
+            if(blended(d))i.transparent.push_back(&d);else i.draw_instance(d,f.skinBindings,&camera);
         }
         std::sort(i.transparent.begin(),i.transparent.end(),[&](const DrawInstance*a,const DrawInstance*b){Vec3 da=add(a->position,mul(camera.position,-1)),db=add(b->position,mul(camera.position,-1));return dot(da,da)>dot(db,db);});
         glDepthMask(GL_FALSE);for(const auto*d:i.transparent){
@@ -1494,6 +1811,7 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
                 glBlendFuncSeparate(GL_SRC_ALPHA,particle.additive?GL_ONE:GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);glDrawElementsInstanced(GL_TRIANGLES,6,GL_UNSIGNED_INT,nullptr,end-first);first=end;
             }
         }
+        if(!targetOnly&&&camera==primary&&(fx.ssao||fx.fog))i.screen_effects(f,camera,x,y,w,h);
         bool hasViewEntities=false;
         if(f.renderEntities&&!camera.noEntities)for(const auto&d:f.instances)if(!targetOnly&&d.viewSpace&&(d.layers&camera.layers)&&d.visible&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId)){hasViewEntities=true;break;}
         if(hasViewEntities){
@@ -1502,13 +1820,14 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
         }
         glDepthMask(GL_TRUE);
         if(translucent){
-            glBindFramebuffer(GL_FRAMEBUFFER,i.msaaFbo);ui_state();glUniform1i(i.uiOverlay,0);glBindSampler(0,i.uiLinearSampler);glBlendFunc(GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
+            glBindFramebuffer(GL_FRAMEBUFFER,destination);ui_state();glUniform1i(i.uiOverlay,0);glBindSampler(0,i.uiLinearSampler);glBlendFunc(GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
             i.uiVertices.clear();i.quad(v,{v.x/m.width,1-v.y/m.height,v.width/m.width,-v.height/m.height},{camera.alpha,camera.alpha,camera.alpha,camera.alpha});
             i.flush_ui(i.alphaColor);
         }
     };
     // A6 panels/text and view entities are foreground regardless of signed layer.
     for(const auto&camera:f.cameras)if(!camera.foreground&&!camera.portalTarget)draw_camera(draw_camera,camera,false,nullptr);
+    if(i.composite)i.composite_pass(m.drawableWidth,m.drawableHeight);
     std::size_t cameraIndex=0,uiIndex=0;
     std::size_t cursorIndex=f.ui.size();
     while(cameraIndex<f.cameras.size()||uiIndex<f.ui.size()){

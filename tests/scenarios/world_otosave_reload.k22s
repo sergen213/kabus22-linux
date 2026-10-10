@@ -1,0 +1,17 @@
+# requires: saves
+# continues: inzar_lain_boss
+# Restart after inzar_lain_boss, whose Buyukes arrival fired otosave_fish (skill1 14) and wrote kayit27.sav.
+# The autosave's slot reloads through the original YukleMenu into Buyukes as Demir, with the autosave flag kept.
+realtime off
+wait until ParlaklikMenuAcik == 1 || AMP_OyunYukle.visible == 1 timeout 7200
+assert Aktif_SaveNo == 28
+assert SLG_KayitSayisi == 28
+load-save 27
+wait until LY_AktifLevelID == 84 && level_yuklendi_ok == 1 && player != 0 timeout 7200
+assert $level == "buyukes.wmb"
+assert Aktif_Player == 0
+assert lain_sona_erdi == 2
+assert OSN_OtoSave_dizi[13] == 1 && OSN_OtoSave_dizi[14] == 1
+# The reloaded level's otosave_fish must not save again (OSN_OtoSave_dizi[14] is already 1).
+frames 600
+assert Aktif_SaveNo == 28

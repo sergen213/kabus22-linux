@@ -1,0 +1,55 @@
+# requires: saves
+# Item combination (NS_Birlesim, Nesneler.wdl:401-402: 1+2=3, 13+14=15, 22+23=24, 39+40=41) through the original inventory,
+# Demir, from original kayit4.sav (cam1): NS_Nesneler[10]=14, [11]=13. Inventory cells: index = NesneKafa + column*2 + row
+# (Right/Left +-2, Down/Up the row; NesneMenu.wdl EM_NesneNeMenu). Item -> Return opens Kullan/Birlestir/Goster (KuBiGoMenu.wdl);
+# Birlestir (EM_CursorKuBiGo 1) stores EM_BirlesimN1 and EM_Bolge 5 (EMB_NesneBi); Return on the second item runs
+# NS_Birlesirmi (EM_NesneBiMenu): a match writes the result into the second slot and clears the first, and
+# EM_OrganizeNesneler then closes the gap (NS_NesneSayisi - 1).
+realtime off
+load-save 4
+wait until LY_AktifLevelID == 7 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+# EM_Kernel (Envantermenu.wdl:310-327) accepts M only after oyun_ilk_basladi returns to 0, two seconds after a load.
+wait until oyun_ilk_basladi == 0 && EnvaterAcilabilirmi == 1 timeout 600
+assert NS_Nesneler[0] == 6 && NS_Nesneler[1] == 5 && NS_Nesneler[10] == 14 && NS_Nesneler[11] == 13 && NS_NesneSayisi == 12
+store n0 NS_NesneSayisi
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+press-until Down EM_CursorSiNeDo == 1 timeout 120
+press Return
+wait until EM_Bolge == 3 && EM_CursorNesne+EM_NesneKafa == 0 timeout 300
+# A pair that does not combine (6 and 5): the error sound only, nothing changes.
+press Return
+wait until EM_Bolge == 7 && EM_CursorKuBiGo == 0 timeout 300
+press Down
+wait until EM_CursorKuBiGo == 1 timeout 120
+press Return
+wait until EM_Bolge == 5 && EM_BirlesimN1 == 0 timeout 300
+press Down
+wait until EM_CursorNesne+EM_NesneKafa == 1 timeout 120
+press Return
+frames 10
+assert EM_Bolge == 5 && NS_Nesneler[0] == 6 && NS_Nesneler[1] == 5 && NS_NesneSayisi == @n0
+press Escape
+wait until EM_Bolge == 3 && EM_BirlesimN1 == -1 timeout 300
+# 14 + 13 -> 15.
+press Up
+press-until Right EM_CursorNesne+EM_NesneKafa >= 10 timeout 600
+assert EM_CursorNesne+EM_NesneKafa == 10
+press Return
+wait until EM_Bolge == 7 && EM_CursorKuBiGo == 0 timeout 300
+press Down
+wait until EM_CursorKuBiGo == 1 timeout 120
+press Return
+wait until EM_Bolge == 5 && EM_BirlesimN1 == 10 timeout 300
+press Down
+wait until EM_CursorNesne+EM_NesneKafa == 11 timeout 120
+capture item_combine_select
+press Return
+wait until EM_Bolge == 3 && EM_BirlesimN1 == -1 timeout 300
+assert NS_Nesneler[10] == 15 && NS_Nesneler[11] == 0 && NS_NesneSayisi == @n0 - 1
+frames 30
+capture item_combine_result
+press Escape
+press-until Escape EM_Acik == 0 timeout 300
+wait until freeze_mode == 0 && oyuncu_pasif == 0 timeout 300
+assert NS_Nesneler[10] == 15 && NS_NesneSayisi == @n0 - 1

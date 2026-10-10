@@ -1,4 +1,7 @@
 #include "render.hpp"
+#include "check_texture_pack.hpp"
+#include "graphics_cli.hpp"
+#include "render_policy.hpp"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -104,7 +107,36 @@ void turbulence_checks(k22::RendererBackend backend) {
     if(sample()!=warped)throw std::runtime_error("Lazy mip generation changed retained turbulence UI pixels or target state");
 }
 
-void gl_checks(std::span<const std::byte> mix,std::span<const std::byte> sunMix,k22::RendererBackend backend=k22::RendererBackend::OpenGL) {
+// A6 OVERLAY keys black/low-alpha texels unless the bitmap is BMAP0x100 (32-bit TGA, 0040e2b0/0043bb10/00440e90).
+void overlay_key_checks(k22::RendererBackend backend,bool rayTracing) {
+    using namespace k22;
+    TempDirectory captures;
+    auto flat=[](std::array<std::uint8_t,4> rgba){auto image=std::make_shared<Image>();image->width=image->height=8;for(int i=0;i<64;++i)image->rgba.insert(image->rgba.end(),rgba.begin(),rgba.end());return image;};
+    auto plane=[](Model&model,float x,std::shared_ptr<const Image> image){
+        model.vertices={{{x,-4,-4},{-1,0,0},{0,0},{}},{{x,4,-4},{-1,0,0},{1,0},{}},{{x,4,4},{-1,0,0},{1,1},{}},{{x,-4,4},{-1,0,0},{0,1},{}}};
+        model.triangles={{{0,1,2},0,0},{{0,2,3},0,0}};model.materials.resize(1);model.materials[0].texture=std::move(image);
+    };
+    auto tga32=flat({0,0,0,255}),tga24=flat({0,0,0,255});tga32->sourceDepth=32;tga32->a6AlphaFormat=true;tga24->sourceDepth=24;
+    Model rear,front32,front24;plane(rear,20,flat({0,0,255,255}));plane(front32,10,tga32);plane(front24,10,tga24);
+    std::array<DrawInstance,2> actors{};actors[0].model=&rear;actors[0].objectId=41;actors[1].objectId=42;
+    for(auto&actor:actors)actor.unlit=actor.noFog=actor.doubleSided=true;
+    Camera camera;camera.widescreen=false;camera.noShadow=camera.noCull=true;
+    RenderFrame frame;frame.cameras=std::span(&camera,1);frame.instances=actors;frame.mipmapping=0;
+    RenderOptions options;options.backend=backend;options.rayTracing=rayTracing;options.width=options.height=64;options.samples=1;options.vsync=false;
+    options.title="Kabus 22 A6 overlay key consumer";
+    Renderer renderer(options);
+    auto expect=[&](const char*label,Model&model,bool overlay,std::array<int,3> expected){
+        actors[1].model=&model;actors[1].overlay=overlay;
+        const auto pixel=capture_pixel(captured_pixels(renderer,frame,captures.path/"overlay.ppm"),renderer.metrics());
+        for(unsigned i=0;i<3;++i)if(std::abs(pixel[i]-expected[i])>4)
+            throw std::runtime_error(std::string(label)+": RGB"+std::to_string(pixel[0])+","+std::to_string(pixel[1])+","+std::to_string(pixel[2]));
+    };
+    expect("OVERLAY keys opaque black of a non-0x100 (24-bit TGA/PCX) bitmap",front24,true,{0,0,255});
+    expect("OVERLAY keeps opaque black of a BMAP0x100 32-bit TGA",front32,true,{0,0,0});
+    expect("Unflagged opaque black stays drawn",front24,false,{0,0,0});
+}
+
+void gl_checks(std::span<const std::byte> mix,std::span<const std::byte> sunMix,k22::RendererBackend backend=k22::RendererBackend::OpenGL,bool rayTracing=false) {
     using namespace k22;
     TempDirectory captures;
     auto flat=[](std::array<std::uint8_t,4> rgba) {
@@ -215,7 +247,7 @@ void gl_checks(std::span<const std::byte> mix,std::span<const std::byte> sunMix,
        lightWorld.lights.size()!=1)
         throw std::runtime_error("Actual decoded WMB quad lost source winding, flags or serialized light");
     RenderOptions options;
-    options.backend=backend;options.rayTracing=false;
+    options.backend=backend;options.rayTracing=rayTracing;
     options.width=options.height=64;
     options.samples=1;
     options.vsync=false;
@@ -302,14 +334,13 @@ void gl_checks(std::span<const std::byte> mix,std::span<const std::byte> sunMix,
     shot("Live MATERIAL callback overrides packet scalar, BGR delta and bias",{69,52,46});
     lightContext.returned.scalar=127;
     shot("Live MATERIAL consumes changed callback state without changing packet",{109,92,86});
-    material.ambient={};
-    material.diffuse={80,0,0,1};
-    material.albedo=50;
-    frame.sunDirection={-1,0,0};
+    material.ambient={80,80,80,1};
     lightContext.returned.scalar=63;
-    shot("Live MATERIAL ALBEDO consumes callback scalar rather than packet",{79,0,0});
+    shot("Live MATERIAL continues to consume callback state",{69,52,46});
     lightContext.returned.scalar=127;
-    shot("Live MATERIAL ALBEDO follows changed callback scalar",{160,0,0});
+    shot("Live MATERIAL continues to follow callback scalar",{109,92,86});
+    material.ambient={};
+    material.emissive={80,0,0,1};
     if(lightContext.calls!=4)
         throw std::runtime_error("Entity light callback did not execute once per actual eligible draw");
     // Rejected cameras must not consume the dirty actor's persistent light cache.
@@ -347,38 +378,26 @@ void gl_checks(std::span<const std::byte> mix,std::span<const std::byte> sunMix,
     ++instance.meshRevision;
     instance.positions=model.frames[0].positions;
     lightContext.camera=&eligibilityViews[0];
-    eligibleShot("Same actor deformed back inside first view prepares there",{0,0,0},9);
+    // The restored actor is visible only in the first view. Preserve that view's
+    // color so the later off-frustum camera cannot erase the actual GPU consumer.
+    const bool laterViewClear=eligibilityViews[1].clearColor;
+    eligibilityViews[1].clearColor=false;
+    eligibleShot("Same actor deformed back inside first view prepares there",{160,0,0},9);
+    eligibilityViews[1].clearColor=laterViewClear;
     instance.positions=instance.normals={};
     instance.meshId=0;
     frame.cameras=std::span(&camera,1);
     lightContext.camera=&camera;
     frame.prepareEntityLight=nullptr;
     frame.lightContext=nullptr;
-    material.diffuse={};
-    material.albedo=100;
+    material.diffuse=material.emissive={};
+    material.albedoRaw=102400;
     material.ambient={80,0,0,1};
     camera.nativeAmbient=0;
     frame.sunDirection={0,-1,0};
     shot("Live MATERIAL without callback restores stored light cache",{160,0,0});
-    material.ambient={};
-    material.diffuse={80,0,0,1};
-    material.albedo=50;
-    frame.sunDirection={-.25f,0,0};
-    shot("Ordinary MATERIAL retains SUNLIGHT quarter intensity",{40,0,0});
-    frame.sunDirection={-.5f,0,0};
-    shot("Ordinary MATERIAL retains SUNLIGHT half intensity",{80,0,0});
-    frame.sunColor={0,1,0,1};
-    shot("Unrelated SUN_COLOR cannot tint ordinary selected gray light",{80,0,0});
-    material.albedo=0;
-    shot("Ordinary MATERIAL ALBEDO independently disables directional light",{0,0,0});
-    material.albedo=50;
-    material.emissive={10,20,30,1};
-    material.specular={80,80,80,1};
-    material.power=4;
-    frame.sunDirection={};
-    shot("Zero SUNLIGHT is finite and unrelated SUN_COLOR cannot inject light",{20,40,60});
     material.emissive=material.specular=material.diffuse={};
-    material.albedo=100;
+    material.albedoRaw=102400;
     material.ambient={80,0,0,1};
     frame.sunDirection={0,-1,0};
     frame.sunColor={};
@@ -414,16 +433,6 @@ void gl_checks(std::span<const std::byte> mix,std::span<const std::byte> sunMix,
     instance.nativeSpecialColor={0,0,0};
     shot("A6 zero source-special color does not fall back to FLOAT tint",{0,0,0});
     instance.nativeSpecialColor={20,40,60};
-    material.ambient={};
-    material.diffuse={80,0,0,1};
-    material.albedo=50;
-    frame.sunDirection={-1,0,0};
-    lightContext.returned.scalar=63;
-    shot("A6 source-special still consumes genuine DTO scalar for ALBEDO",{40,0,0});
-    lightContext.returned.scalar=127;
-    shot("A6 source-special ALBEDO follows changed genuine DTO scalar",{80,0,0});
-    material.albedo=0;
-    shot("A6 source-special ALBEDO independently disables selected gray light",{0,0,0});
     frame.prepareEntityLight=nullptr;
     frame.lightContext=nullptr;
     instance.nativeFloorLight=true;
@@ -436,17 +445,166 @@ void gl_checks(std::span<const std::byte> mix,std::span<const std::byte> sunMix,
     camera.perDrawOpacity=true;
     camera.nativeAmbient=0;
     material.diffuse={};
-    material.albedo=100;
+    material.albedoRaw=102400;
     material.ambient={80,0,0,1};
     frame.sunDirection={0,-1,0};
     instance.unlit=true;
     shot("UNLIT live MATERIAL omits native scalar light cache",{0,0,0});
     instance.nativeLightScalar=0;
     material.ambient={};
+    // Ordinary D3D vertex specular is added after the diffuse texture cascade.
+    // These packets deliberately disagree with the separate literal-FX sun vector.
+    const auto black=flat({0,0,0,255});
+    Model shineModel=model;
+    shineModel.frames.clear();
+    // Original D3D VIEW camera-space +Z is world +X at zero angles.
+    for(auto& vertex:shineModel.vertices)vertex.normal={1,0,0};
+    shineModel.materials[0].texture=black;
+    instance.model=&shineModel;
+    instance.unlit=false;
+    frame.bonusProfile=true;
+    material.specular={255,255,255,1};
+    material.power=4;
+    RenderLight shineLight;
+    shineLight.position={20,0,0};
+    shineLight.color={.25f,.25f,.25f,1};
+    shineLight.range=100;
+    shineLight.attenuation={1,0,0};
+    frame.lights=std::span(&shineLight,1);
+    shot("Point light specular survives black texture; vertex half-vector",{44,44,44});
+    material.albedoRaw=0;
+    shot("Absent selected SUN leaves point-light specular unscaled even with ALBEDO zero",{44,44,44});
+    material.albedoRaw=102400;
+    shineLight.attenuation={2,0,0};
+    shot("Point specular uses actual reciprocal hardware attenuation",{22,22,22});
+    shineLight.attenuation={1,0,0};
+    shineLight.type=2;
+    shineLight.direction={1,0,0};
+    shot("Spotlight cone rejects specular outside source phi",{0,0,0});
+    shineLight.type=1;
+    shineLight.range=1;
+    shot("Point specular honors hardware light range",{0,0,0});
+    shineLight.type=3;
+    shineLight.direction={-.5f,-std::sqrt(.75f),0};
+    shineLight.color={1,1,1,1};
+    shot("Infinite-viewer half-vector power4 at sixty degrees is 0.5625",{143,143,143});
+    shineLight.direction={-1,0,0};
+    shot("Original LH VIEW infinite viewer maps zero-angle +Z to world +X",{255,255,255});
+    camera.position={2,1,0};
+    shot("LOCALVIEWER false is independent of finite camera position",{255,255,255});
+    camera.position={};
+    camera.angles.x=instance.angles.x=90;
+    shineLight.direction={0,-1,0};
+    shot("Original LH VIEW infinite viewer follows yaw90 world +Y",{255,255,255});
+    camera.angles=instance.angles={};
+    shineLight.direction={-1,0,0};
+    for(auto& vertex:shineModel.vertices)vertex.normal=vertex.position.y<0?Vec3{1,0,0}:Vec3{0,1,0};
+    renderer.purge_model(&shineModel);
+    // The center pixel is just right of the screen midpoint: interpolated
+    // vertex power is .5 + (1/64)*10*tan(75deg/2)*(4/3)/8/2.
+    shot("Specular interpolates vertex powers, not interpolated-normal power",{130,130,130});
+    for(auto& vertex:shineModel.vertices)vertex.normal={1,0,0};
+    renderer.purge_model(&shineModel);
+    const auto gray=flat({32,32,32,255});
+    shineModel.materials[0].texture=gray;
+    material.specular={};
+    material.diffuse={255,255,255,1};
+    std::array<RenderLight,2> clampLights{shineLight,shineLight};
+    for(auto& light:clampLights)light.color={.75f,.75f,.75f,1};
+    frame.lights=clampLights;
+    shot("Ordinary diffuse sum clamps at each vertex before MODULATE2X",{64,64,64});
+    frame.lights=std::span(&shineLight,1);
+    material.specular={};
+    material.diffuse={80,0,0,1};
+    material.albedoRaw=51200;
+    instance.nativeLightScalar=127;
+    shineModel.materials[0].texture=white;
+    shineLight.synthetic=true;
+    shineLight.color={.5f,.5f,.5f,1};
+    frame.sunDirection={-1,0,0};
+    shot("A7 hardware sun uses original ray direction and SUN_COLOR255*SUN_LIGHT50/25500",{79,0,0});
+    shineLight.direction={1,0,0};
+    shot("Opposite hardware sun is dark despite positive literal FX packet",{0,0,0});
+    material.diffuse={};
+    material.specular={255,255,255,1};
+    shineModel.materials[0].texture=black;
+    shineLight.direction={-1,0,0};
+    material.albedoRaw=0;
+    shot("ALBEDO disables selected hardware sun specular as well as diffuse",{0,0,0});
+    material.albedoRaw=51200;
+    shot("Selected fixed-bank sun specular is not doubled with diffuse stage",{127,127,127});
+    instance.alpha=.5f;
+    shot("Separate ordinary specular is added before geometry alpha blending",{64,64,64});
+    instance.alpha=1;
+    instance.unlit=true;
+    shot("ENTITY UNLIT retains explicit ordinary material specular",{127,127,127});
+    instance.unlit=false;
+    shineLight.color={.5f,.25f,0,1}; // A7 SUN_COLOR(255,127.5,0), SUN_LIGHT50 /25500.
+    shot("A7 source-colored SUN specular retains RGB rather than a gray FX scalar",{127,63,0});
+    shineLight.color={.5f,.5f,.5f,1};
+    material.albedoRaw=-8192;
+    shot("A7 fixed-bank SUN uses nonzero signed ALBEDO and divisor128",{11,11,11});
+    frame.nativeFixedLightBank=false;
+    shot("A7 direct SUN rejects negative ALBEDO independently of fixed-bank rule",{0,0,0});
+    material.albedoRaw=51200;
+    shot("A7 direct SUN uses divisor127 rather than fixed128",{128,128,128});
+    frame.bonusProfile=false;
+    shineLight.color={1,1,1,1}; // A6 source float32 .02 * SUN_LIGHT50, not .01.
+    shot("A6 hardware SUN is gray at source 0.02 scale and sampled scalar127/255",{127,127,127});
+    frame.bonusProfile=true;
+    shineLight.color={.5f,.5f,.5f,1};
+    frame.nativeFixedLightBank=true;
+    frame.hardwareLighting=false;
+    material.emissive={80,0,0,1};
+    shot("D3D_TRANSFORM zero disables ordinary material lighting without alpha changes",{0,0,0});
+    frame.hardwareLighting=true;
+    material.emissive={};
+    material.specular={};
+    frame.lights={};
+    frame.bonusProfile=false;
+    instance.model=&model;
+    instance.unlit=true;
+    instance.nativeLightScalar=0;
+    // The synthetic directional packet exists for ordinary MATERIAL, not legacy point lighting.
+    const auto oldMaterialIndex=instance.materialIndex;
+    instance.materialIndex=~0u;
+    frame.materials={};
+    instance.unlit=false;
+    instance.ambient=-127;
+    const auto oldPosition=instance.position;
+    const auto oldNearClip=camera.nearClip;
+    instance.position.x=-9.5f;camera.nearClip=.01f;
+    frame.sunDirection={};
+    RenderLight phantomSun;phantomSun.type=3;phantomSun.synthetic=true;phantomSun.range=1;
+    phantomSun.color={1,1,1,1};phantomSun.intensity=1;
+    frame.lights=std::span(&phantomSun,1);
+    shot("Nonmaterial fragment lighting excludes synthetic directional SUN point alias",{0,0,0});
+    phantomSun.type=1;
+    shot("Nonmaterial fragment lighting retains an actual synthetic point record",{64,64,64});
+    phantomSun.type=3;phantomSun.baked=true;phantomSun.intensity=.25f;
+    shot("Nonmaterial fragment lighting retains serialized baked synthetic records",{16,16,16});
+    frame.lights={};frame.materials=std::span(&material,1);
+    instance.materialIndex=oldMaterialIndex;
+    instance.position=oldPosition;camera.nearClip=oldNearClip;instance.unlit=true;instance.ambient=0;
+    frame.sunDirection={0,-1,0};
     auto skills=[&](std::array<float,8> values) {
         for(std::size_t index=0;index<values.size();++index)
             material.skillBits[index]=std::bit_cast<std::uint32_t>(values[index]);
     };
+    const auto specNormal=flat({128,128,255,255}),specColor=flat({128,64,32,255});
+    specColor->nativeTextureAlpha=true;
+    material.effect=Renderer::identify_effect("Normal_Mix.fx",mix);
+    skills({0,0,.5f,4,0,0,0,0});
+    model.materials[0].texture=specColor;
+    model.materials[1].texture=specNormal;
+    frame.sunDirection={1,0,0};
+    shot("Literal Normal_Mix skill3 uses reflection vector and full RGBA texture modulation",{32,16,8});
+    material.effect=Renderer::identify_effect("Normal_SunMix.fx",sunMix);
+    skills({0,0,.5f,4,.1f,.2f,.3f,.4f});
+    shot("Literal Normal_SunMix skill3 remains source-authored in every backend",{32,16,8});
+    model.materials[0].texture=white;
+    model.materials[1].texture=normal;
+    frame.sunDirection={0,-1,0};
     material.effect=Renderer::identify_effect("Normal_Mix.fx",mix);
     skills({0,1,0,1,0,0,0,0});
     shot("Normal_Mix raw skills and source RGBA",{207,207,230});
@@ -1354,7 +1512,7 @@ void rt_checks() {
     Camera camera;camera.nativeAmbient=-127;camera.widescreen=false;camera.noShadow=true;camera.perDrawOpacity=true;
     RenderFrame frame;frame.cameras=std::span(&camera,1);frame.sunDirection={-1,0,1};
     frame.instances=std::span(actors).first(1);
-    RenderOptions options;options.backend=RendererBackend::Vulkan;options.rayTracing=true;
+    RenderOptions options;options.backend=RendererBackend::Vulkan;options.rayTracing=true;options.features.shadows=ShadowMode::RayTraced;
     options.width=options.height=64;options.samples=1;options.vsync=false;
     options.title="Kabus 22 hardware ray-query consumer check";
     Renderer renderer(options);
@@ -1384,6 +1542,10 @@ void rt_checks() {
         const int raster=sampleRenderer(rasterReference);
         if(std::abs(raster-lit)>18||raster-shadow<120)
             throw std::runtime_error("Hardware RT-on shading did not differ from actual Vulkan RT-off");
+        // A6 lights never occlude: without shadows=rt the ray-traced backend lights exactly like raster.
+        auto plainOptions=options;plainOptions.features={};plainOptions.title="Kabus 22 default ray-query lighting";
+        Renderer plain(plainOptions);
+        if(sampleRenderer(plain)!=raster)throw std::runtime_error("Default ray tracing occluded original unshadowed lighting");
     }
     actors[1].position={-6,0,6};
     if(std::abs(sample()-shadow)>18)throw std::runtime_error("Off-frustum world actor was absent from hardware visibility");
@@ -1418,7 +1580,7 @@ void rt_checks() {
     restored("Purged actor must leave no hardware ray occluder");
 }
 
-void rt_reflection_checks() {
+void rt_reflection_checks(std::span<const std::byte> mix,std::span<const std::byte> sunMix) {
     using namespace k22;
     TempDirectory captures;
     auto flat=[](std::array<std::uint8_t,4> color,bool nativeAlpha=false) {
@@ -1468,6 +1630,120 @@ void rt_reflection_checks() {
         const auto pixel=capture_pixel(captured_pixels(raster,frame,captures.path/"reflection-raster.ppm"),raster.metrics());
         if(pixel!=std::array<int,3>{0,0,0})throw std::runtime_error("Reflection fixture raster-only fallback is not black");
     }
+    {
+        // The signal path (roughness 0 without packs) reflects the same unlit original mirror (type 3) as the inline path.
+        auto roughOptions=options;roughOptions.features.roughReflections=true;roughOptions.title="Kabus 22 rough reflection signal consumer";
+        Renderer rough(roughOptions);
+        const auto pixel=capture_pixel(captured_pixels(rough,frame,captures.path/"reflection-rough.ppm"),rough.metrics());
+        if(pixel[0]>4||pixel[1]>4||std::abs(pixel[2]-254)>4)throw std::runtime_error("reflections=rough skipped an unlit original mirror");
+    }
+    ScriptMaterialState reflectedMaterial;
+    reflectedMaterial.sourceId=401;
+    reflectedMaterial.albedoRaw=102400;
+    frame.materials=std::span(&reflectedMaterial,1);
+    layers[2].materialIndex=0;
+    rear.materials[0].texture=flat({255,255,255,255});
+    {
+        struct ReflectedLightContext {
+            NativeEntityLightState returned{255,{},{}};
+            const Camera* admitted{};
+            const Camera* forbidden{};
+            unsigned admittedCalls{},forbiddenCalls{};
+        } context;
+        const auto savedRear=layers[2];
+        layers[2].unlit=false;layers[2].nativeFloorLight=true;layers[2].nativeLightScalar=0;
+        layers[2].ambient=0;layers[2].nativeLightDelta={};layers[2].nativeLightBias={};
+        reflectedMaterial.ambient={80,80,80,1};
+        std::array<Camera,2> views{camera,camera};
+        views[0].position={-20,0,0};views[0].drawWorld=false;
+        context.admitted=&views[0];context.forbidden=&views[1];
+        frame.cameras=views;frame.lightContext=&context;
+        frame.prepareEntityLight=[](void* opaque,const DrawInstance& draw,const Camera& view){
+            auto& state=*static_cast<ReflectedLightContext*>(opaque);
+            if(draw.objectId!=203)return NativeEntityLightState{draw.nativeLightScalar,draw.nativeLightDelta,draw.nativeLightBias};
+            if(&view==state.admitted)++state.admittedCalls;
+            else if(&view==state.forbidden)++state.forbiddenCalls;
+            else throw std::runtime_error("Reflected actor was prepared by an unrelated camera");
+            return state.returned;
+        };
+        expect("Later camera reflection consumes admitted scalar255 rather than packet scalar0",{160,160,160});
+        if(context.admittedCalls!=1||context.forbiddenCalls||layers[2].nativeLightScalar!=0)
+            throw std::runtime_error("Reflected light preparation duplicated callbacks, warmed an off-frustum actor or changed its packet");
+        context.returned={63,{0,4,12},{0,6,25}};context.admittedCalls=context.forbiddenCalls=0;
+        expect("Later reflection consumes complete current scalar and BGR delta/bias DTO",{63,46,40});
+        if(context.admittedCalls!=1||context.forbiddenCalls)
+            throw std::runtime_error("Changed reflected DTO added speculative off-frustum preparation");
+        frame.cameras=std::span(&camera,1);context.admitted=&camera;context.forbidden=nullptr;
+        context.admittedCalls=context.forbiddenCalls=0;
+        expect("A new frame without an admitted actor uses its packet, not last frame's DTO",{0,0,0});
+        if(context.admittedCalls||context.forbiddenCalls)
+            throw std::runtime_error("Off-frustum ray candidate consumed an entity-light callback");
+        // The center +X ray reflects along -Y. The actor is visible at 45 degrees,
+        // admitted after the mirror, but does not cover the center mirror pixel.
+        constexpr float diagonal=.7071067811865475f;
+        for(auto& vertex:mirror.mesh.vertices){
+            vertex.position={10-vertex.position.y*diagonal,vertex.position.y*diagonal,vertex.position.z};
+            vertex.normal={-diagonal,-diagonal,0};
+        }
+        renderer.purge_model(&mirror.mesh);
+        layers[2].position={10,-10,0};layers[2].angles.x=-90;
+        const auto oldFov=camera.horizontalFov;camera.horizontalFov=120;
+        context.returned={255,{},{}};context.admittedCalls=context.forbiddenCalls=0;
+        expect("Same-camera reflection uses its later admitted actor's prepared DTO",{160,160,160});
+        if(context.admittedCalls!=1||context.forbiddenCalls)
+            throw std::runtime_error("Same-camera preparation and replay called the actor provider more than once");
+        camera.horizontalFov=oldFov;
+        for(auto& vertex:mirror.mesh.vertices){
+            vertex.position={10,vertex.position.y/diagonal,vertex.position.z};
+            vertex.normal={-1,0,0};
+        }
+        renderer.purge_model(&mirror.mesh);
+        layers[2]=savedRear;reflectedMaterial.ambient={};
+        frame.lightContext=nullptr;frame.prepareEntityLight=nullptr;
+    }
+    reflectedMaterial.emissive={40,20,10,1};
+    expect("Reflected ordinary MATERIAL retains prepared emissive and MODULATE2X",{80,40,20});
+    rear.materials[0].texture=black;
+    reflectedMaterial.emissive={};
+    reflectedMaterial.specular={255,255,255,1};
+    reflectedMaterial.power=4;
+    for(auto& vertex:rear.vertices)vertex.normal={1,0,0};
+    renderer.purge_model(&rear);
+    RenderLight shineLight;
+    shineLight.type=3;shineLight.direction={-1,0,0};shineLight.color={.25f,.25f,.25f,1};
+    frame.lights=std::span(&shineLight,1);
+    expect("Reflected ordinary specular adds white after black diffuse texture",{64,64,64});
+    for(unsigned i=1;i<rear.vertices.size();++i)rear.vertices[i].normal={0,1,0};
+    renderer.purge_model(&rear);
+    expect("Reflected ordinary interpolates vertex specular rather than hit-normal power4",{32,32,32});
+    for(auto& vertex:rear.vertices)vertex.normal={1,0,0};
+    renderer.purge_model(&rear);
+    shineLight.direction={-.5f,-.8660254038f,0};
+    expect("Reflected ordinary LOCALVIEWER0 uses halfway-vector power4",{36,36,36});
+    shineLight.direction={-1,0,0};shineLight.type=2;shineLight.position={100,0,0};
+    shineLight.range=1000;shineLight.attenuation={1,0,0};
+    expect("Reflected ordinary admitted spotlight contributes specular",{64,64,64});
+    shineLight.type=1;
+    expect("Reflected ordinary point light contributes specular with sun disabled",{64,64,64});
+    frame.lights={};
+    for(auto& vertex:rear.vertices)vertex.normal={-1,0,0};
+    renderer.purge_model(&rear);
+    reflectedMaterial.effect=Renderer::identify_effect("Normal_Mix.fx",mix);
+    reflectedMaterial.effectGeneration=1;
+    reflectedMaterial.specular={};
+    rear.materials[0].texture=flat({128,64,32,255});
+    rear.materials.resize(2);rear.materials[1].texture=flat({128,128,0,255});
+    frame.sunDirection={-1,0,0};
+    auto reflectedSkills=[&](std::array<float,8> values){for(unsigned i=0;i<8;++i)reflectedMaterial.skillBits[i]=std::bit_cast<std::uint32_t>(values[i]);};
+    reflectedSkills({0,0,.5f,1,0,0,0,0});
+    expect("Reflected literal Normal_Mix nonzero specular texture-modulates source RGB",{64,32,16});
+    reflectedMaterial.effect=Renderer::identify_effect("Normal_SunMix.fx",sunMix);
+    ++reflectedMaterial.effectGeneration;
+    expect("Reflected literal Normal_SunMix retains nonzero authored specular",{64,32,16});
+    rear.materials[0].texture=flat({128,64,32,255},true);
+    expect("Reflected literal FX full RGBA specular .5 composites alpha .5",{32,16,8});
+    frame.materials={};frame.sunDirection={};layers[2].materialIndex=~0u;
+    rear.materials.resize(1);rear.materials[0].texture=blue;
     frame.instances=layers;
     expect("Two translucent reflected layers reveal actual opaque rear",{128,64,63});
     std::array<DrawInstance,2> pair{layers[0],layers[2]};frame.instances=pair;
@@ -1498,8 +1774,88 @@ void rt_reflection_checks() {
 }
 }
 
+// Asset-free Contract D/E policy: presets, CLI extraction, fallback, tangents, tone curve.
+void graphics_policy_checks() {
+    using namespace k22;using namespace k22::render_policy;
+    auto require=[](bool ok,const char*what){if(!ok)throw std::runtime_error(std::string("graphics policy: ")+what);};
+    texture_pack_checks();
+    {Image tga32,other;tga32.a6AlphaFormat=true;DrawInstance overlay;overlay.overlay=true;DrawInstance plain;
+     require(overlay_keyed(overlay,&other)&&overlay_keyed(overlay,nullptr)&&!overlay_keyed(overlay,&tga32)&&!overlay_keyed(plain,&other),"A6 OVERLAY key skips only BMAP0x100 bitmaps");}
+    auto none=resolve_graphics("original",{});
+    require(none.backend=="opengl"&&!none.pbr&&!none.texturePacks&&!none.anisotropy&&!none.msaa,"original preset is the legacy default");
+    auto custom=resolve_graphics("custom",{});require(custom.backend=="opengl"&&!custom.pbr&&!custom.anisotropy,"custom base is original");
+    auto enhanced=resolve_graphics("enhanced",{});require(enhanced.backend=="vulkan-raster"&&enhanced.anisotropy==16&&enhanced.msaa==4&&enhanced.texturePacks&&!enhanced.pbr,"enhanced preset");
+    auto ultra=resolve_graphics("ultra",{});require(ultra.backend=="vulkan-rt"&&ultra.pbr&&ultra.texturePacks&&ultra.anisotropy==16,"ultra preset");
+    const std::vector<std::pair<std::string,std::string>> overrides{{"pbr","1"},{"msaa","8"},{"anisotropy","2"},{"texture_packs","0"},{"backend","vulkan-raster"}};
+    auto o=resolve_graphics("ultra",overrides);require(o.pbr&&o.msaa==8&&o.anisotropy==2&&!o.texturePacks&&o.explicitPacks&&o.backend=="vulkan-raster","--graphics overrides preset");
+    for(auto bad:{std::pair<std::string,std::string>{"blur","1"},{"pbr","2"},{"msaa","3"},{"anisotropy","32"},{"backend","d3d9"},{"shadows","on"},{"gi","2"},{"reflections","1"},{"taa","yes"}}){const std::vector<std::pair<std::string,std::string>>one{bad};rejects([&]{resolve_graphics("custom",one);},"unknown --graphics key/value accepted");}
+    // Wave-2 features: off by default, preset contents, explicit overrides, per-backend admission with notices.
+    require(none.features==GraphicsFeatures{}&&custom.features==GraphicsFeatures{},"original/custom enable no wave-2 effect");
+    {auto&f=enhanced.features;require(f.shadows==ShadowMode::ShadowMap&&f.ssao&&f.fxaa&&!f.gi&&!f.roughReflections&&!f.denoise&&!f.bloom&&!f.taa&&!f.fog,"enhanced = shadow maps + SSAO + FXAA");}
+    {auto&f=ultra.features;require(f.shadows==ShadowMode::RayTraced&&f.gi&&f.roughReflections&&f.denoise&&f.bloom&&f.taa&&f.fog&&!f.ssao&&!f.fxaa,"ultra = RT shadows/GI/reflections + denoise + bloom + TAA + volumetric fog");}
+    {const std::vector<std::pair<std::string,std::string>>set{{"shadows","rt"},{"gi","1"},{"reflections","rough"},{"bloom","1"},{"volumetric_fog","1"},{"shadows","shadowmap"},{"ssao","1"},{"fxaa","1"},{"taa","1"},{"denoise","1"}};auto f=resolve_graphics("custom",set).features;
+     require(f.shadows==ShadowMode::ShadowMap&&f.gi&&f.roughReflections&&f.bloom&&f.fog&&f.ssao&&f.fxaa&&f.taa&&f.denoise,"later --graphics keys win");
+     auto g=resolve_graphics("ultra",std::vector<std::pair<std::string,std::string>>{{"gi","0"},{"shadows","original"},{"taa","0"}}).features;require(!g.gi&&g.shadows==ShadowMode::Original&&!g.taa&&g.bloom,"overrides disable preset effects");}
+    {std::vector<std::string>notes;auto f=admit_features(ultra.features,"opengl",notes);
+     require(f.shadows==ShadowMode::ShadowMap&&!f.gi&&!f.roughReflections&&!f.denoise&&!f.taa&&f.bloom&&f.fog&&notes.size()==5,"OpenGL admission: RT shadows fall back to shadow maps, RT/TAA dropped with notices");
+     notes.clear();f=admit_features(ultra.features,"vulkan-raster",notes);require(f.shadows==ShadowMode::ShadowMap&&f.taa&&!f.gi&&notes.size()==4,"raster admission keeps TAA");
+     notes.clear();require(admit_features(ultra.features,"vulkan-rt",notes)==ultra.features&&notes.empty(),"RT admits everything silently");
+     notes.clear();require(admit_features(enhanced.features,"opengl",notes)==enhanced.features&&notes.empty(),"enhanced effects run on every backend");}
+    for(auto&option:graphicsOptions){const bool rtOnly=option.key=="gi"||option.key=="reflections"||option.key=="denoise";require(option.backends==(rtOnly?backendRT:option.key=="taa"?backendVulkan:backendAll),"capability backends match implementations");}
+    require(!composite_enabled(false,{})&&composite_enabled(true,{})&&composite_enabled(false,{.bloom=true})&&composite_enabled(false,{.taa=true})&&!composite_enabled(false,{.ssao=true}),"composite only when an effect needs it");
+    require(!shadow_maps_enabled({})&&shadow_maps_enabled({.shadows=ShadowMode::ShadowMap})&&!shadow_maps_enabled({.shadows=ShadowMode::RayTraced})&&!shadow_maps_enabled({.shadows=ShadowMode::RayTraced,.fog=true}),"shadow maps only for shadows=shadowmap (RT fog does not render them)");
+    {Camera c;c.position={100,-50,30};c.angles={30,-10,0};c.nearClip=1;c.farClip=8000;const float aspect=16/9.f;auto vp=camera_matrix(c,aspect);auto iv=inverse(vp);auto id=product(vp,iv);
+     for(int i=0;i<16;++i)require(std::abs(id[i]-(i%5==0?1.f:0.f))<1e-3f,"matrix inverse");
+     Bounds world{{-3000,-3000,-500},{3000,3000,800},false,true};auto sun=sun_shadow_matrix(c,aspect,unit({0.3f,0.2f,1}),world,sunShadowDistance,sunShadowResolution);
+     Camera slice=c;slice.farClip=sunShadowDistance;auto sliceInverse=inverse(camera_matrix(slice,aspect));
+     for(int i=0;i<8;++i){auto p=project_ndc(sun,project_ndc(sliceInverse,{i&1?1.f:-1.f,i&2?1.f:-1.f,i&4?1.f:-1.f}));require(std::abs(p.x)<=1&&std::abs(p.y)<=1&&std::abs(p.z)<=1,"sun shadow covers the camera slice");}
+     for(int i=0;i<8;++i){auto p=project_ndc(sun,{i&1?3000.f:-3000.f,i&2?3000.f:-3000.f,i&4?800.f:-500.f});require(p.z<=1,"sun shadow depth range keeps every caster toward the sun");}
+     c.position={100.4f,-50,30};auto moved=sun_shadow_matrix(c,aspect,unit({0.3f,0.2f,1}),world,sunShadowDistance,sunShadowResolution);
+     auto a=project_ndc(sun,{0,0,0}),b=project_ndc(moved,{0,0,0});float texels=std::abs(a.x-b.x)*sunShadowResolution/2;require(std::abs(texels-std::round(texels))<1e-2f,"sun shadow snaps to whole texels");}
+    {Vec3 l{10,20,30};const std::array<Vec3,6>dirs{{{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}}};
+     for(int face=0;face<6;++face){auto p=project_ndc(cube_face_matrix(l,face,1,500),add(l,mul(dirs[face],100)));require(std::abs(p.x)<1e-4f&&std::abs(p.y)<1e-4f&&p.z>-1&&p.z<1,"cube face looks down its axis");}
+     auto up=project_ndc(cube_face_matrix(l,0,1,500),add(l,Vec3{100,50,0}));require(up.y<0,"GL cube +X face has world +Y at texel row 0 (NDC -Y)");}
+    {std::vector<RenderLight>lights(5);lights[0].baked=true;lights[1].synthetic=true;lights[2].type=3;lights[3].position={1000,0,0};lights[4].position={50,0,0};lights[4].range=200;
+     require(shadow_light_index(lights,{0,0,0})==4,"cube shadow follows the strongest nearby dynamic light");lights.resize(3);require(shadow_light_index(lights,{0,0,0})==-1,"no eligible shadow light");}
+    {std::array<Vec2,8>seen{};for(int i=0;i<8;++i){seen[i]=taa_jitter(i);require(std::abs(seen[i].x)<=.5f&&std::abs(seen[i].y)<=.5f,"jitter within one pixel");for(int j=0;j<i;++j)require(seen[i].x!=seen[j].x||seen[i].y!=seen[j].y,"8 distinct jitter offsets");}
+     require(taa_jitter(8).x==seen[0].x&&std::abs(halton(1,2)-.5f)<1e-6f&&std::abs(halton(2,3)-2/3.f)<1e-6f&&std::abs(halton(4,3)-4/9.f)<1e-6f,"Halton(2,3) sequence");
+     Camera c;auto vp=camera_matrix(c,16/9.f);auto j=jittered(vp,{.25f,-.5f},1920,1080);Vec3 p{200,30,10};auto a=project_ndc(vp,p),b=project_ndc(j,p);require(std::abs(b.x-a.x-.5f/1920)<1e-5f&&std::abs(b.y-a.y+1.f/1080)<1e-5f&&std::abs(b.z-a.z)<1e-6f,"jitter moves clip XY by whole sub-pixel offsets only");}
+    require(temporal_weight(0,.1f)==1&&temporal_weight(3,.1f)==.25f&&temporal_weight(100,.1f)==.1f,"temporal blend ramps 1/(n+1) to its floor");
+    require(history_valid(100,103,.95f)&&!history_valid(100,110,.95f)&&!history_valid(100,100,.5f)&&!history_valid(0,100,1),"history rejects disocclusion");
+    {float sum=0;for(int i=-2;i<=2;++i)sum+=atrous_tap(i);require(std::abs(sum-1)<1e-6f&&atrous_tap(0)==6/16.f,"a-trous B3 kernel normalized");}
+    rejects([&]{resolve_graphics("max",{});},"unknown preset accepted");
+    require(fallback_backend("vulkan-rt")=="vulkan-raster"&&fallback_backend("vulkan-raster")=="opengl"&&fallback_backend("opengl").empty(),"preset backend degradation chain");
+    auto argv_of=[](std::vector<std::string>&storage){std::vector<char*>argv;for(auto&s:storage)argv.push_back(s.data());argv.push_back(nullptr);return argv;};
+    {std::vector<std::string>args{"kabus22","--data","x","--preset","ultra","--graphics","msaa=2","--texture-pack","hd","--frames","3"};auto argv=argv_of(args);int argc=int(args.size());
+     auto r=graphics_cli::extract(argc,argv.data());require(argc==5&&std::string_view(argv[3])=="--frames"&&!argv[5]&&r.active&&r.preset=="ultra"&&r.packs==std::vector<std::string>{"hd"}&&!r.rendererFlag,"extract removes graphics options");}
+    {std::vector<std::string>args{"kabus22","--renderer","vulkan","--graphics","backend=opengl"};auto argv=argv_of(args);int argc=int(args.size());rejects([&]{graphics_cli::extract(argc,argv.data());},"--renderer with --graphics backend accepted");}
+    {std::vector<std::string>args{"kabus22","--texture-pack","../x"};auto argv=argv_of(args);int argc=int(args.size());rejects([&]{graphics_cli::extract(argc,argv.data());},"pack path accepted as name");}
+    TempDirectory xdg;const char*previous=std::getenv("XDG_DATA_HOME");std::string saved=previous?previous:"";::setenv("XDG_DATA_HOME",xdg.path.c_str(),1);
+    {RenderOptions defaults,options;graphics_cli::Request r;graphics_cli::apply(options,r);
+     require(options.backend==defaults.backend&&options.rayTracing==defaults.rayTracing&&options.samples==defaults.samples&&options.anisotropy==defaults.anisotropy&&!options.pbr&&!options.forceAnisotropy&&!options.packs,"no graphics flags keeps RenderOptions exactly");}
+    {RenderOptions options;graphics_cli::Request r;r.active=true;r.preset="ultra";graphics_cli::apply(options,r);
+     require(options.backend==RendererBackend::Vulkan&&options.rayTracing&&options.pbr&&options.forceAnisotropy&&options.anisotropy==16&&options.samples==4&&r.presetBackend&&!options.packs,"ultra applies backend/PBR and auto-disables absent packs");}
+    {RenderOptions options;graphics_cli::Request r;r.active=true;r.preset="ultra";r.rendererFlag=true;graphics_cli::apply(options,r);
+     require(options.backend==RendererBackend::OpenGL&&!r.presetBackend&&options.pbr,"explicit --renderer overrides preset backend");}
+    {RenderOptions options;graphics_cli::Request r;r.active=true;r.packs={"missing"};rejects([&]{graphics_cli::apply(options,r);},"missing named pack accepted");}
+    {RenderOptions options;graphics_cli::Request r;r.active=true;r.packs={"x"};r.overrides={{"texture_packs","0"}};rejects([&]{graphics_cli::apply(options,r);},"--texture-pack with texture_packs=0 accepted");}
+    if(previous)::setenv("XDG_DATA_HOME",saved.c_str(),1);else ::unsetenv("XDG_DATA_HOME");
+    // Tangents follow +U; UV-degenerate triangles keep zero (no invented basis).
+    Model quad;quad.vertices={{{0,0,0},{0,0,1},{0,0},{}},{{2,0,0},{0,0,1},{1,0},{}},{{2,2,0},{0,0,1},{1,1},{}},{{0,2,0},{0,0,1},{0,1},{}}};quad.triangles={{{0,1,2},0,0},{{0,2,3},0,0}};
+    std::vector<Vec3>tangents(4);derive_tangents(quad,{},{},tangents);
+    for(auto t:tangents)require(std::abs(t.x-1)<1e-6f&&std::abs(t.y)<1e-6f&&std::abs(t.z)<1e-6f,"tangent follows +U");
+    Model flat=quad;for(auto&v:flat.vertices)v.uv={0.5f,0.5f};derive_tangents(flat,{},{},tangents);
+    for(auto t:tangents)require(t.x==0&&t.y==0&&t.z==0,"UV-degenerate tangent stays zero");
+    // Tone curve: identity through the knee (dark scenes unchanged), strictly monotonic, bounded, exact 8-bit inverse.
+    float last=-1;for(int i=0;i<=4000;++i){float x=i/1000.f,y=tone_map(x);require(y>last&&y<1,"tone map monotonic and bounded");last=y;}
+    for(int v=0;v<=202;++v)require(std::abs(tone_map(v/255.f)-v/255.f)<1e-6f,"tone map preserves values below the knee");
+    require(tone_map(1)<1&&tone_map(1)>0.85f&&tone_map(100)<1,"tone map compresses highlights");
+    for(int v=0;v<=255;++v)require(std::lround(tone_map(inverse_tone_map(v/255.f))*255)==v,"inverse tone map round-trips 8-bit seeds");
+    require(legacy_roughness(0)==0.8f&&legacy_roughness(1)>legacy_roughness(16)&&legacy_roughness(16)>legacy_roughness(256)&&legacy_roughness(256)>=0.05f,"legacy roughness from specular power");
+}
 int main(int argc,char** argv) {
-    if(argc!=2&&argc!=3)throw std::runtime_error("Usage: k22-render-check <recovered FX directory> [--gl|--vulkan|--vulkan-rt]");
+    if(argc==2&&std::string_view(argv[1])=="--policy"){graphics_policy_checks();std::cout<<"Graphics preset/pack/tangent/tone-map policy checks passed\n";return 0;}
+    if(argc!=2&&argc!=3)throw std::runtime_error("Usage: k22-render-check <recovered FX directory> [--gl|--vulkan|--vulkan-rt] | --policy");
     const auto mode=argc==3?std::string_view(argv[2]):std::string_view{};
     if(!mode.empty()&&mode!="--gl"&&mode!="--vulkan"&&mode!="--vulkan-rt")
         throw std::runtime_error("Unknown render check option: "+std::string(mode));
@@ -1535,11 +1891,12 @@ int main(int argc,char** argv) {
     std::cout<<"Renderer material/effect boundary checks passed\n";
     if(argc==3) {
         if(mode=="--vulkan-rt"){
-            rt_checks();rt_reflection_checks();
+            gl_checks(bytes(mix),bytes(sunMix),k22::RendererBackend::Vulkan,true);
+            rt_checks();rt_reflection_checks(bytes(mix),bytes(sunMix));overlay_key_checks(k22::RendererBackend::Vulkan,true);
             std::cout<<"Actual Vulkan hardware ray-query visibility/animation/alpha/reflection/turbulence consumer checks passed\n";
         }else{
             const auto backend=mode=="--vulkan"?k22::RendererBackend::Vulkan:k22::RendererBackend::OpenGL;
-            gl_checks(bytes(mix),bytes(sunMix),backend);turbulence_checks(backend);
+            gl_checks(bytes(mix),bytes(sunMix),backend);turbulence_checks(backend);overlay_key_checks(backend,false);
             std::cout<<"Actual "<<(mode=="--vulkan"?"Vulkan raster":"GL")<<" material/effect/opacity/particle/turbulence consumer checks passed\n";
         }
     }

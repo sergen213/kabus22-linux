@@ -1,0 +1,36 @@
+# New Game/Normal through the original intro into the first controllable level (Start4, Demir).
+# YeniMenu.wdl YeniOyunBaslat(0) -> LY_HedefLevel=1 -> LevelYonetim.wdl LevelYukle (intro movie video_ismi_str16, Esc skips).
+realtime off
+wait until ParlaklikMenuAcik == 1 || AMP_YeniOyun.visible == 1 timeout 3600
+press-until Return ParlaklikMenuAcik == 0
+wait until AMP_YeniOyun.visible == 1 && AM_Cursor == 0 timeout 600
+press-until Return YM_Cursor == 0 && YMP_Normal.visible == 1 timeout 120
+assert OyunZorluk == 0
+# Intro panels/voice and the level-entry movie play in real time.
+realtime on
+press Return
+frames 900
+capture intro
+# The intro panel/voice sequence runs ~3 minutes; Escape is the original skip (YeniMenu.wdl key_esc -> loc_iptal).
+press Escape
+wait until oyun_ilk_basladi == 1 timeout 1800
+wait until LY_HedefLevel == 1 || LY_AktifLevelID == 1 timeout 3600
+wait until $level == "start4.wmb" timeout 7200
+frames 120
+capture start4_movie
+press Escape
+wait until LY_AktifLevelID == 1 && level_yuklendi_ok == 1 && player != 0 timeout 3600
+realtime off
+wait until oyuncu_pasif == 0 timeout 3600
+frames 60
+capture start4_control
+assert Aktif_Player == 0
+assert oyn_yaralanma == 100
+assert player.skill1 == 100
+assert Aktif_Silah == 1
+assert S_Kursun_Sayisi[1] == 14
+# Demir is controllable: walk east along the fence (corpse boxes block the direct southward path).
+store x0 player.x
+walk-to -1340 618 12 timeout 600
+assert player.x != @x0
+capture start4_walked

@@ -1,0 +1,64 @@
+# requires: saves
+# Inzar (Koruyucu), Tnel24 "Gaile Yolu" (slot 16 = kayit15.sav): sword attack (Key_SilahKaldir, koruyucu.wdl:3434), spell choice through
+# the original KoruyucuMenu (M opens via EM_Kernel/KoruyucuAcKapat, Left/Right move KOM_Cursor, Return twice sets buyu_no=KOM_Cursor+1,
+# KoruyucuMenu.wdl:149) and casting with Q (Key_Buyu, koruyucu.wdl:2819). Mana falls by buyu_gereksinimi[buyu_no] (koruyucu.wdl:557).
+realtime off
+load-save 15
+wait until LY_AktifLevelID == 39 && level_yuklendi_ok == 1 && player != 0 timeout 7200
+assert Aktif_Player == 2
+wait until koruyucu_pasif == 0 && EnvaterAcilabilirmi == 1 timeout 1200
+frames 60
+assert koruyucu_mana == 230
+# Sword: S starts the first slash; skill41 drives the attack frames.
+press S 4
+wait until player.skill41 > 40 timeout 120
+capture inzar_sword
+frames 120
+# Spell 4 (aduket, cost 23): menu opens on the current spell, Right twice from buyu_no 2.
+store b0 buyu_no
+press M
+wait until KOM_Acik == 1 timeout 120
+assert KOM_Cursor == @b0 - 1
+press-until Right KOM_Cursor == 3 timeout 300
+press-until Return KOM_Cursor1 == 0 timeout 120
+press-until Return KOM_Acik == 0 timeout 120
+assert buyu_no == 4
+store m0 koruyucu_mana
+press Q 4
+wait until koruyucu_mana < @m0 timeout 300
+assert koruyucu_mana == @m0 - buyu_gereksinimi[4]
+frames 20
+capture inzar_spell4_aduket
+frames 150
+# Spell 6 (suzme, cost 57.5).
+press M
+wait until KOM_Acik == 1 timeout 120
+assert KOM_Cursor == 3
+press-until Right KOM_Cursor == 5 timeout 300
+press-until Return KOM_Cursor1 == 0 timeout 120
+press-until Return KOM_Acik == 0 timeout 120
+assert buyu_no == 6
+store m1 koruyucu_mana
+press Q 4
+wait until koruyucu_mana < @m1 timeout 300
+assert koruyucu_mana == @m1 - buyu_gereksinimi[6]
+frames 25
+capture inzar_spell6_suzme
+frames 150
+# Spell 2 (matrix, cost 29.9), selected leftwards.
+press M
+wait until KOM_Acik == 1 timeout 120
+press-until Left KOM_Cursor == 1 timeout 300
+press-until Return KOM_Cursor1 == 0 timeout 120
+press-until Return KOM_Acik == 0 timeout 120
+assert buyu_no == 2
+store m2 koruyucu_mana
+press Q 4
+wait until koruyucu_mana < @m2 timeout 300
+assert koruyucu_mana == @m2 - buyu_gereksinimi[2]
+assert $count(buyuparca_fx) > 0
+frames 10
+capture inzar_spell2_matrix
+frames 300
+assert player != 0
+assert koru_yaralanma > 0

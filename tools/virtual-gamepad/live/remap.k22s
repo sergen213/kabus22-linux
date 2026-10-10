@@ -1,0 +1,25 @@
+# requires: saves, live pad (run-live.sh ... remap remap.ini: righttrigger=0, x=2)
+# Demir at Cami (kayit1.sav, Aktif_Silah 3). Left trigger aims; the old fire button (right trigger) no longer fires, X does.
+# A short walk first: right after this load, holding aim (keyboard S too, headless) did not complete the raise in 600 frames.
+pad live
+load-save 1
+wait until LY_AktifLevelID == 7 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 && oyun_ilk_basladi == 0 && EnvaterAcilabilirmi == 1 timeout 7200
+frames 60
+store pad_walk player.x
+frames 40
+store pad_walk_stop player.x
+frames 90
+store pad_aim Aktif_Silah
+wait until JOY_1 == 1 && silah_kaldir == 1 && player.skill32 >= 100 timeout 600
+store pad_old_fire S_Kursun_Sayisi[3]
+frames 10
+assert JOY_2 == 0 && Key_Ates == 0
+frames 80
+assert S_Kursun_Sayisi[3] == @pad_old_fire
+store pad_new_fire S_Kursun_Sayisi[3]
+frames 10
+assert JOY_2 == 1 && JOY_9 == 0
+wait until S_Kursun_Sayisi[3] < @pad_new_fire timeout 300
+capture remap-x-fired
+store pad_done S_Kursun_Sayisi[3]
+frames 30

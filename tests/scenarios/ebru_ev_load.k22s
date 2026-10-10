@@ -1,0 +1,13 @@
+# requires: saves
+# Ebru, Ev (slot 07 = kayit6.sav). Regression: oyuncu2_ebru.wdl:70 vec_for_vertex(…,ebru_silah.mdl,169) on a 6-vertex model (A6 clamps, 00449dc0).
+realtime off
+load-save 6
+wait until LY_AktifLevelID == 27 && level_yuklendi_ok == 1 && player != 0 timeout 7200
+assert $level == "ev.wmb"
+assert Aktif_Player == 1
+assert Aktif_Silah == 8
+assert $count(Oyuncu_Ebru) == 1
+assert $count(Silah_Ekle2) == 1
+frames 300
+assert player != 0
+capture ebru_ev

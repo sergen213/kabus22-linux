@@ -398,7 +398,8 @@ struct Runtime::Impl {
   try{while(p.pc<f.code.size()&&!p.yielded&&!p.cancelled){auto& i=f.code[p.pc++];switch(i.kind){
    case Instruction::Eval:p.result=evaluate(*i.expr,&p).current();break;
    case Instruction::Jump:p.pc=i.target;break;
-   case Instruction::Branch:if(!evaluate(*i.expr,&p).current())p.pc=i.target;break;
+   // A6 interpreter 00410a80 case5 stores the condition into accumulator 006445b4 before jumping; falling off the end returns it (:845).
+   case Instruction::Branch:p.result=evaluate(*i.expr,&p).current();if(!p.result)p.pc=i.target;break;
    case Instruction::Return:if(i.expr)p.result=evaluate(*i.expr,&p).current();p.pc=f.code.size();break;
    case Instruction::Late:f.schedulerFlags|=2;break;
    case Instruction::Declare:{auto& slot=p.locals[i.name];auto value=i.expr&&i.expr->kind!=Expr::List?evaluate(*i.expr,&p).current():Value{};auto* object=slot.value.kind==Value::Kind::Object?state.get(slot.value.bits):nullptr;if(!object||!localLeases.contains(object->id)||std::find(p.ownedLocals.begin(),p.ownedLocals.end(),object->id)==p.ownedLocals.end())object=&local_storage(p,i.name,i.size?i.size:3);auto& o=*object;slot.value=Value::object(o.id);for(auto& s:o.array)s.value={};if(i.expr&&i.expr->kind==Expr::List){if(i.expr->args.size()>o.array.size())fail(i.loc,"too many local array initializers");for(std::size_t n=0;n<i.expr->args.size();++n)o.array[n].value=evaluate(*i.expr->args[n],&p).current();}else if(!o.array.empty())o.array[0].value=value;break;}
@@ -463,5 +464,6 @@ bool Runtime::external_import(std::string_view name)const{auto it=impl_->names.f
 const std::vector<std::string>& Runtime::diagnostics()const{return impl_->diagnostics;}
 const ParseMetrics& Runtime::metrics()const{return impl_->metrics;}
 std::size_t Runtime::processes()const{return std::count_if(impl_->queued.begin(),impl_->queued.end(),[](auto& p){return !p->cancelled;});}
+bool Runtime::running(FunctionId id)const{return id&&std::any_of(impl_->queued.begin(),impl_->queued.end(),[id](auto& p){return !p->cancelled&&p->function==id;});}
 const Runtime::CompilerSettings& Runtime::compiler_settings()const{return impl_->compilerSettings;}
 }

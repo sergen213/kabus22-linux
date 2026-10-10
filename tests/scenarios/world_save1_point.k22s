@@ -1,0 +1,42 @@
+# requires: saves
+# Walked save at an original save point (YukleMenu.wdl:362 save_tga), Demir, Kız Kulesi Kafe (kizic2, level 37), from original kayit10.sav.
+# A loaded level's own save_tga stays inert (loc_saveok=oyun_ilk_basladi, YukleMenu.wdl:367), so leave through the door to Kizic (36),
+# come back, and walk onto the save icon. LV_LevelKaydeta writes kayit<Aktif_SaveNo>.sav (27 in the imported set) and kysd.sav.
+# Continued by world_save2_reload, world_save3_exit and world_save4_restart in the same private installation.
+realtime off
+load-save 10
+wait until LY_AktifLevelID == 37 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+assert $level == "kizic2.wmb"
+assert Aktif_SaveNo == 27
+assert Aktif_Player == 0
+store hp oyn_yaralanma
+store weapon Aktif_Silah
+print oyn_yaralanma
+print Aktif_Silah
+print S_Kursun_Sayisi[1]
+wait until oyun_ilk_basladi == 0 timeout 600
+# kizic2 -> Kizic: LY_Kapi (-477,-51) skill1 36; the scan (oyuncu2.wdl:556 PL_KapiTara) reaches 50 quants in front.
+# Around the polygon tables/chairs (M1.mdl, san11de.mdl) north of the direct line.
+walk-to -260 25 12 timeout 900
+walk-to -420 25 12 timeout 1200
+walk-to -455 -48 12 timeout 1200
+turn-to -500 -48 6
+press-until D LY_AktifLevelID == 36 timeout 600
+wait until $level == "kizic.wmb" && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
+capture kizic_arrival
+# Kizic -> kizic2: LY_Kapi (-42,-378,-195) skill1 37, 49 quants east of the LV_Kizic_G37 arrival: turn and use it in place.
+turn-to -20 -378 4
+press-until D LY_AktifLevelID == 37 timeout 600
+wait until $level == "kizic2.wmb" && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
+assert oyun_ilk_basladi == 0
+store saves aktif_kayit_sayisi
+# The save icon (k22_save.tga) sits at the LV_Kizic2_G00 spot; save_tga fires within 60 quants.
+walk-to -420 25 12 timeout 1200
+walk-to -260 25 12 timeout 1200
+walk-to -204 -12 12 timeout 900
+wait until Aktif_SaveNo == 28 timeout 600
+assert aktif_kayit_sayisi == @saves + 1
+assert LY_AktifLevelID == 37
+assert oyn_yaralanma == @hp
+capture saved
+frames 240

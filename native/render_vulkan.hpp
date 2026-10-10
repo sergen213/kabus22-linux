@@ -19,6 +19,7 @@ public:
     void purge_model(const Model*);
     void purge_image(const Image*);
     int shader_version() const;
+    std::string description() const;
     PresentationState presentation_state() const;
 private:
     std::unique_ptr<State> state_;
@@ -37,11 +38,18 @@ struct RayMaterial {
     Color effectAmbient{};
     std::array<float,4> skillMain{},skillExtra{};
     Vec3 effectSunDirection{},effectCameraPosition{};
+    std::array<float,4> preparedAmbient{},preparedDiffuse{},preparedSpecular{},preparedEmissive{},ambientLight{};
+    Vec3 infiniteViewer{};
+    std::uint32_t lightCount{};
+    std::int32_t selectedLight{-1};
     VkImageView normalTexture{}; VkSampler normalSampler{};
     std::array<float,4> normalUvTransform{1,1,0,0};
+    // Ray-traced GI hit lighting only (zero/absent otherwise): baked lightmap and native ambient terms.
+    VkImageView lightmap{}; VkSampler lightmapSampler{}; float surfaceAmbient{},materialAmbient{};
 };
 // Ray flags: overlay=1, flare=2, invertFlare=4, textureAlpha=8,
-// doubleSided=16, clockwise=32, effect=64, effectSun=128, alphaTest=256, additive=512, blend=1024.
+// doubleSided=16, clockwise=32, effect=64, effectSun=128, alphaTest=256, additive=512, blend=1024,
+// explicitMaterial=2048, unlit=4096, hasLightmap=8192 (GI hit lighting; lightState.z = lightmap texture).
 struct Pose { Buffer vertices; std::uint32_t count{}; };
 struct RayGeometry { const DrawInstance* draw{}; Pose* pose{}; Buffer* indices{}; std::span<const RayMaterial> materials; std::array<float,16> transform{}; std::array<float,4> clipPlane{}; };
 struct Raster;
@@ -59,7 +67,7 @@ struct VulkanBackend::State {
     VkExtent2D extent{}; std::vector<VkImage> swapImages; std::vector<VkImageLayout> swapLayouts;
     std::vector<VkSemaphore> swapRendered;
     VkFormat depthFormat{VK_FORMAT_D24_UNORM_S8_UINT}; VkSampleCountFlagBits samples{VK_SAMPLE_COUNT_1_BIT};
-    vk22::Target scene,alpha,portal; vk22::Image finalImage;
+    vk22::Target scene,alpha,portal,hdr; vk22::Image finalImage; // hdr: PBR background views (RGBA16F, scene samples).
     bool retainedColorValid{},portalColorValid{},finalValid{};
     struct Slot { VkCommandPool pool{}; VkCommandBuffer command{}; VkFence fence{}; VkSemaphore acquired{},rendered{}; bool pending{}; std::vector<vk22::Buffer> garbageBuffers; std::vector<vk22::Image> garbageImages; };
     std::array<Slot,2> slots{}; unsigned slotIndex{},front{},pending{},limit{1}; std::uint64_t submissions{},waits{};
@@ -70,7 +78,7 @@ struct VulkanBackend::State {
     State(SDL_Window*,const RenderOptions&); ~State();
     vk22::Buffer buffer(VkDeviceSize,VkBufferUsageFlags,bool mapped=false,const void* initial=nullptr);
     void destroy(vk22::Buffer&); void destroy(vk22::Image&); void retire(vk22::Buffer&); void retire(vk22::Image&);
-    vk22::Image image(std::uint32_t,std::uint32_t,VkFormat,VkImageUsageFlags,std::uint32_t levels=1,std::uint32_t layers=1,VkSampleCountFlagBits=VK_SAMPLE_COUNT_1_BIT);
+    vk22::Image image(std::uint32_t,std::uint32_t,VkFormat,VkImageUsageFlags,std::uint32_t levels=1,std::uint32_t layers=1,VkSampleCountFlagBits=VK_SAMPLE_COUNT_1_BIT,bool cube=false);
     void transition(vk22::Image&,VkImageLayout,VkPipelineStageFlags=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VkAccessFlags=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT);
     void upload(vk22::Image&,std::span<const std::byte>,std::span<const VkBufferImageCopy>,bool mipmaps=false);
     VkSampler sampler(bool linear,bool clamp,double mipmapping=0,float anisotropy=1);

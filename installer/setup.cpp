@@ -1,5 +1,6 @@
 #include "setup.hpp"
 #include "media.hpp"
+#include "layout.hpp"
 #include "../native/pe_font.hpp"
 #include <glib.h>
 extern "C" {
@@ -30,6 +31,7 @@ extern "C" {
 #include <unistd.h>
 #include <vector>
 #include <utility>
+#include <nlohmann/json.hpp>
 
 namespace k22::setup {
 namespace {
@@ -232,12 +234,13 @@ std::string execArgument(const std::string& text) {
 std::string desktopEntry(const Result& result) {
     // env avoids GIO treating %% in argv[0] as an unexpanded executable path.
     const auto command = "/usr/bin/env -- " + execArgument(result.executable.string()) +
-        " --data " + execArgument(result.dataRoot.string());
-    return "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Kabus22\nComment=Play Kabus22 natively\nExec=" + command +
-        "\nIcon=" + desktopValue((result.root/"kabus22.png").string()) + "\nPath=" + desktopValue(result.dataRoot.string()) +
-        "\nTerminal=false\nCategories=Game;\nActions=VulkanRayTracing;VulkanRaster;\nX-Kabus22-Native=true\nX-Kabus22-InstallRoot=" + desktopValue(result.root.string()) +
-        "\n\n[Desktop Action VulkanRayTracing]\nName=Vulkan (ray tracing)\nExec=" + command + " --renderer vulkan" +
-        "\n\n[Desktop Action VulkanRaster]\nName=Vulkan (raster only)\nExec=" + command + " --renderer vulkan --ray-tracing off\n";
+        " --install-dir " + execArgument(result.root.string());
+    return "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Kabus22\nComment=Configure and play Kabus22 natively\nExec=" + command +
+        "\nIcon=" + desktopValue((result.root/"kabus22.png").string()) + "\nPath=" + desktopValue(result.root.string()) +
+        "\nTerminal=false\nCategories=Game;\nActions=OpenGL;VulkanRaster;VulkanRayTracing;\nX-Kabus22-Native=true\nX-Kabus22-InstallRoot=" + desktopValue(result.root.string()) +
+        "\n\n[Desktop Action OpenGL]\nName=Settings — OpenGL\nExec=" + command + " --renderer opengl" +
+        "\n\n[Desktop Action VulkanRaster]\nName=Settings — Vulkan raster\nExec=" + command + " --renderer vulkan-raster" +
+        "\n\n[Desktop Action VulkanRayTracing]\nName=Settings — Vulkan hardware ray tracing\nExec=" + command + " --renderer vulkan-rt\n";
 }
 std::string json(const std::string& text) {
     std::string out = "\"";
@@ -266,8 +269,13 @@ void renameNew(const fs::path& from, const fs::path& to) {
 std::vector<Identity> tree(const fs::path& root) {
     std::vector<Identity> result{{root, lstatPath(root)}};
     for (const auto& entry : fs::recursive_directory_iterator(root)) {
-        const auto value = lstatPath(entry.path());
-        require(S_ISDIR(value.st_mode) || (S_ISREG(value.st_mode) && value.st_nlink == 1), "Unexpected link or special file in staging: " + entry.path().string());
+        struct stat value{};
+        require(::lstat(entry.path().c_str(), &value) == 0, "Cannot inspect staged entry: " + entry.path().string());
+        const auto relative = entry.path().lexically_relative(root);
+        // Only the versioned layout's own top-level links (current, bin, lib, share) are owned links.
+        const bool layoutLink = S_ISLNK(value.st_mode) && relative.parent_path().empty() &&
+            (relative == "current" || relative == "bin" || relative == "lib" || relative == "share");
+        require(layoutLink || S_ISDIR(value.st_mode) || (S_ISREG(value.st_mode) && value.st_nlink == 1), "Unexpected link or special file in staging: " + entry.path().string());
         cleanText(entry.path().string()); result.push_back({entry.path(), value});
     }
     return result;
@@ -320,39 +328,79 @@ void enough(const fs::path& where, std::uint64_t needed) {
     require(fs::space(where).available >= needed, "Insufficient free space at " + where.string() + ": need " + std::to_string(needed) + " bytes");
 }
 struct Payload { fs::path source, relative; std::uint64_t bytes; };
-std::vector<Payload> payload(const fs::path& executable) {
-    nativeElf(executable, true);
-    std::vector<Payload> result{{executable, "bin/kabus22", fs::file_size(executable)}};
-    const auto libraries = executable.parent_path().parent_path()/"lib";
-    if (!fs::exists(libraries)) return result; // Developer engine may use audited host dependencies.
-    require(S_ISDIR(lstatPath(libraries).st_mode), "Payload lib path is not a directory");
+std::vector<Payload> payload(const fs::path& engine, const fs::path& launcher, const fs::path& updater) {
+    nativeElf(engine, true);
+    nativeElf(launcher, true);
+    nativeElf(updater, true);
+    require(fs::canonical(engine) != fs::canonical(launcher) && fs::canonical(engine) != fs::canonical(updater) &&
+        fs::canonical(launcher) != fs::canonical(updater), "Engine, settings launcher and updater must be separate executables");
+    std::vector<Payload> result;
+    std::uint64_t total = 0;
+    const auto add = [&](const fs::path& source, const fs::path& relative) {
+        const auto bytes = fs::file_size(source);
+        const auto found = std::find_if(result.begin(), result.end(),
+            [&](const auto& file) { return file.relative == relative; });
+        if (found != result.end()) {
+            require(found->bytes == bytes && (found->source == source || sha256(found->source, {}) == sha256(source, {})),
+                "Conflicting native payload member: " + relative.string());
+            return;
+        }
+        total = addBytes(total, bytes);
+        require(total <= maxPayload && result.size() < 10000, "Native payload exceeds bounds");
+        result.push_back({source, relative, bytes});
+    };
+    add(engine, "bin/kabus22");
+    add(launcher, "bin/kabus22-launcher");
+    add(updater, "bin/kabus22-updater");
     static const std::regex library(R"(lib[A-Za-z0-9_+.-]+\.so(?:\.[0-9]+)*)");
     static const std::regex host(R"((?:ld-linux[^.]*|lib(?:c|m|dl|pthread|rt|resolv|util|anl|nss_[^.]+|GL|GLX|GLdispatch|OpenGL|EGL|GLESv[12]|vulkan|drm(?:_[^.]+)?|gbm|cuda|nvidia[^.]*|vdpau|va(?:-x11|-drm|-wayland)?))\.so(?:\.[0-9]+)*)");
-    std::uint64_t total = result.front().bytes;
-    for (const auto& entry : fs::directory_iterator(libraries)) {
-        const auto name = entry.path().filename().string();
-        if (!std::regex_match(name, library)) continue;
-        require(!std::regex_match(name, host), "Do not bundle host OS/GPU libraries: " + name);
-        const auto resolved = fs::canonical(entry.path());
-        require(within(fs::canonical(libraries), resolved), "Library link leaves trusted payload: " + name);
-        nativeElf(resolved, false);
-        const auto bytes = fs::file_size(resolved); total = addBytes(total, bytes);
-        require(total <= maxPayload && result.size() < 1024, "Native dependency payload exceeds bounds");
-        result.push_back({resolved, fs::path("lib")/name, bytes});
-    }
-    const auto notices = executable.parent_path().parent_path()/"share/licenses/kabus22/dependencies";
-    if (result.size() > 1) {
-        require(fs::exists(notices) && S_ISDIR(lstatPath(notices).st_mode), "Bundled native libraries require their dependency license notices");
-        for (const auto& entry : fs::recursive_directory_iterator(notices)) {
-            const auto value = lstatPath(entry.path());
-            require(S_ISDIR(value.st_mode) || (S_ISREG(value.st_mode) && value.st_nlink == 1), "Invalid dependency notice member");
-            if (S_ISDIR(value.st_mode)) continue;
-            const auto relative = entry.path().lexically_relative(notices);
-            cleanText(relative.string());
-            require(value.st_size >= 0 && value.st_size <= 64 * 1024 * 1024, "Oversized dependency notice");
-            total = addBytes(total, value.st_size);
-            require(total <= maxPayload && result.size() < 10000, "Dependency notices exceed payload bounds");
-            result.push_back({entry.path(), fs::path("share/licenses/kabus22/dependencies")/relative, static_cast<std::uint64_t>(value.st_size)});
+    std::vector<fs::path> roots;
+    for (const auto& executable : {engine, launcher, updater}) {
+        const auto root = executable.parent_path().parent_path();
+        if (std::find(roots.begin(), roots.end(), root) != roots.end()) continue;
+        roots.push_back(root);
+        const auto libraries = root/"lib";
+        if (!fs::exists(libraries)) continue; // Developer executables may use audited host dependencies.
+        require(S_ISDIR(lstatPath(libraries).st_mode), "Payload lib path is not a directory");
+        bool bundled = false, gtk = false;
+        std::size_t count = 0;
+        for (const auto& entry : fs::directory_iterator(libraries)) {
+            const auto name = entry.path().filename().string();
+            if (!std::regex_match(name, library)) continue;
+            require(!std::regex_match(name, host), "Do not bundle host OS/GPU libraries: " + name);
+            const auto resolved = fs::canonical(entry.path());
+            require(within(fs::canonical(libraries), resolved), "Library link leaves trusted payload: " + name);
+            nativeElf(resolved, false);
+            require(++count < 1024, "Native dependency payload exceeds bounds");
+            add(resolved, fs::path("lib")/name);
+            bundled = true;
+            gtk = gtk || name == "libgtk-3.so.0";
+        }
+        const auto notices = root/"share/licenses/kabus22/dependencies";
+        if (bundled) {
+            require(fs::exists(notices) && S_ISDIR(lstatPath(notices).st_mode), "Bundled native libraries require their dependency license notices");
+            for (const auto& entry : fs::recursive_directory_iterator(notices)) {
+                const auto value = lstatPath(entry.path());
+                require(S_ISDIR(value.st_mode) || (S_ISREG(value.st_mode) && value.st_nlink == 1), "Invalid dependency notice member");
+                if (S_ISDIR(value.st_mode)) continue;
+                const auto relative = entry.path().lexically_relative(notices);
+                cleanText(relative.string());
+                require(value.st_size >= 0 && value.st_size <= 64 * 1024 * 1024, "Oversized dependency notice");
+                add(entry.path(), fs::path("share/licenses/kabus22/dependencies")/relative);
+            }
+        }
+        const auto schemas = root/"share/glib-2.0/schemas";
+        require(!gtk || fs::exists(schemas), "Bundled GTK requires its settings schemas");
+        if (fs::exists(schemas)) {
+            require(S_ISDIR(lstatPath(schemas).st_mode), "Payload schema path is not a directory");
+            for (const auto* name : {"gschemas.compiled", "org.gtk.Settings.ColorChooser.gschema.xml",
+                    "org.gtk.Settings.Debug.gschema.xml", "org.gtk.Settings.EmojiChooser.gschema.xml",
+                    "org.gtk.Settings.FileChooser.gschema.xml"}) {
+                const auto value = lstatPath(schemas/name);
+                require(S_ISREG(value.st_mode) && value.st_nlink == 1 && value.st_size > 0 &&
+                    value.st_size <= 4 * 1024 * 1024, "Missing or invalid GTK settings schema");
+                add(schemas/name, fs::path("share/glib-2.0/schemas")/name);
+            }
         }
     }
     return result;
@@ -363,6 +411,21 @@ std::string foldPath(std::string_view value) {
     std::unique_ptr<gchar, decltype(&g_free)> normalized(g_utf8_normalize(folded.get(), -1, G_NORMALIZE_ALL_COMPOSE), g_free);
     require(normalized != nullptr, "Cannot normalize patch path");
     return normalized.get();
+}
+bool dataAsset(const std::string& ext) {
+    static const std::set<std::string> known{".wdl", ".wrs", ".ini", ".wmb", ".mdl", ".pcx", ".bmp", ".tga", ".jpg", ".jpeg", ".png",
+        ".dds", ".ogg", ".wav", ".mp3", ".avi", ".txt", ".fx", ".dat", ".k22", ".ttf"};
+    return known.contains(ext);
+}
+// Installed Windows folders mix original data with user state and Windows-only components.
+// Imports the ISO install's file set (media::selected) plus Kabus22Patch data; skips
+// executables/DLLs, saves, uninstaller logs, ReShade/DXVK files and runtime-written state.
+bool windowsAsset(const fs::path& relative) {
+    const auto name = lower(relative.generic_string());
+    if (name.starts_with("_data/")) return dataAsset(lower(relative.extension().string()));
+    if (name == "k22.ini") return true;
+    if (name == "ftz.k22" || name == "rms.k22" || name == "rmo.k22" || name.starts_with("unins")) return false;
+    try { return media::selected({fs::path("app")/relative, 0, {}}); } catch (const std::runtime_error&) { return false; }
 }
 struct PatchFile {
     fs::path relative;
@@ -376,6 +439,8 @@ struct PatchSnapshot {
     std::vector<PatchFile> files;
     std::optional<PatchFile> font;
     std::uint64_t bytes = 0;
+    bool windows = false;           // installed Windows game folder instead of Kabus22Patch
+    std::vector<std::string> skipped; // windows: entries deliberately not imported
 
     static Fd pinRoot(int parent, const fs::path& name) {
         struct stat named{}, pinned{};
@@ -387,9 +452,9 @@ struct PatchSnapshot {
         return Fd(std::exchange(directory.value, -1));
     }
 
-    explicit PatchSnapshot(const fs::path& input)
+    explicit PatchSnapshot(const fs::path& input, bool windowsFolder = false)
         : path(checkedAbsolute(input)), parent(directoryFd(path.parent_path())),
-          root(pinRoot(parent.value, path.filename())) {
+          root(pinRoot(parent.value, path.filename())), windows(windowsFolder) {
         struct stat pinned{};
         require(::fstat(root.value, &pinned) == 0, "Cannot inspect pinned patch root");
         directories.emplace(fs::path{}, pinned);
@@ -496,12 +561,17 @@ struct PatchSnapshot {
             require(names.insert(folded).second, "Patch has case-fold duplicate names");
             require(++count <= 200000, "Patch exceeds safe entry limit");
             struct stat value{};
-            require(::fstatat(directory, component.c_str(), &value, AT_SYMLINK_NOFOLLOW) == 0 &&
-                (S_ISDIR(value.st_mode) || (S_ISREG(value.st_mode) && value.st_nlink == 1)),
-                "Patch contains a link or special file: " + text);
+            require(::fstatat(directory, component.c_str(), &value, AT_SYMLINK_NOFOLLOW) == 0, "Cannot inspect source entry: " + text);
+            const bool isFont = windows ? lower(text) == "k22.exe" : relative == "K22.exe";
+            if (windows && ((!S_ISDIR(value.st_mode) && !isFont && !windowsAsset(relative)) ||
+                    (S_ISDIR(value.st_mode) && folded == foldPath("_data/saves")))) {
+                skipped.push_back(text); continue;
+            }
+            require(S_ISDIR(value.st_mode) || (S_ISREG(value.st_mode) && value.st_nlink == 1),
+                (windows ? "Game folder has a linked or special game file: " : "Patch contains a link or special file: ") + text);
             const bool data = *relative.begin() == "_data";
             if (S_ISDIR(value.st_mode)) {
-                require(data && depth < 64, "Patch directories are restricted to bounded _data trees");
+                require((windows || data) && depth < 64, "Patch directories are restricted to bounded _data trees");
                 Fd child(::openat(directory, component.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
                 struct stat pinned{};
                 require(::fstat(child.value, &pinned) == 0 && sameSnapshot(value, pinned),
@@ -513,15 +583,24 @@ struct PatchSnapshot {
                 continue;
             }
             require(value.st_size >= 0, "Invalid patch size");
-            total = addBytes(total, static_cast<std::uint64_t>(value.st_size));
-            require(total <= maxPayload, "Patch exceeds safe aggregate size limit");
-            if (relative == "K22.exe") {
+            if (!windows) {
+                total = addBytes(total, static_cast<std::uint64_t>(value.st_size));
+                require(total <= maxPayload, "Patch exceeds safe aggregate size limit");
+            }
+            if (isFont) {
                 require(value.st_size > 0 && value.st_size <= 64 * 1024 * 1024, "Invalid patch font source");
                 font = PatchFile{relative, value};
+                if (windows) continue;
+            }
+            if (windows) {
+                bytes = addBytes(bytes, static_cast<std::uint64_t>(value.st_size));
+                require(bytes <= maxPayload, "Game folder exceeds safe aggregate size limit");
+                files.push_back({relative, value});
+                continue;
             }
             const auto ext = lower(relative.extension().string());
             const bool rootAsset = prefix.empty() && (ext == ".wrs" || ext == ".ini");
-            const bool nativeAsset = data && (ext == ".wdl" || ext == ".wrs" || ext == ".ini" || ext == ".wmb" || ext == ".mdl" || ext == ".pcx" || ext == ".bmp" || ext == ".tga" || ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".dds" || ext == ".ogg" || ext == ".wav" || ext == ".mp3" || ext == ".avi" || ext == ".txt" || ext == ".fx" || ext == ".dat" || ext == ".k22" || ext == ".ttf");
+            const bool nativeAsset = data && dataAsset(ext);
             if (prefix.empty() && !rootAsset) continue; // Validate but never install Windows components/readme.
             require(rootAsset || nativeAsset, "Patch only accepts WRS/INI and native assets inside _data: " + text);
             bytes = addBytes(bytes, static_cast<std::uint64_t>(value.st_size));
@@ -559,26 +638,8 @@ void encodeIcon(const fs::path& source, const fs::path& destination) {
     require(avcodec_open2(encoder.get(), png, nullptr) >= 0 && avcodec_send_frame(encoder.get(), rgba.get()) >= 0 && avcodec_receive_packet(encoder.get(), packet.get()) >= 0, "Cannot encode desktop icon");
     writeFile(destination, {reinterpret_cast<const char*>(packet->data), static_cast<std::size_t>(packet->size)});
 }
-void installFont(const Request& request, const media::Prepared& source,
-                 const std::vector<media::Member>& listing, const fs::path& stage,
-                 const fs::path& game, const PatchSnapshot* patch, const Progress& progress) {
-    const auto scratch = stage/"font-source";
-    mkdirPrivate(scratch);
-    fs::path pe;
-    std::string origin;
-    if (patch && patch->font) {
-        patch->copy(*patch->font, scratch/"K22.exe", progress);
-        pe = scratch/"K22.exe"; origin = "user-patch/K22.exe";
-    }
-    if (pe.empty()) {
-        std::vector<media::Member> candidates;
-        for (const auto& member : listing)
-            if (lower(member.path.generic_string()) == "app/k22.exe") candidates.push_back(member);
-        require(candidates.size() == 1, "Original media must contain one engine K22.exe for genuine font recovery");
-        media::extractFontSource(source, checkedAbsolute(request.extractor), candidates.front(), scratch, progress);
-        pe = scratch/candidates.front().path;
-        origin = candidates.front().path.generic_string();
-    }
+struct Font { std::string pcx, provenance; };
+Font recoverFont(const fs::path& pe, const std::string& origin, const Progress& progress) {
     report(progress, "Recovering original engine font");
     Fd file(::open(pe.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
     struct stat before{};
@@ -597,16 +658,37 @@ void installFont(const Request& request, const media::Prepared& source,
     require(::fstat(file.value, &after) == 0 && same(before, after, true) &&
         before.st_ctim.tv_sec == after.st_ctim.tv_sec && before.st_ctim.tv_nsec == after.st_ctim.tv_nsec,
         "Engine font source changed during recovery");
-    const auto provenance =
+    return {std::string(reinterpret_cast<const char*>(font.data()), font.size()),
         "{\"source\":" + json(origin) + ",\"source_sha256\":" + json(sourceHash) +
         ",\"pcx_bytes\":" + std::to_string(font.size()) +
         ",\"pcx_crc32\":" + std::to_string(k22::pe_font_detail::fontCrc) +
-        ",\"format\":\"A6 _a4font RGB24 PCX 192x72\"}\n";
+        ",\"format\":\"A6 _a4font RGB24 PCX 192x72\"}\n"};
+}
+// tree supplies K22.exe (patch or Windows folder, origin label prefix); otherwise original media.
+void installFont(const Request& request, const media::Prepared* source,
+                 const std::vector<media::Member>& listing, const fs::path& stage,
+                 const fs::path& game, const PatchSnapshot* tree, const std::string& label, const Progress& progress) {
+    const auto scratch = stage/"font-source";
+    mkdirPrivate(scratch);
+    fs::path pe;
+    std::string origin;
+    if (tree) {
+        tree->copy(*tree->font, scratch/"K22.exe", progress);
+        pe = scratch/"K22.exe"; origin = label + tree->font->relative.generic_string();
+    } else {
+        std::vector<media::Member> candidates;
+        for (const auto& member : listing)
+            if (lower(member.path.generic_string()) == "app/k22.exe") candidates.push_back(member);
+        require(source && candidates.size() == 1, "Original media must contain one engine K22.exe for genuine font recovery");
+        media::extractFontSource(*source, checkedAbsolute(request.extractor), candidates.front(), scratch, progress);
+        pe = scratch/candidates.front().path;
+        origin = candidates.front().path.generic_string();
+    }
+    const auto font = recoverFont(pe, origin, progress);
     const auto publishFont = [&](const fs::path& dataRoot) {
         mkdirPrivate(dataRoot/"engine");
-        writeFile(dataRoot/"engine/_a4font.pcx",
-            {reinterpret_cast<const char*>(font.data()), font.size()});
-        writeFile(dataRoot/"engine/_a4font-source.json", provenance);
+        writeFile(dataRoot/"engine/_a4font.pcx", font.pcx);
+        writeFile(dataRoot/"engine/_a4font-source.json", font.provenance);
     };
     publishFont(game);
     const auto mode = game/"Kabus 22 Mode";
@@ -617,6 +699,59 @@ void installFont(const Request& request, const media::Prepared& source,
     std::error_code error;
     fs::remove_all(scratch, error);
     require(!error, "Cannot remove private Windows font source: " + error.message());
+}
+// Edition from folded game-relative paths: base language set, Bonus mode, Kabus22Patch.
+std::string edition(const std::set<std::string>& names) {
+    std::string result = names.contains("yazi_de.k22") ? "tr-en-de" : names.contains("turkce.k22") ? "merscom" : "unknown";
+    if (names.contains("kabus 22 mode/k22_mode.wrs")) result += "+bonus";
+    if (names.contains("k22widescreen.wrs") || names.contains("kabus_dll.dll") ||
+        std::any_of(names.begin(), names.end(), [](const std::string& name) { return name.starts_with("_data"); }))
+        result += "+kabus22patch";
+    return result;
+}
+bool startsWith(const fs::path& file, std::string_view magic, off_t offset) {
+    Fd in(::open(file.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
+    std::string bytes(magic.size(), '\0');
+    return ::pread(in.value, bytes.data(), bytes.size(), offset) == static_cast<ssize_t>(bytes.size()) && bytes == magic;
+}
+// Original Inno setups ship as <stem>.exe plus <stem>-1.bin (media checks the full slice chain).
+bool setupPair(const fs::path& exe) {
+    if (lower(exe.extension().string()) != ".exe" || !startsWith(exe, "MZ", 0)) return false;
+    const auto slice = lower(exe.stem().string()) + "-1.bin";
+    for (const auto& entry : fs::directory_iterator(exe.parent_path()))
+        if (lower(entry.path().filename().string()) == slice && entry.symlink_status().type() == fs::file_type::regular) return true;
+    return false;
+}
+struct Row { std::string path; std::uint64_t size; std::string sha256; };
+std::vector<Row> inventoryRows(const fs::path& file) {
+    const auto document = nlohmann::json::parse(smallFile(file, 64 * 1024 * 1024));
+    require(document.at("format") == 1, "Unsupported inventory format: " + file.string());
+    std::vector<Row> result;
+    for (const auto& item : document.at("files")) {
+        Row row{item.at("path").get<std::string>(), item.at("size").get<std::uint64_t>(), item.at("sha256").get<std::string>()};
+        cleanText(row.path);
+        const fs::path path(row.path);
+        require(path.is_relative() && std::none_of(path.begin(), path.end(), [](const fs::path& part) {
+            return part.empty() || part == "." || part == ".."; }), "Unsafe inventory path: " + row.path);
+        result.push_back(std::move(row));
+    }
+    return result;
+}
+// Sorted regular-file rows below base; the root inventory leaves versions/ to per-version files.
+std::string rows(const fs::path& base, bool rootInventory, const Progress& progress) {
+    std::vector<std::string> paths;
+    for (const auto& item : tree(base)) {
+        const auto relative = item.path.lexically_relative(base).generic_string();
+        if (S_ISREG(item.info.st_mode) && !(rootInventory && relative.starts_with("versions/"))) paths.push_back(relative);
+    }
+    std::sort(paths.begin(), paths.end());
+    std::string out;
+    for (const auto& relative : paths) {
+        if (!out.empty()) out += ',';
+        out += "{\"path\":" + json(relative) + ",\"size\":" + std::to_string(fs::file_size(base/relative)) +
+            ",\"sha256\":" + json(sha256(base/relative, progress)) + '}';
+    }
+    return out;
 }
 } // namespace
 
@@ -632,7 +767,182 @@ Request defaultPaths() {
     result.desktopDir = checkedAbsolute(desktop ? fs::path(desktop) : fs::path(homeEnv)/"Desktop");
     return result;
 }
-fs::path previewArtwork(const fs::path& source, const fs::path& extractor, const fs::path& scratch, const Progress& progress) {
+const char* kindName(SourceKind kind) {
+    return kind == SourceKind::Iso ? "iso" : kind == SourceKind::Setup ? "setup" : "windows-directory";
+}
+Source detectSource(const fs::path& input) {
+    const auto path = checkedAbsolute(input);
+    const auto value = lstatPath(path, true);
+    require(value.st_mode, "Source does not exist: " + path.string());
+    if (S_ISREG(value.st_mode)) {
+        if (startsWith(path, "CD001", 32769)) return {SourceKind::Iso, path, {}};
+        if (setupPair(path)) return {SourceKind::Setup, path, {}};
+        throw std::runtime_error("Unrecognised source file (expected an ISO9660 image or original setup.exe with setup-1.bin): " + path.string());
+    }
+    require(S_ISDIR(value.st_mode), "Source must be a file or directory: " + path.string());
+    std::set<std::string> names;
+    std::vector<fs::path> setups;
+    for (const auto& entry : fs::directory_iterator(path)) {
+        const auto name = lower(entry.path().filename().string());
+        names.insert(name);
+        if (entry.symlink_status().type() == fs::file_type::regular && setupPair(entry.path())) setups.push_back(entry.path());
+        if (name == "kabus 22 mode" && entry.symlink_status().type() == fs::file_type::directory)
+            for (const auto& inner : fs::directory_iterator(entry.path())) names.insert(name + '/' + lower(inner.path().filename().string()));
+    }
+    if (names.contains("k22.wrs")) {
+        require(names.contains("k22.exe"), "Windows game folder lacks K22.exe, needed to recover the original engine font: " + path.string());
+        return {SourceKind::Directory, path, edition(names)};
+    }
+    require(setups.size() == 1, "Folder is neither an installed Kabus22 game (K22.wrs + K22.exe) nor original media with one setup.exe + setup-1.bin: " + path.string());
+    return {SourceKind::Setup, setups.front(), {}};
+}
+void finalizeInstallation(const fs::path& installation, const Provenance& provenance, const Progress& progress) {
+    const std::string version = K22_VERSION;
+    writeFile(installation/".kabus22-owned", marker);
+    layout::migrate_flat(installation, version);
+    const auto payloadRoot = installation/"versions"/version;
+    writeFile(payloadRoot/".kabus22-payload.json",
+        "{\"format\":1,\"version\":" + json(version) + ",\"files\":[" + rows(payloadRoot, false, progress) + "]}\n");
+    std::string shortcuts;
+    for (const auto& shortcut : provenance.shortcuts) shortcuts += (shortcuts.empty() ? "" : ",") + json(shortcut.string());
+    writeFile(installation/".kabus22-inventory.json", "{\"format\":1,\"root\":" + json(provenance.root.string()) +
+        ",\"source\":" + json(provenance.source.string()) + ",\"source_kind\":" + json(provenance.kind) +
+        ",\"edition\":" + json(provenance.edition) + ",\"version\":" + json(version) +
+        ",\"files\":[" + rows(installation, true, progress) + "],\"shortcuts\":[" + shortcuts + "]}\n");
+}
+Verification verify(const fs::path& input, const Progress& progress) {
+    const auto root = checkedAbsolute(input);
+    chain(root);
+    require(smallFile(root/".kabus22-owned") == marker, "Not a Kabus22 native installation: " + root.string());
+    const auto active = layout::active_version(root);
+    std::vector<std::pair<fs::path, Row>> work;
+    for (auto& row : inventoryRows(root/".kabus22-inventory.json")) {
+        const auto top = *fs::path(row.path).begin();
+        // Legacy flat inventories list bin/lib/share; once versioned, payload is per version.
+        if (!active.empty() && (top == "bin" || top == "lib" || top == "share" || top == "versions" || top == "current")) continue;
+        work.emplace_back(fs::path{}, std::move(row));
+    }
+    if (!active.empty()) {
+        const auto prefix = fs::path("versions")/active;
+        if (lstatPath(root/prefix/".kabus22-payload.json", true).st_mode)
+            for (auto& row : inventoryRows(root/prefix/".kabus22-payload.json")) work.emplace_back(prefix, std::move(row));
+    }
+    std::uint64_t total = 0, done = 0;
+    for (const auto& item : work) total = addBytes(total, item.second.size);
+    Verification result;
+    for (const auto& [prefix, row] : work) {
+        const auto shown = (prefix/row.path).generic_string();
+        const auto path = root/shown;
+        ++result.checked;
+        struct stat value{};
+        if (::lstat(path.c_str(), &value) != 0) {
+            require(errno == ENOENT || errno == ENOTDIR, "Cannot inspect " + shown + ": " + std::strerror(errno));
+            result.missing.push_back(shown);
+        } else if (!S_ISREG(value.st_mode) || static_cast<std::uint64_t>(value.st_size) != row.size ||
+                   sha256(path, [&](const std::string&, std::uint64_t part, std::uint64_t) {
+                       return !progress || progress("Verifying installed files", done + part, total); }) != row.sha256) {
+            result.modified.push_back(shown);
+        }
+        done += row.size;
+        report(progress, "Verifying installed files", done, total);
+    }
+    return result;
+}
+Verification repair(const fs::path& input, const fs::path& sourcePath, const fs::path& extractor, const Progress& progress) {
+    require(geteuid() != 0, "Run repair as your ordinary user, not root/sudo");
+    const auto root = checkedAbsolute(input);
+    const auto before = verify(root, progress);
+    std::map<std::string, Row> wanted; // game-relative path -> inventory row
+    {
+        std::set<std::string> broken(before.missing.begin(), before.missing.end());
+        broken.insert(before.modified.begin(), before.modified.end());
+        for (auto& row : inventoryRows(root/".kabus22-inventory.json"))
+            if (row.path.starts_with("game/") && broken.contains(row.path)) wanted.emplace(row.path.substr(5), std::move(row));
+    }
+    if (wanted.empty()) return before;
+    const auto source = detectSource(sourcePath);
+    std::map<std::string, std::string> folded; // folded game path -> exact inventory path
+    bool needFont = false;
+    for (const auto& [relative, row] : wanted) {
+        const fs::path path(relative);
+        if (path.parent_path().filename() == "engine" && (path.filename() == "_a4font.pcx" || path.filename() == "_a4font-source.json")) needFont = true;
+        else folded.emplace(foldPath(relative), relative);
+    }
+    Temporary stage(root);
+    std::map<std::string, fs::path> staged;
+    fs::path pe;
+    std::string origin;
+    if (source.kind == SourceKind::Directory) {
+        PatchSnapshot windows(source.path, true);
+        mkdirPrivate(stage.path/"files");
+        std::size_t index = 0;
+        for (const auto& file : windows.files) {
+            const auto match = folded.find(foldPath(file.relative.generic_string()));
+            if (match == folded.end()) continue;
+            const auto to = stage.path/"files"/std::to_string(index++);
+            windows.copy(file, to, progress);
+            staged.emplace(match->second, to);
+        }
+        if (needFont && windows.font) {
+            windows.copy(*windows.font, stage.path/"K22.exe", progress);
+            pe = stage.path/"K22.exe"; origin = "windows-install/" + windows.font->relative.generic_string();
+        }
+        windows.verify();
+    } else {
+        mkdirPrivate(stage.path/"source");
+        const auto prepared = media::prepare(source.kind == SourceKind::Iso ? source.path : fs::path{},
+            source.kind == SourceKind::Setup ? source.path : fs::path{}, stage.path/"source", progress);
+        const auto helper = checkedAbsolute(extractor);
+        const auto listed = media::list(prepared, helper, progress);
+        std::vector<media::Member> picked;
+        for (const auto& member : listed) {
+            const auto path = member.path.generic_string();
+            if (!path.starts_with("app/") || !media::selected(member)) continue;
+            const auto match = folded.find(foldPath(path.substr(4)));
+            if (match == folded.end()) continue;
+            picked.push_back(member);
+            staged.emplace(match->second, stage.path/"extracted"/member.path);
+        }
+        if (!picked.empty()) {
+            mkdirPrivate(stage.path/"extracted");
+            media::extract(prepared, helper, picked, stage.path/"extracted", progress);
+        }
+        if (needFont) for (const auto& member : listed) if (lower(member.path.generic_string()) == "app/k22.exe") {
+            require(pe.empty(), "Original media must contain one engine K22.exe");
+            mkdirPrivate(stage.path/"font");
+            media::extractFontSource(prepared, helper, member, stage.path/"font", progress);
+            pe = stage.path/"font"/member.path; origin = member.path.generic_string();
+        }
+    }
+    if (!pe.empty()) {
+        const auto font = recoverFont(pe, origin, progress);
+        writeFile(stage.path/"font.pcx", font.pcx);
+        writeFile(stage.path/"font.json", font.provenance);
+        for (const auto& [relative, row] : wanted)
+            if (fs::path(relative).parent_path().filename() == "engine") {
+                if (fs::path(relative).filename() == "_a4font.pcx") staged.emplace(relative, stage.path/"font.pcx");
+                else if (fs::path(relative).filename() == "_a4font-source.json") staged.emplace(relative, stage.path/"font.json");
+            }
+    }
+    Created directories;
+    std::size_t index = 0;
+    for (const auto& [relative, file] : staged) {
+        report(progress, "Restoring " + relative, index++, staged.size());
+        const auto& row = wanted.at(relative);
+        // Only bytes identical to the inventory are restored; other editions stay reported.
+        if (fs::file_size(file) != row.size || sha256(file, {}) != row.sha256) continue;
+        const auto target = root/"game"/relative;
+        chain(target.parent_path(), &directories);
+        struct stat existing{};
+        require(::lstat(target.c_str(), &existing) != 0 || !S_ISDIR(existing.st_mode), "Refusing to replace a directory: " + target.string());
+        // Shared font bytes are published as a copy so both engine/ trees can be restored.
+        const auto from = file.parent_path() == stage.path ? stage.path/("copy-" + std::to_string(index)) : file;
+        if (from != file) copyFile(file, from, 0600, {});
+        require(::rename(from.c_str(), target.c_str()) == 0, "Cannot restore " + target.string() + ": " + std::strerror(errno));
+    }
+    return verify(root, progress);
+}
+fs::path previewArtwork(const fs::path& input, const fs::path& extractor, const fs::path& scratch, const Progress& progress) {
     require(geteuid() != 0, "Run installer as your ordinary user, not root/sudo");
     const auto destination = checkedAbsolute(scratch);
     chain(destination.parent_path());
@@ -640,8 +950,17 @@ fs::path previewArtwork(const fs::path& source, const fs::path& extractor, const
     mkdirPrivate(destination);
     mkdirPrivate(destination/"source");
     mkdirPrivate(destination/"artwork");
-    const bool loose = lower(source.extension().string()) == ".exe";
-    const auto prepared = media::prepare(loose ? fs::path{} : checkedAbsolute(source), loose ? checkedAbsolute(source) : fs::path{}, destination/"source", progress);
+    const auto source = detectSource(input);
+    if (source.kind == SourceKind::Directory) {
+        PatchSnapshot windows(source.path, true);
+        for (const auto& file : windows.files) if (lower(file.relative.generic_string()) == "help/help_files/fon_logo.jpg") {
+            windows.copy(file, destination/"artwork/fon_logo.jpg", progress);
+            return destination/"artwork/fon_logo.jpg";
+        }
+        throw std::runtime_error("Original game logo is not present in the game folder");
+    }
+    const auto prepared = media::prepare(source.kind == SourceKind::Iso ? source.path : fs::path{},
+        source.kind == SourceKind::Setup ? source.path : fs::path{}, destination/"source", progress);
     const auto members = media::list(prepared, checkedAbsolute(extractor), progress);
     std::vector<media::Member> selected;
     for (const auto& member : members) if (lower(member.path.generic_string()) == "app/help/help_files/fon_logo.jpg") selected.push_back(member);
@@ -651,43 +970,78 @@ fs::path previewArtwork(const fs::path& source, const fs::path& extractor, const
 }
 Result install(const Request& request, const Progress& progress) {
     require(geteuid() != 0, "Run installer as your ordinary user, not root/sudo");
-    require(request.sourceIso.empty() != request.sourceSetup.empty(), "Choose one ISO or original loose setup.exe, not both");
+    require(int(!request.source.empty()) + int(!request.sourceIso.empty()) + int(!request.sourceSetup.empty()) == 1,
+        "Choose exactly one source: game media/folder, ISO, or original loose setup.exe");
+    const auto source = !request.source.empty() ? detectSource(request.source) :
+        Source{request.sourceIso.empty() ? SourceKind::Setup : SourceKind::Iso,
+               checkedAbsolute(request.sourceIso.empty() ? request.sourceSetup : request.sourceIso), {}};
     const auto root = checkedAbsolute(request.installRoot), applications = checkedAbsolute(request.applicationsDir), desktop = checkedAbsolute(request.desktopDir);
     require(root != root.root_path() && !within(root, applications) && !within(root, desktop), "Shortcut folders must be outside installation root");
+    require(!within(source.path, root) && !within(root, source.path), "Installation directory and source must not contain each other");
     chain(root.parent_path()); chain(applications); chain(desktop);
     require(!lstatPath(root, true).st_mode, "Destination exists; choose a new folder. Existing games are never adopted or overwritten.");
     for (const auto& folder : {applications, desktop}) {
         require(!lstatPath(folder/shortcutName, true).st_mode, "Refusing to overwrite an existing shortcut: " + (folder/shortcutName).string());
         enough(writableAncestor(folder), 65536);
     }
-    const auto files = payload(checkedAbsolute(request.enginePayload));
+    auto files = payload(checkedAbsolute(request.enginePayload), checkedAbsolute(request.launcherPayload), checkedAbsolute(request.updaterPayload));
+    // The installed launcher runs its sibling kabus22-setup (import/verify/repair) and innoextract.
+    const auto self = fs::read_symlink("/proc/self/exe");
+    if (self.filename() == "kabus22-setup") { nativeElf(self, true); files.push_back({self, "bin/kabus22-setup", fs::file_size(self)}); }
+    if (!request.extractor.empty()) {
+        const auto helper = checkedAbsolute(request.extractor);
+        if (lstatPath(helper, true).st_mode) { nativeElf(helper, true); files.push_back({helper, "bin/innoextract", fs::file_size(helper)}); }
+    }
     std::uint64_t payloadBytes = 0;
     for (const auto& file : files) payloadBytes = addBytes(payloadBytes, file.bytes);
     enough(writableAncestor(root.parent_path()), addBytes(payloadBytes, 65536));
     Created created;
     chain(root.parent_path(), &created); chain(applications, &created); chain(desktop, &created);
     Temporary stage(root.parent_path());
-    mkdirPrivate(stage.path/"source");
-    mkdirPrivate(stage.path/"extracted");
-    const auto prepared = media::prepare(request.sourceIso.empty() ? fs::path{} : checkedAbsolute(request.sourceIso), request.sourceSetup.empty() ? fs::path{} : checkedAbsolute(request.sourceSetup), stage.path/"source", progress);
-    const auto listed = media::list(prepared, checkedAbsolute(request.extractor), progress);
-    std::vector<media::Member> members;
-    std::uint64_t assetBytes = 0;
-    for (const auto& member : listed) if (media::selected(member)) { members.push_back(member); assetBytes = addBytes(assetBytes, member.size); }
-    require(!members.empty(), "Media has no native Kabus22 assets");
+    std::unique_ptr<PatchSnapshot> windows;
+    std::optional<media::Prepared> prepared;
+    std::vector<media::Member> listed, members;
+    std::uint64_t assetBytes = 0, fontSourceBytes = 0;
+    if (source.kind == SourceKind::Directory) {
+        report(progress, "Inspecting installed Windows game folder");
+        windows = std::make_unique<PatchSnapshot>(source.path, true);
+        require(!windows->files.empty() && windows->font, "Windows game folder has no original Kabus22 data or K22.exe");
+        assetBytes = windows->bytes; fontSourceBytes = static_cast<std::uint64_t>(windows->font->info.st_size);
+    } else {
+        mkdirPrivate(stage.path/"source");
+        mkdirPrivate(stage.path/"extracted");
+        prepared = media::prepare(source.kind == SourceKind::Iso ? source.path : fs::path{},
+            source.kind == SourceKind::Setup ? source.path : fs::path{}, stage.path/"source", progress);
+        listed = media::list(*prepared, checkedAbsolute(request.extractor), progress);
+        for (const auto& member : listed) if (media::selected(member)) { members.push_back(member); assetBytes = addBytes(assetBytes, member.size); }
+        require(!members.empty(), "Media has no native Kabus22 assets");
+        for (const auto& member : listed)
+            if (lower(member.path.generic_string()) == "app/k22.exe") fontSourceBytes = member.size;
+    }
     std::unique_ptr<PatchSnapshot> patch;
     if (!request.optionalPatch.empty()) patch = std::make_unique<PatchSnapshot>(request.optionalPatch);
-    std::uint64_t fontSourceBytes = 0;
-    for (const auto& member : listed)
-        if (lower(member.path.generic_string()) == "app/k22.exe") fontSourceBytes = member.size;
     if (patch && patch->font) fontSourceBytes = static_cast<std::uint64_t>(patch->font->info.st_size);
     require(fontSourceBytes > 0 && fontSourceBytes <= 64 * 1024 * 1024, "Missing or oversized engine font source");
     const auto fontReserve = addBytes(fontSourceBytes, 64 * 1024 * 1024);
     enough(stage.path, addBytes(addBytes(assetBytes, payloadBytes), fontReserve));
-    media::extract(prepared, checkedAbsolute(request.extractor), members, stage.path/"extracted", progress);
     const auto installation = stage.path/"install";
     mkdirPrivate(installation);
-    renameNew(stage.path/"extracted/app", installation/"game");
+    std::set<std::string> names; // folded game-relative paths, for edition detection
+    Created gameDirectories;
+    if (windows) {
+        mkdirPrivate(installation/"game");
+        for (const auto& file : windows->files) {
+            const auto to = installation/"game"/file.relative;
+            chain(to.parent_path(), &gameDirectories);
+            windows->copy(file, to, progress);
+            names.insert(foldPath(file.relative.generic_string()));
+        }
+    } else {
+        media::extract(*prepared, checkedAbsolute(request.extractor), members, stage.path/"extracted", progress);
+        renameNew(stage.path/"extracted/app", installation/"game");
+        for (const auto& member : members) names.insert(foldPath(member.path.lexically_relative("app").generic_string()));
+    }
+    require(names.contains("k22.wrs"), "Source lacks the original K22.wrs game archive");
     if (patch) patch->matchGame(installation/"game");
     enough(stage.path, addBytes(addBytes(patch ? patch->bytes : 0, payloadBytes), fontReserve));
     Created patchDirectories;
@@ -696,32 +1050,26 @@ Result install(const Request& request, const Progress& progress) {
         chain(to.parent_path(), &patchDirectories);
         if (file.replace) require(::unlink(to.c_str()) == 0, "Cannot replace staged asset with user patch");
         patch->copy(file, to, progress);
+        names.insert(foldPath(file.relative.generic_string()));
     }
-    installFont(request, prepared, listed, stage.path, installation/"game", patch.get(), progress);
+    const PatchSnapshot* fontTree = patch && patch->font ? patch.get() : windows.get();
+    installFont(request, prepared ? &*prepared : nullptr, listed, stage.path, installation/"game", fontTree,
+        fontTree == patch.get() ? "user-patch/" : "windows-install/", progress);
     mkdirPrivate(installation/"bin"); mkdirPrivate(installation/"lib");
     Created payloadDirectories;
     for (const auto& file : files) {
         chain((installation/file.relative).parent_path(), &payloadDirectories);
-        copyFile(file.source, installation/file.relative, file.relative == "bin/kabus22" ? 0700 : 0600, progress);
+        copyFile(file.source, installation/file.relative, file.relative.parent_path() == "bin" ? 0700 : 0600, progress);
     }
     fs::path logo;
-    for (const auto& member : members) if (lower(member.path.generic_string()) == "app/help/help_files/fon_logo.jpg") logo = installation/"game"/member.path.lexically_relative("app");
+    for (const auto& entry : fs::recursive_directory_iterator(installation/"game"))
+        if (lower(entry.path().lexically_relative(installation/"game").generic_string()) == "help/help_files/fon_logo.jpg") logo = entry.path();
     require(!logo.empty(), "Original logo is required for installed desktop icon");
     encodeIcon(logo, installation/"kabus22.png");
-    writeFile(installation/".kabus22-owned", marker);
-    std::ostringstream inventory;
-    inventory << "{\"format\":1,\"root\":" << json(root.string()) << ",\"source\":" << json((request.sourceIso.empty() ? request.sourceSetup : request.sourceIso).string()) << ",\"files\":[";
-    bool first = true;
-    for (const auto& item : tree(installation)) {
-        if (!S_ISREG(item.info.st_mode)) continue;
-        if (!first) inventory << ',';
-        first = false;
-        inventory << "{\"path\":" << json(item.path.lexically_relative(installation).generic_string()) << ",\"size\":" << item.info.st_size << ",\"sha256\":" << json(sha256(item.path, progress)) << '}';
-    }
-    inventory << "],\"shortcuts\":[" << json((applications/shortcutName).string()) << ',' << json((desktop/shortcutName).string()) << "]}\n";
-    writeFile(installation/".kabus22-inventory.json", inventory.str());
+    finalizeInstallation(installation, {root, source.path, kindName(source.kind), edition(names),
+        {applications/shortcutName, desktop/shortcutName}}, progress);
     const auto owned = tree(installation);
-    Result result{root, root/"game", root/"bin/kabus22", applications/shortcutName, desktop/shortcutName};
+    Result result{root, root/"game", root/"bin/kabus22-launcher", applications/shortcutName, desktop/shortcutName};
     std::vector<std::unique_ptr<Temporary>> shortcuts;
     std::vector<Identity> published;
     for (const auto& folder : {applications, desktop}) {
@@ -738,6 +1086,7 @@ Result install(const Request& request, const Progress& progress) {
         report(progress, "Publishing native installation");
         chain(root.parent_path());
         if (patch) patch->verify();
+        if (windows) windows->verify();
         renameNew(installation, root); rootPublished = true;
         checkRoot();
         for (std::size_t index = 0; index < shortcuts.size(); ++index) {
@@ -781,16 +1130,18 @@ int launch(const Result& result) {
     const auto value = lstatPath(root);
     require(S_ISDIR(value.st_mode) && value.st_uid == geteuid() && !(value.st_mode & (S_IWGRP | S_IWOTH)), "Installation is not private and user-owned");
     require(smallFile(root/".kabus22-owned") == marker, "Missing native installation ownership marker");
-    require(checkedAbsolute(result.executable) == root/"bin/kabus22" && checkedAbsolute(result.dataRoot) == root/"game", "Launch paths do not match native installation");
-    chain(root/"bin");
+    require(checkedAbsolute(result.executable) == root/"bin/kabus22-launcher" && checkedAbsolute(result.dataRoot) == root/"game", "Launch paths do not match native installation");
+    const auto active = layout::active_version(root);
+    require(!active.empty(), "Installation has no active version");
+    chain(root/"versions"/active/"bin");
     chain(root/"game");
     require(S_ISDIR(lstatPath(root/"game").st_mode), "Installed game data directory is missing");
     nativeElf(result.executable, true);
-    const auto exe = result.executable.string(), data = result.dataRoot.string();
-    gchar* argv[] = {const_cast<gchar*>(exe.c_str()), const_cast<gchar*>("--data"), const_cast<gchar*>(data.c_str()), nullptr};
+    const auto exe = result.executable.string(), installRoot = root.string();
+    gchar* argv[] = {const_cast<gchar*>(exe.c_str()), const_cast<gchar*>("--install-dir"), const_cast<gchar*>(installRoot.c_str()), nullptr};
     GError* error = nullptr; GPid child = 0;
-    const auto ok = g_spawn_async(data.c_str(), argv, nullptr, G_SPAWN_DEFAULT, nullptr, nullptr, &child, &error);
-    const std::string message = error ? error->message : "Cannot launch native game";
+    const auto ok = g_spawn_async(installRoot.c_str(), argv, nullptr, G_SPAWN_DEFAULT, nullptr, nullptr, &child, &error);
+    const std::string message = error ? error->message : "Cannot open settings launcher";
     if (error) g_error_free(error);
     require(ok, message); return static_cast<int>(child);
 }
@@ -804,6 +1155,9 @@ void selfCheck() {
     require(execArgument("\\") == R"("\\\\")", "Desktop backslash quoting regression");
     require(execArgument("\"") == R"("\\"")", "Desktop quote escaping regression");
     require(execArgument("$`") == R"("\\$\\`")", "Desktop shell metacharacter quoting regression");
+    const auto self = fs::canonical("/proc/self/exe");
+    require(fails([&] { payload(self, self, self); }), "Engine cannot double as settings launcher");
+    require(fails([&] { payload(self, "", self); }), "Missing launcher payload must fail before installation");
     require(fails([] { addBytes(std::numeric_limits<std::uint64_t>::max(), 1); }), "Size overflow must fail");
     struct stat a{}, b{}; a.st_ino = b.st_ino = 1; a.st_dev = b.st_dev = 2; a.st_mode = b.st_mode = S_IFREG; a.st_size = 1; b.st_size = 2;
     require(same(a, b) && !same(a, b, true), "Rollback must preserve modified files");
@@ -908,6 +1262,20 @@ void selfCheck() {
     writeFile(replacementRoot/"readme-E\xcc\x81.txt", "excluded decomposed name");
     require(fails([&] { PatchSnapshot invalid(replacementRoot); }),
         "Excluded patch names must reject Unicode case-fold/normalization conflicts");
+    const auto windowsGame = sandbox.path/"windows";
+    mkdirPrivate(windowsGame); mkdirPrivate(windowsGame/"_data"); mkdirPrivate(windowsGame/"_data/saves"); mkdirPrivate(windowsGame/"Gallery");
+    for (const auto* name : {"K22.exe", "K22.wrs", "K22.ini", "K22Widescreen.wrs", "Kaynak.k22", "options.k22", "ftz.k22", "rms.k22",
+            "kayit0.sav", "kabus_dll.dll", "d3d9.dll", "unins000.dat", "ReShade.ini", "acknex.wdf", "readme.txt", "Gallery/a_01.JPG",
+            "_data/text.txt", "_data/saves/slot.k22", "_data/tool.exe"})
+        writeFile(windowsGame/name, name);
+    fs::create_directory_symlink(sandbox.path/"outside", windowsGame/"ReShade_shaders");
+    PatchSnapshot imported(windowsGame, true);
+    std::set<std::string> importedNames;
+    for (const auto& file : imported.files) importedNames.insert(file.relative.generic_string());
+    require(importedNames == std::set<std::string>{"K22.wrs", "K22.ini", "K22Widescreen.wrs", "Kaynak.k22", "options.k22", "Gallery/a_01.JPG", "_data/text.txt"} &&
+        imported.font && imported.font->relative == "K22.exe", "Windows import must select only original game data");
+    fs::create_symlink(windowsGame/"Kaynak.k22", windowsGame/"Linked.k22");
+    require(fails([&] { PatchSnapshot invalid(windowsGame, true); }), "Windows import must reject linked game files");
     media::selfCheck();
     k22::pe_font_detail::selfCheck();
 }

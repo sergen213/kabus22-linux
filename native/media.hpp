@@ -53,6 +53,11 @@ public:
     const Image* movie_frame(Handle handle) const;
     // Called on the game/render thread before using movie_frame().
     void update();
+    // Scenario mode: advance_clock switches movie/silent-voice time to a manual clock stepped by the
+    // engine frame (deterministic, wall-clock independent); real_clock resumes wall time from there.
+    // A device-backed mixer still consumes voices in real time. Unused outside scenarios.
+    void advance_clock(double seconds);
+    void real_clock();
 
 private:
     struct Impl;

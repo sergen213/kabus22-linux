@@ -1,0 +1,12 @@
+# requires: saves, live pad (run-live.sh ... rumble modern.ini → rumble logged; rumble vibration-off.ini → none)
+# Demir at Kiz Kulesi (kayit9.sav): standing still, atilgan_ai strikes drain Enerji (player.skill1, oyuncu2.wdl).
+pad live
+load-save 9
+wait until LY_AktifLevelID == 31 && level_yuklendi_ok == 1 && player != 0 timeout 7200
+store pad_hp player.skill1
+wait until player.skill1 < @pad_hp timeout 1800
+frames 30
+print player.skill1
+capture rumble-damaged
+store pad_done player.skill1
+frames 60

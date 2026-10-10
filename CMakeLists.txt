@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
-project(kabus22_native LANGUAGES CXX)
+project(kabus22_native VERSION 0.2.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+add_compile_definitions(K22_VERSION="${PROJECT_VERSION}")
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
 pkg_check_modules(EPOXY REQUIRED IMPORTED_TARGET epoxy)
@@ -18,9 +19,19 @@ set(K22_SHADER_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/native/shaders")
 set(K22_SHADER_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 set(K22_SHADER_INCLUDES
   "${K22_SHADER_DIRECTORY}/raster_uniform.glsl"
-  "${K22_SHADER_DIRECTORY}/ray_query.glsl")
+  "${K22_SHADER_DIRECTORY}/ray_query.glsl"
+  "${K22_SHADER_DIRECTORY}/pbr.glsl"
+  "${K22_SHADER_DIRECTORY}/effects.glsl")
 set(K22_SHADER_FILES scene.vert scene.frag shadow.vert shadow.geom shadow.frag
-  ui.vert ui.frag post.vert post.frag sky.frag warp.frag cloud.frag deform.comp)
+  ui.vert ui.frag post.vert post.frag sky.frag warp.frag cloud.frag deform.comp tonemap.frag
+  effects.frag rt_signals.comp rt_filter.comp)
+# OpenGL embeds the same PBR source text as Vulkan; re-run configure when it changes.
+file(READ "${K22_SHADER_DIRECTORY}/pbr.glsl" K22_PBR_GLSL)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${K22_SHADER_DIRECTORY}/pbr.glsl")
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/render_pbr_glsl.hpp" CONTENT "#pragma once\ninline constexpr const char* pbrGLSL=R\"K22(@K22_PBR_GLSL@)K22\";\n" @ONLY)
+file(READ "${K22_SHADER_DIRECTORY}/effects.glsl" K22_EFFECTS_GLSL)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${K22_SHADER_DIRECTORY}/effects.glsl")
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/render_effects_glsl.hpp" CONTENT "#pragma once\ninline constexpr const char* effectsGLSL=R\"K22(@K22_EFFECTS_GLSL@)K22\";\n" @ONLY)
 set(K22_SHADER_OUTPUTS)
 set(K22_SHADER_EMBED_ARGUMENTS)
 foreach(shader IN LISTS K22_SHADER_FILES)
@@ -53,11 +64,11 @@ add_custom_command(OUTPUT "${K22_SHADER_HEADER}"
 include(cmake/KabusODE.cmake)
 add_library(kabus22_core native/engine.cpp native/wdl.cpp native/assets.cpp native/render.cpp
   native/render_gl.cpp native/render_vulkan.cpp native/render_vulkan_raster.cpp native/render_vulkan_rt.cpp native/vulkan_loader.cpp
-  native/media.cpp native/physics.cpp "${K22_SHADER_HEADER}")
+  native/media.cpp native/physics.cpp native/texture_pack.cpp native/controller.cpp native/saves.cpp "${K22_SHADER_HEADER}")
 target_include_directories(kabus22_core PUBLIC native PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${Vulkan_INCLUDE_DIRS})
 target_link_libraries(kabus22_core PUBLIC PkgConfig::SDL2 PkgConfig::EPOXY PkgConfig::AV PkgConfig::FREETYPE PkgConfig::FONTCONFIG Threads::Threads ODE ${CMAKE_DL_LIBS})
 target_compile_options(kabus22_core PRIVATE -Wall -Wextra -Wpedantic)
-add_executable(kabus22 native/main.cpp)
+add_executable(kabus22 native/main.cpp native/scenario.cpp)
 target_link_libraries(kabus22 PRIVATE kabus22_core)
 install(TARGETS kabus22 RUNTIME DESTINATION bin)
 include(CTest)
@@ -83,6 +94,7 @@ if(BUILD_TESTING)
   endif()
   add_executable(check_engine native/check_engine.cpp)
   target_link_libraries(check_engine PRIVATE kabus22_core)
+  add_test(NAME input_saves COMMAND check_engine --input-saves)
   if(EXISTS "${K22_TEST_MATERIALS}/Normal_Mix.fx" AND EXISTS "${K22_TEST_MATERIALS}/Normal_SunMix.fx" AND EXISTS "${K22_TEST_TERRAIN}")
     add_test(NAME engine_boundaries COMMAND check_engine "${K22_TEST_MATERIALS}" "${K22_TEST_TERRAIN}")
   else()
@@ -90,6 +102,8 @@ if(BUILD_TESTING)
   endif()
   add_executable(k22-render-check native/check_render.cpp)
   target_link_libraries(k22-render-check PRIVATE kabus22_core)
+  # Asset-free: presets, --graphics/--texture-pack parsing, Contract E packs, tangents, tone curve.
+  add_test(NAME graphics_policy COMMAND k22-render-check --policy)
   if(EXISTS "${K22_TEST_MATERIALS}/Normal_Mix.fx" AND EXISTS "${K22_TEST_MATERIALS}/Normal_SunMix.fx")
     add_test(NAME material_boundaries COMMAND k22-render-check "${K22_TEST_MATERIALS}")
   else()
@@ -101,5 +115,36 @@ if(BUILD_TESTING)
     add_test(NAME physics_boundaries COMMAND check_physics "${K22_TEST_TERRAIN}")
   else()
     message(STATUS "Skipping physics_boundaries: private terrain fixture unavailable")
+  endif()
+  # Real-data gameplay scenarios (docs/GAMEPLAY_TESTING.md); registered only when an installed game directory is supplied.
+  set(K22_GAME_DATA "" CACHE PATH "Original game directory for the gameplay_scenarios test (empty: not registered)")
+  set(K22_ORIGINAL_SAVES "" CACHE PATH "Original Windows game directory with kayit*.sav/kysd.sav for save-based scenarios")
+  if(K22_GAME_DATA)
+    add_test(NAME gameplay_scenarios COMMAND "${CMAKE_COMMAND}" "-DK22=$<TARGET_FILE:kabus22>" "-DGAME=${K22_GAME_DATA}" "-DSAVES=${K22_ORIGINAL_SAVES}"
+      "-DSCENARIOS=${CMAKE_CURRENT_SOURCE_DIR}/tests/scenarios" "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/gameplay-scenarios" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/scenarios/run.cmake")
+    set_tests_properties(gameplay_scenarios PROPERTIES TIMEOUT 7200)
+    # Every campaign level (tests/levels/levels.tsv) entered through the original LevelYukle path, 600 headless frames each (~5 min).
+    if(K22_ORIGINAL_SAVES)
+      add_test(NAME level_sweep COMMAND "${CMAKE_COMMAND}" "-DK22=$<TARGET_FILE:kabus22>" "-DGAME=${K22_GAME_DATA}" "-DSAVES=${K22_ORIGINAL_SAVES}"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/level-sweep" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/levels/sweep.cmake")
+      set_tests_properties(level_sweep PROPERTIES TIMEOUT 1200)
+    endif()
+    # Native captures of tests/reference/*.k22s against the original's captures (tools/wine-reference/, docs/GAMEPLAY_TESTING.md#reference-comparison).
+    # Renders with OpenGL in a window, so it needs DISPLAY; thresholds in tests/reference/thresholds.tsv.
+    set(K22_REFERENCE_DIR "" CACHE PATH "Reference captures of the original game (wineref.py output) for reference_comparison (empty: not registered)")
+    if(K22_REFERENCE_DIR AND K22_ORIGINAL_SAVES)
+      add_test(NAME reference_comparison COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/wine-reference/compare.py"
+        "${K22_REFERENCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/reference-comparison" --thresholds "${CMAKE_CURRENT_SOURCE_DIR}/tests/reference/thresholds.tsv"
+        --pairs "${CMAKE_CURRENT_BINARY_DIR}/reference-comparison/pairs" --ref-gamma 30
+        --run "$<TARGET_FILE:kabus22>" "${K22_GAME_DATA}" "${K22_ORIGINAL_SAVES}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/reference")
+      set_tests_properties(reference_comparison PROPERTIES TIMEOUT 3600)
+    endif()
+  endif()
+  find_program(K22_UPSCALER_PYTHON python3)  # the tool runs as `python3`; may differ from the shader-embedding interpreter
+  execute_process(COMMAND "${K22_UPSCALER_PYTHON}" -c "import PIL, numpy" RESULT_VARIABLE K22_UPSCALER_DEPS OUTPUT_QUIET ERROR_QUIET)
+  if(K22_UPSCALER_DEPS EQUAL 0)
+    add_test(NAME texture_upscaler COMMAND "${K22_UPSCALER_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/texture-upscaler/test_upscale.py")
+  else()
+    message(STATUS "Skipping texture_upscaler: Python Pillow/numpy unavailable")
   endif()
 endif()

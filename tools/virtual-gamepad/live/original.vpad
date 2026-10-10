@@ -1,0 +1,31 @@
+wait store pad_dpad
+axis HATY -1
+wait store pad_dpad_stop
+axis HATY 0
+wait store pad_half
+axis LY -13000
+wait store pad_half_stop
+axis LY 0
+wait store pad_stick
+axis LY -32767
+wait store pad_stick_stop
+axis LY 0
+wait store pad_aim
+down A
+wait store pad_fire
+down B
+wait store pad_fire_up
+up B
+wait store pad_lower
+up A
+wait store pad_menu
+down Y
+wait store pad_menu_up
+up Y
+wait store pad_menu_close
+press Y 150
+wait store pad_map
+press LB 150
+wait store pad_map_close
+press LB 150
+wait scenario: original.k22s

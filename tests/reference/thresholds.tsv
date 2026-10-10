@@ -1,0 +1,42 @@
+# reference_comparison thresholds (tools/wine-reference/compare.py --thresholds, --ref-gamma 30).
+# case/image  min_ssim  [crop w:h:x:y]  [mask=x:y:w:h;...]   (1024x768; masks are blacked out on both sides first)
+#
+# Reference set: original ISO K22.exe under Wine 11.19/wined3d (reverse/wine-reference/set/, pass A of 2026-10-09).
+# Native noise: the in-game captures of two consecutive native runs differ by <= 0.001 SSIM, so each in-game
+# threshold is the measured native SSIM minus 0.03 (fails on a real native regression, not on run-to-run noise).
+# Original-side noise (pass A vs a second pass B / an earlier run): level5 0.96-1.00, ev/tnel24 >= 0.998,
+# cam1_loaded 0.97, start4_control 0.994, menu logos 1.0. Noisy on the original itself: kriz after load
+# (atilgan_ai random() waypoints: A-B 0.97-0.99, A-earlier run 0.62-0.85), cam1_locked_door (A-B 0.73),
+# movie frames (0.56-0.77). The native - original gap that remains is documented in docs/GAMEPLAY_TESTING.md.
+# Masks/crops for animated content: HUD heart (0:0:120:120, beats); level5 ceiling fan (0:30:540:120, rotation phase);
+# menus and the difficulty screen loop the kn_arg.k22 movie behind the panels, and its phase differs on both sides
+# (native realtime runs too), so only the logo region is compared and the threshold sits above a black frame's SSIM
+# (0.16-0.36) and below the lowest native run (0.47-0.58). Movie frames: above black (0.19-0.28), gross check only.
+menus/logo_fip	0.99
+menus/logo_sonisik	0.99
+menus/main_menu	0.45	300:220:362:240
+menus/options	0.40	300:220:362:240
+menus/load_menu	0.40	300:220:362:240
+menus/exit_confirm	0.40	300:220:362:240
+level5/level5_loaded	0.85	mask=0:0:120:120;0:30:540:120
+level5/level5_inventory	0.87
+level5/level5_map	0.93
+level5/level5_pause	0.90	mask=0:0:120:120;0:30:540:120
+level5/level5_walk1	0.82	mask=0:0:120:120
+level5/level5_walk2	0.85	mask=0:0:120:120
+level5/level5_walk3	0.76	mask=0:0:120:120
+kriz/kriz_loaded	0.56	mask=0:0:120:120
+kriz/kriz_inventory	0.87
+kriz/kriz_map	0.93
+kriz/kriz_pause	0.67	mask=0:0:120:120
+kriz/kriz_aim	0.71	mask=0:0:120:120
+kriz/kriz_fire	0.71	mask=0:0:120:120
+cam1/cam1_loaded	0.74	mask=0:0:120:120
+cam1/cam1_locked_door	0.52	mask=0:0:120:120
+ev/ev_loaded	0.71	mask=0:0:120:120
+tnel24/tnel24_loaded	0.66	mask=0:0:120:120
+newgame/difficulty	0.45	300:220:362:240
+newgame/intro_panels	0.99
+newgame/movie_vest	0.40
+newgame/movie_veyo	0.40
+newgame/start4_control	0.76	mask=0:0:120:120

@@ -1,0 +1,28 @@
+# requires: saves
+# Game over at Kız Kulesi (slot 10 = kayit9.sav): Demir stands still while the atilgan_ai divers strike him
+# (atilgan_yara.wdl atilgan_atakveretex, 4*time per contact). Death is decided on player Enerji (skill1, klasik_yara.wdl:60):
+# every oyuncu2.wdl state loop checks `if(my.enerji<=0){goto(d_olum_loop);}` (:778ff), and d_olum_loop sets game_over_start.
+# oyn_yaralanma is only the last health copied by the d_yaralan_go branches (:1839ff), so at death it can still be the last
+# positive value or already <= 0 (a hit during the hurt animation's final wait), depending on contact timing; it is not asserted.
+# K22.wdl game_over_strtr fades to black, shows gameover_panel, returns to level0.wmb and the main menu (dismenuac).
+# The run then loads the same slot again through the original load menu.
+realtime off
+load-save 9
+wait until LY_AktifLevelID == 31 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+store hp oyn_yaralanma
+assert @hp > 0
+wait until game_over_start == 1 timeout 36000
+assert player.skill1 <= 0
+print oyn_yaralanma
+wait until kararma_fon_pnl.visible == 1 timeout 600
+wait until gameover_panel.visible == 1 && gameover_panel.alpha >= 100 timeout 1200
+capture kriz_game_over_panel
+wait until LY_AktifLevelID == 0 && game_over_start == 0 timeout 3000
+assert $level == "level0.wmb"
+wait until AMP_OyunYukle.visible == 1 || ParlaklikMenuAcik == 1 timeout 3000
+frames 30
+capture kriz_game_over_main_menu
+load-save 9
+wait until LY_AktifLevelID == 31 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+assert oyn_yaralanma == @hp
+capture kriz_reloaded_after_game_over

@@ -1,0 +1,65 @@
+# requires: saves
+# Inzar vs a duma_yaratik in Tnel10 (slot 17 = kayit16.sav, tnel66 hub, cadde_yara_adet[23] == 3 alive). The duma waits until
+# vec_to_screen(camera) sees it (duma_yara.wdl action duma_yaratik), runs in, strikes Inzar (duma_TekVur/TersVur), reacts to the
+# sword (Key_SilahKaldir, koruyucu.wdl:3434; Yrt_Durum skill21 = a Yrt_Yaralan_* state), dies (duma_Ol, Yrt_ol 9) and is removed
+# (ent_remove; aktif_oldurme_sayisi +1, cadde_yara_adet[23] -1, mana +40).
+realtime off
+load-save 16
+wait until LY_AktifLevelID == 41 && level_yuklendi_ok == 1 && player != 0 timeout 7200
+wait until koruyucu_pasif == 0 && EnvaterAcilabilirmi == 1 timeout 1200
+route 30 1600 700 1486 450 1486 250 1486 110 timeout 2400
+walk-to 1486 72 10 timeout 600
+turn-to 1486 0 6
+press-until D LY_AktifLevelID == 43 timeout 600
+wait until $level == "tnel10.wmb" && level_yuklendi_ok == 1 && koruyucu_pasif == 0 timeout 3600
+assert $level == "tnel10.wmb"
+assert $count(duma_yaratik) == 3
+find n duma_yaratik
+store hp0 koru_yaralanma
+store k0 aktif_oldurme_sayisi
+store c0 cadde_yara_adet[23]
+store m0 koruyucu_mana
+assert @n.skill1 == 250
+# Spawn points are random (y_koorsonuc); walk toward the nearest duma until it activates and closes in.
+walk-to @n 150 path timeout 2400
+wait until $dist(@n) < 120 timeout 1800
+capture inzar_duma_approach
+wait until koru_yaralanma < @hp0 timeout 1800
+turn-to @n 20 timeout 300
+press-until S @n.skill1 < 250 timeout 600
+assert @n.skill21 >= 7
+capture inzar_duma_hurt
+# A round that stalls (knock-back, duma out of reach) ends after 300 frames and the next round re-aims.
+turn-to @n 20 timeout 300
+store g $frame
+press-until S @n.skill1 <= 0 || @n.alive == 0 || $frame > @g + 300 timeout 900
+turn-to @n 20 timeout 300
+store g $frame
+press-until S @n.skill1 <= 0 || @n.alive == 0 || $frame > @g + 300 timeout 900
+turn-to @n 20 timeout 300
+store g $frame
+press-until S @n.skill1 <= 0 || @n.alive == 0 || $frame > @g + 300 timeout 900
+turn-to @n 20 timeout 300
+store g $frame
+press-until S @n.skill1 <= 0 || @n.alive == 0 || $frame > @g + 300 timeout 900
+turn-to @n 20 timeout 300
+store g $frame
+press-until S @n.skill1 <= 0 || @n.alive == 0 || $frame > @g + 300 timeout 900
+turn-to @n 20 timeout 300
+store g $frame
+press-until S @n.skill1 <= 0 || @n.alive == 0 || $frame > @g + 300 timeout 900
+turn-to @n 20 timeout 300
+store g $frame
+press-until S @n.skill1 <= 0 || @n.alive == 0 || $frame > @g + 300 timeout 900
+turn-to @n 20 timeout 300
+store g $frame
+press-until S @n.skill1 <= 0 || @n.alive == 0 || $frame > @g + 300 timeout 900
+wait until @n.skill1 <= 0 || @n.alive == 0 timeout 60
+wait until @n.skill21 == 9 || @n.alive == 0 timeout 120
+capture inzar_duma_dying
+wait until @n.alive == 0 timeout 900
+assert aktif_oldurme_sayisi == @k0 + 1
+assert cadde_yara_adet[23] == @c0 - 1
+assert $count(duma_yaratik) == 2
+assert koruyucu_mana > @m0
+capture inzar_duma_removed

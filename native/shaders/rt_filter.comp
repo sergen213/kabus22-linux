@@ -1,0 +1,65 @@
+#version 460
+// Ray-traced signal denoiser. Mode 0: temporal accumulation with reprojection (previous view-projection) and
+// disocclusion rejection (render_policy::history_valid). Mode 1: one edge-aware a-trous iteration (B3 kernel,
+// depth/normal stopping; mirror-smooth reflections are not blurred).
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=0,std140) uniform Signals { mat4 inverseViewProjection,previousViewProjection; vec4 eye,sun,params,camera; ivec4 config; } g;
+layout(push_constant) uniform Push { int mode,stride; } pc;
+layout(set=0,binding=2) uniform sampler2D gDepth;
+layout(set=0,binding=3) uniform sampler2D gData;
+layout(set=0,binding=4) uniform sampler2D previousDepth;
+layout(set=0,binding=5) uniform sampler2D previousData;
+layout(set=0,binding=10,rgba16f) uniform readonly image2D inMask;
+layout(set=0,binding=11,rgba16f) uniform readonly image2D inGi;
+layout(set=0,binding=12,rgba16f) uniform readonly image2D inReflect;
+layout(set=0,binding=13,rgba16f) uniform readonly image2D historyMask;
+layout(set=0,binding=14,rgba16f) uniform readonly image2D historyGi;
+layout(set=0,binding=15,rgba16f) uniform readonly image2D historyReflect;
+layout(set=0,binding=16,r32f) uniform readonly image2D historyLength;
+layout(set=0,binding=17,rgba16f) uniform writeonly image2D outMask;
+layout(set=0,binding=18,rgba16f) uniform writeonly image2D outGi;
+layout(set=0,binding=19,rgba16f) uniform writeonly image2D outReflect;
+layout(set=0,binding=20,r32f) uniform writeonly image2D outLength;
+vec3 decodeNormal(vec2 o){vec3 n=vec3(o,1.0-abs(o.x)-abs(o.y));if(n.z<0.0)n.xy=(1.0-abs(n.yx))*vec2(n.x>=0.0?1.0:-1.0,n.y>=0.0?1.0:-1.0);return normalize(n);}
+float linearDepth(float d){float n=g.params.w,f=g.eye.w,z=d*2.0-1.0;return 2.0*n*f/(f+n-z*(f-n));}
+bool use(int bit){return (g.config.x&bit)!=0;}
+void main(){
+    ivec2 pixel=ivec2(gl_GlobalInvocationID.xy),size=g.config.yz;if(pixel.x>=size.x||pixel.y>=size.y)return;
+    float depth=texelFetch(gDepth,pixel,0).r;vec4 data=texelFetch(gData,pixel,0);
+    if(pc.mode==0){
+        vec4 mask=use(1)?imageLoad(inMask,pixel):vec4(1),gi=use(2)?imageLoad(inGi,pixel):vec4(0),reflection=use(4)?imageLoad(inReflect,pixel):vec4(0);float count=0.0;
+        if(depth<1.0&&g.config.w!=0){
+            vec2 uv=(vec2(pixel)+0.5)/vec2(size);vec4 world=g.inverseViewProjection*vec4(uv.x*2.0-1.0,1.0-uv.y*2.0,depth*2.0-1.0,1.0);vec4 previous=g.previousViewProjection*vec4(world.xyz/world.w,1.0);
+            if(previous.w>0.0){vec2 puv=vec2(previous.x/previous.w*0.5+0.5,0.5-previous.y/previous.w*0.5);ivec2 q=ivec2(floor(puv*vec2(size)));
+                if(all(greaterThanEqual(q,ivec2(0)))&&all(lessThan(q,size))){
+                    float before=linearDepth(texelFetch(previousDepth,q,0).r);float normalDot=dot(decodeNormal(data.xy),decodeNormal(texelFetch(previousData,q,0).xy));
+                    // render_policy::history_valid: 5% relative view-depth change, normal cosine 0.9.
+                    if(abs(previous.w-before)<=0.05*max(previous.w,before)&&normalDot>=0.9){
+                        count=min(imageLoad(historyLength,q).r+1.0,64.0);
+                        if(use(1))mask=mix(imageLoad(historyMask,q),mask,max(1.0/(count+1.0),0.15));
+                        if(use(2))gi=mix(imageLoad(historyGi,q),gi,max(1.0/(count+1.0),0.06));
+                        if(use(4))reflection=mix(imageLoad(historyReflect,q),reflection,max(1.0/(count+1.0),0.15));
+                    }
+                }
+            }
+        }
+        if(use(1))imageStore(outMask,pixel,mask);if(use(2))imageStore(outGi,pixel,gi);if(use(4))imageStore(outReflect,pixel,reflection);imageStore(outLength,pixel,vec4(count));
+        return;
+    }
+    vec4 mask=use(1)?imageLoad(inMask,pixel):vec4(1),gi=use(2)?imageLoad(inGi,pixel):vec4(0),reflection=use(4)?imageLoad(inReflect,pixel):vec4(0);
+    if(depth<1.0){
+        const float taps[3]=float[3](0.375,0.25,0.0625);
+        float center=linearDepth(depth);vec3 n=decodeNormal(data.xy);bool blurReflection=data.b>0.05;
+        vec4 sm=vec4(0),sg=vec4(0),sr=vec4(0);float wm=0.0,wr=0.0;
+        for(int y=-2;y<=2;++y)for(int x=-2;x<=2;++x){
+            ivec2 q=pixel+ivec2(x,y)*pc.stride;if(any(lessThan(q,ivec2(0)))||any(greaterThanEqual(q,size)))continue;
+            float d=texelFetch(gDepth,q,0).r;if(d>=1.0)continue;vec4 other=texelFetch(gData,q,0);
+            float w=taps[abs(x)]*taps[abs(y)]*exp(-abs(linearDepth(d)-center)/(0.02*center*float(pc.stride)))*pow(max(dot(n,decodeNormal(other.xy)),0.0),32.0);
+            if(use(1))sm+=w*imageLoad(inMask,q);if(use(2))sg+=w*imageLoad(inGi,q);wm+=w;
+            if(use(4)&&blurReflection){float wq=w*(other.b>0.05?1.0:0.0);sr+=wq*imageLoad(inReflect,q);wr+=wq;}
+        }
+        if(wm>0.0){if(use(1))mask=sm/wm;if(use(2))gi=sg/wm;}
+        if(wr>0.0)reflection=sr/wr;
+    }
+    if(use(1))imageStore(outMask,pixel,mask);if(use(2))imageStore(outGi,pixel,gi);if(use(4))imageStore(outReflect,pixel,reflection);
+}

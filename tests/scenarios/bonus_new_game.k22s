@@ -1,0 +1,78 @@
+# mode: bonus
+# Bonus "Demolition Day" (Kabus 22 Mode/K22_mode.wrs): mouse New Game, any-key start, weapon menu, then about 1000 frames of
+# play on the rail-mounted gun. anamenu.wdl AnaMenu_acil_fx places MMP_pntr_yenioyun at 316,660 (GA_ScaleOranlari2 = 1 at
+# GA_Cozunurluk 2); the next button (profil) starts at 448, so the New Game rect spans x 316..447 from y 660 down.
+# Amenu_yenioyun_fx loads basla.wmb; eventLevel (anamenu.wdl:478-511) waits for key_any; silsec_menuac_fx shows three weapon
+# buttons at y 42 (x 218/414/610); silsec_menu1b_fx picks weapon 2 (minigun) and sets oyun_baslama_ok.
+# ucaksavar.wdl ucak_demir: A/D slide the gun along its rail (loc_pozisyon 70..362), mouse_force turns/tilts it (pan
+# -73..73, tilt -22..50), held left mouse spins up and fires the minigun (silahdaki_mermi_adeti[2]) once the start-up
+# glove animation (loc_animatebasla) has finished.
+realtime off
+wait until MMP_pntr_yenioyun.visible == 1 && mouse_mode == 2 && GO_birtusa_basildi == 0 timeout 3600
+assert MMP_pntr_yenioyun.pos_x == 316 && MMP_pntr_yenioyun.pos_y == 660
+capture bonus_menu
+# Left of the rect: no effect.
+mouse 300 675
+frames 3
+mouse-down 1
+frames 4
+mouse-up 1
+frames 10
+assert GO_birtusa_basildi == 0
+# Inside the rect.
+mouse 346 675
+frames 3
+mouse-down 1
+frames 4
+mouse-up 1
+wait until GO_birtusa_basildi == 1 && MMP_pntr_yenioyun.visible == 0 timeout 120
+wait until tek_loading_islem == 1 timeout 7200
+assert $level == "basla.wmb"
+capture bonus_loaded
+press Return
+wait until SSM_menu1_pnl.visible == 1 && SSM_taban_pnl.pos_y == 0 && mouse_mode == 2 timeout 1200
+capture bonus_weapon_menu
+mouse 260 70
+frames 3
+mouse-down 1
+frames 4
+mouse-up 1
+wait until oyun_baslama_ok == 1 && ana_silah_no == 2 && silah_aktif == 2 timeout 600
+store f0 $frame
+store x0 ucaksavar_ent.x
+store y0 ucaksavar_ent.y
+store pan0 ucaksavar_ent.pan
+store ammo0 silahdaki_mermi_adeti[2]
+frames 400
+capture bonus_playing
+# Slide right (D) along the rail, then back left (A).
+down D
+frames 120
+up D
+store x1 ucaksavar_ent.x
+store y1 ucaksavar_ent.y
+print @x1 - @x0
+print @y1 - @y0
+assert @x1 != @x0 || @y1 != @y0
+down A
+frames 120
+up A
+assert ucaksavar_ent.x != @x1 || ucaksavar_ent.y != @y1
+# Aim: move the mouse right and down.
+mouse 600 500
+frames 30
+print ucaksavar_ent.pan
+print ucaksavar_ent.tilt
+assert ucaksavar_ent.pan != @pan0
+# Fire the minigun.
+mouse-down 1
+frames 240
+capture bonus_firing
+mouse-up 1
+print silahdaki_mermi_adeti[2]
+assert silahdaki_mermi_adeti[2] < @ammo0
+frames 120
+print skor_oyunici_puan
+print $frame - @f0
+assert $frame - @f0 >= 1000
+capture bonus_after

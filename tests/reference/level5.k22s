@@ -1,0 +1,49 @@
+# Reference comparison with the original: Demir, Level5 (kayit0.sav): loaded view, inventory, map, pause menu and a walk
+# through three more level5_camkontrol fixed-camera zones (cam.wdl).
+realtime on
+#wine: wait-log 1st
+#wine: sleep 28
+load-save 0
+wait until $level == "level5.wmb" timeout 7200
+#wine: wait-log level5.wmb 600
+#wine: wait-log Physics 120
+# 5 s: cino_yara.wdl cino_yaratik starts on a randomize()d path_cino waypoint and can attack ~20 s after load.
+frames 300
+assert LY_AktifLevelID == 22 && player != 0 && oyuncu_pasif == 0
+capture level5_loaded
+press M
+frames 120
+assert EM_Acik == 1
+capture level5_inventory
+press Escape
+frames 120
+press H
+frames 120
+assert h_menu_aktifmi == 1
+capture level5_map
+press Escape
+frames 120
+press Escape
+frames 120
+assert STM_Acik == 1
+capture level5_pause
+press Escape
+frames 120
+#wine: record level5_walk 16
+# The walk: identical key holds on both sides, no turning (pan 115 at the spawn), so timing jitter only changes the
+# distance a little. Each stop shows another fixed camera zone (cam.wdl level5_camkontrol).
+down Up
+frames 120
+up Up
+frames 60
+capture level5_walk1
+down Up
+frames 120
+up Up
+frames 60
+capture level5_walk2
+down Up
+frames 240
+up Up
+frames 60
+capture level5_walk3

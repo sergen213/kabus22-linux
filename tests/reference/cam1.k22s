@@ -1,0 +1,47 @@
+# Reference comparison with the original: Cami (kayit1.sav): rain, mosque yard, then the permanently locked door
+# (LY_KilitliKapi skill1 32, LevelYonetim.wdl:1131-1176) and its "The door is locked." subtitle (LYT_AltYazi).
+# Identical key holds on both sides (no native steering). Run (A, ~9.9 quants per tick) and turn (12.6 deg per tick,
+# oyuncu2.wdl scales both by TIME) are frame-rate independent and measured equal on both sides; turn holds are multiples of 5 frames
+# (1/12 s = 6 frames at the original's FPS_MAX 72), so both sides turn exactly 16.85 deg per 5 frames.
+# The chained (padlocked) toilet door is not used: its route needs a ~20-quant gap at (-951,1963) that dead reckoning
+# under Wine cannot hit reliably.
+realtime on
+#wine: wait-log 1st
+#wine: sleep 28
+load-save 1
+wait until LY_AktifLevelID == 7 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+#wine: wait-log cam1.wmb 600
+#wine: wait-log Physics 120
+frames 300
+capture cam1_loaded
+# Spawn (-1744,1820) pan 0 -> pan -16.85 -> run to (-736,1515) -> pan -50.5 -> run along the y=1492 wall into the
+# door alcove, stopped by its east wall at (-557,1347).
+press Right 5
+frames 30
+down A
+down Up
+frames 375
+up Up
+up A
+frames 60
+press Right 10
+frames 30
+down A
+down Up
+frames 91
+up Up
+up A
+frames 60
+# Face the door (pan -84.2), walk in to (-549,1272), aim the D scan at the door centre (-555,1245) (pan -101).
+press Right 10
+frames 30
+down Up
+frames 170
+up Up
+frames 30
+press Right 5
+frames 30
+press D
+frames 30
+assert kapi_acikmi[32] == 2 && LYT_AltYazi.visible == 1
+capture cam1_locked_door

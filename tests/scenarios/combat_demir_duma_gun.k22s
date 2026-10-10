@@ -1,0 +1,47 @@
+# requires: saves
+# Demir's machine gun against the last duma_yaratik in Tnel10 (slot 15 = kayit14.sav, cadde_yara_adet[23] == 1). Weapon 3 is
+# chosen through the original inventory, held with S and fired with D (silah.wdl Ates_Et); each hit drains Enerji and plays a
+# Yrt_Yaralan_* reaction (skill21), death is duma_Ol (Yrt_ol 9), then ent_remove; aktif_oldurme_sayisi +1, cadde_yara_adet[23] -> 0.
+realtime off
+load-save 14
+wait until LY_AktifLevelID == 41 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 && EnvaterAcilabilirmi == 1 && oyun_ilk_basladi == 0 timeout 7200
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+press Return
+wait until EM_Bolge == 2 timeout 300
+press Up
+press-until Right EM_CursorNesne+EM_NesneKafa >= 2 timeout 600
+press-until Left EM_CursorNesne+EM_NesneKafa <= 2 timeout 600
+assert Silahlar[2] == 3
+press Return
+wait until EM_Bolge == 6 timeout 300
+press Return
+wait until Aktif_Silah == 3 && EM_Bolge == 2 timeout 300
+press M
+wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
+route 30 1600 700 1486 450 1486 250 1486 110 timeout 2400
+walk-to 1486 72 10 timeout 600
+turn-to 1486 0 6
+press-until D LY_AktifLevelID == 43 timeout 600
+wait until $level == "tnel10.wmb" && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
+find n duma_yaratik
+assert $count(duma_yaratik) == 1
+find n duma_yaratik
+store k0 aktif_oldurme_sayisi
+# The spawn point is random (y_koorsonuc); close in when it is beyond the 500-quant weapon range (Silah_Menzil).
+walk-to @n 300 path timeout 2400
+turn-to @n 10 timeout 300
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 600
+store a0 S_Kursun_Sayisi[3]
+press-until D @n.skill1 < 250 timeout 600
+assert S_Kursun_Sayisi[3] < @a0
+assert @n.skill21 >= 7
+capture demir_duma_shot
+press-until D @n.skill1 <= 0 || @n.alive == 0 timeout 900
+up S
+wait until @n.alive == 0 timeout 900
+assert aktif_oldurme_sayisi == @k0 + 1
+assert cadde_yara_adet[23] == 0
+assert $count(duma_yaratik) == 0
+capture demir_duma_removed

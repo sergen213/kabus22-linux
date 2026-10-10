@@ -1,0 +1,9 @@
+# requires: saves
+# continues: world_save1_point
+# Restart after the original EXIT: GA_AyarlariYukle (GenelAyarlar.wdl:219-237) restores the slot index from kysd.sav and the play
+# time from ftz.k22. The imported Windows ftz.k22 held 0/0/8 (8 minutes); world_save3_exit ran ~2.3 game minutes, so 10.
+realtime off
+wait until ParlaklikMenuAcik == 1 || AMP_OyunYukle.visible == 1 timeout 7200
+assert toplam_oyun_sure == 10
+assert Aktif_SaveNo == 28
+assert SLG_KayitSayisi == 28

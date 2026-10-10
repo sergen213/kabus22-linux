@@ -13,6 +13,7 @@ public:
     void purge_model(const Model*);
     void purge_image(const Image*);
     int shader_version() const;
+    std::string description() const;
     PresentationState presentation_state() const;
 private:
     struct Impl;

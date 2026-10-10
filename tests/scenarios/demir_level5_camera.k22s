@@ -1,0 +1,20 @@
+# requires: saves
+# Demir, Level5 ("Ofis", original slot 01 = kayit0.sav): original load menu, movement, fixed-camera zones (cam.wdl level5_camkontrol lv5_camtip 2 -> 1 -> 0).
+realtime off
+load-save 0
+wait until LY_AktifLevelID == 22 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+assert $level == "level5.wmb"
+assert Aktif_Player == 0
+assert oyn_yaralanma == 64
+assert lv5_camtip == 2
+capture level5_zone2
+store cx camera.x
+walk-to 50 150 25 timeout 900
+assert lv5_camtip == 2
+walk-to 180 150 25 timeout 900
+assert lv5_camtip == 1
+capture level5_zone1
+walk-to 320 150 25 timeout 900
+assert lv5_camtip == 0
+assert camera.x != @cx
+capture level5_zone0

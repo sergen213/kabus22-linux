@@ -1,0 +1,42 @@
+# Reference comparison with the original: Kriz (kayit9.sav): atilgan_ai enemies on the pier, inventory, map, pause menu
+# and a mine throw (the save's Aktif_Silah is 7, Mayin). The menus come first because aiming clears
+# EnvaterAcilabilirmi. Each atilgan contact costs 4*TIME*(OyunZorluk+1) per wing trace on both sides (8 per tick in
+# contact, measured equal); when its attack comes depends on random() waypoint choices, so the original's own runs
+# differ (first attack 43-114 ticks after load across Wine runs; native, seed 0, at 52). A knock-back onto the thrown
+# mine (bomba_tara, < 60 quants) detonates it under the player (1200/dist), which can end the run.
+realtime on
+#wine: wait-log 1st
+#wine: sleep 28
+load-save 9
+wait until $level == "kriz.wmb" timeout 7200
+#wine: wait-log kriz.wmb 600
+#wine: wait-log Physics 120
+frames 300
+assert player != 0
+capture kriz_loaded
+press M
+frames 120
+assert EM_Acik == 1
+capture kriz_inventory
+press Escape
+frames 120
+press H
+frames 120
+assert h_menu_aktifmi == 1
+capture kriz_map
+press Escape
+frames 120
+press Escape
+frames 120
+assert STM_Acik == 1
+capture kriz_pause
+press Escape
+frames 120
+# Combat: hold aim (S, GA_Tuslar[4]) and fire (D, GA_Tuslar[5]) with the active weapon (Mayin: mayin_at throws a mine).
+down S
+frames 60
+capture kriz_aim
+press D 6
+frames 12
+capture kriz_fire
+up S

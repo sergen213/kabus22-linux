@@ -1,9 +1,12 @@
 #include "engine.hpp"
 #include "wdl.hpp"
+#include "saves.hpp"
+#include "modern_box.hpp"
 #include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <numbers>
@@ -638,7 +641,19 @@ void worldFrameEvents(Engine&,Runtime&);
 namespace {
 void svc_flush(FileData&);
 std::filesystem::path svc_private(const std::filesystem::path&,const std::filesystem::path&);
+std::filesystem::path svc_relative(std::string_view);
+std::vector<std::uint8_t> svc_read_file(const std::filesystem::path&);
 const Image& svc_bitmap(Engine&,Value);
+}
+// A6.31 640x480..1600x1200 video modes (video_switch 6..10).
+static constexpr std::array<std::array<int,2>,5> a6VideoModes{{{640,480},{800,600},{1024,768},{1280,1024},{1600,1200}}};
+// A6 00443950 sizes emit() particles (PARTICLE+0x34 bit 0x2000000 clear) in screen pixels, not quants:
+// px=((trunc(32768/depth)*size_raw)>>10)>>shift with shift=14-trunc((W-1)/320+.5) (0043fc10), W the view width.
+// effect() particles use size*focal/depth, focal=W/(2*tan(arc/2)) with arc clamped 1..175 (0044e260).
+// So a legacy size in quants is size*2^(15-shift)/focal. Pixel truncation of tiny sizes is not reproduced.
+static double legacy_particle_quants(double arc,int width){
+ const int shift=14-int((width-1)/320.0+.5);
+ return std::ldexp(1.0,15-shift)*2*std::tan(std::clamp(std::abs(arc),1.0,175.0)*std::numbers::pi/360)/width;
 }
 static bool core_equal(std::string_view a,std::string_view b){return !CaseLess{}(a,b)&&!CaseLess{}(b,a);}
 static const NativeMask* core_mask(Object::Kind kind,std::string_view name,SemanticProfile profile){if(kind==Object::Kind::Particle)kind=Object::Kind::Entity;
@@ -653,7 +668,7 @@ static std::string_view core_alias(Object::Kind kind,std::string_view n){if(kind
 Ref State::member(ObjectId id,std::string_view name){auto& o=require(id);if(o.kind==Object::Kind::Text&&core_equal(name,"string"))return {nullptr,id,"string"};if(auto* m=core_mask(o.kind,name,profile))return {&o.field(m->backing),id,m->name,0,m->mask};
  const char* canonical=nullptr;if(core_equal(name,"pos"))canonical="x";else if(core_equal(name,"angle")||core_equal(name,"angles"))canonical="pan";else if(core_equal(name,"scale"))canonical="scale_x";else if(core_equal(name,"color"))canonical="blue";
  name=core_alias(o.kind,canonical?std::string_view(canonical):name);if(o.kind==Object::Kind::Vector){std::size_t component=core_equal(name,"x")?0:core_equal(name,"y")?1:core_equal(name,"z")?2:3;if(component<3){static constexpr const char* names[]={"x","y","z"};if(o.scalar&&component==0)return {o.scalar,id,"x"};if(!o.array.empty()){if(component>=o.array.size())throw std::runtime_error("vector component outside array");return {&o.array[component],id,names[component],component};}}}auto& slot=o.field(name);auto it=o.fields.find(name);return {&slot,id,it->first};}
-Engine::Engine(Assets& a,Renderer* r,Media& m,State& s):assets(a),renderer(r),media(m),state(s),physics(*this){auto* base=std::getenv("XDG_DATA_HOME");if(base&&*base)saveRoot=std::filesystem::path(base)/"kabus22";else {auto* home=std::getenv("HOME");if(!home)throw std::runtime_error("HOME or XDG_DATA_HOME required for private saves");saveRoot=std::filesystem::path(home)/".local/share/kabus22";}std::filesystem::create_directories(saveRoot);initialize_globals();
+Engine::Engine(Assets& a,Renderer* r,Media& m,State& s):assets(a),renderer(r),media(m),state(s),physics(*this){saveRoot=saves::root();std::filesystem::create_directories(saveRoot);initialize_globals();
  for(auto& slot:vectorTemps_){auto& object=state.create(Object::Kind::Vector);object.array.resize(3);slot=&object;}
 }
 void Engine::resolve_builtin_font(){
@@ -666,7 +681,8 @@ void Engine::resolve_builtin_font(){
 void Engine::configure_language(Runtime& runtime,std::string_view language,bool explicitChoice){
  // The widescreen catalog protocol extends the original options record by one byte.
  if(!runtime.function("load_subtitle"))return;
- const std::uint8_t index=language=="tr"?0:language=="de"?2:1;
+ // Patch DilMenu/dil_degistir DD_Dil: 0 TR, 1 EN, 2 DE, 3 ES, 4 RU, 5 PL (byte 32 of options.k22).
+ const std::uint8_t index=language=="tr"?0:language=="de"?2:language=="es"?3:language=="ru"?4:language=="pl"?5:1;
  set_global("DD_Dil",Value::from_int(index));
  std::vector<std::uint8_t> bytes;const auto destination=svc_private(saveRoot,"options.k22");
  if(std::filesystem::exists(destination)){
@@ -687,7 +703,7 @@ bool Engine::display_admitted(){
 }
 bool Engine::configure_display(Runtime& runtime,bool originalCampaignEntry,bool native,int width,int height,WindowMode mode){
  const bool continuing=display_admitted();
- if(continuing&&!native){auto restore=[&](ObjectId id,double x,double y){auto& a=state.require(id).array;a[0].value=Value::from_double(x);a[1].value=Value::from_double(y);};restore(displayResolution_,640,480);restore(displayScale_,1,1);restore(displayScale2_,1,1);restore(displayFont_,1,1.166);}
+ if(continuing&&!native){auto restore=[&](ObjectId id,std::size_t at,std::initializer_list<double> values){auto& a=state.require(id).array;for(double v:values)a[at++].value=Value::from_double(v);};restore(displayResolution_,2*DisplayTier,{1024,768});restore(displayScale_,2*DisplayTier,{1.6,1.6});restore(displayScale2_,2*DisplayTier,{1,1});restore(displayFont_,DisplayTier,{1.611});set_global("GA_Cozunurluk",Value::from_int(authoredResolution_));}
  nativeDisplay_=false;if(!continuing||!native){displayObjects_.clear();displayFills_.clear();}
  if(!originalCampaignEntry||!native||state.profile!=SemanticProfile::CampaignA6||runtime.function("dbg_screen_reset"))return false;
  for(auto name:{"GA_AyarlariYukle","Menu_AcilisEkrani","AnaMenuAc","EM_Ayarla","GrafikMenuKapat","SmartMenuAc"})if(!runtime.function(name))return false;
@@ -696,8 +712,9 @@ bool Engine::configure_display(Runtime& runtime,bool originalCampaignEntry,bool 
  if(!displayResolution_||!displayScale_||!displayScale2_||!displayFont_||!array("EM_Kordinat",54)||!array("EML_Paneller",27))return false;
  const auto& resolution=state.require(displayResolution_).array;
  constexpr std::array<int,10> authored{640,480,800,600,1024,768,1280,1024,1600,1200};
- for(std::size_t i=continuing?2:0;i<authored.size();++i)if(resolution[i].value.integer()!=authored[i])return false;
- auto matches=[&](ObjectId id,const auto& values){const auto& a=state.require(id).array;for(std::size_t i=continuing?2:0;i<values.size();++i)if(a[i].value.raw()!=Value::from_double(values[i]).raw())return false;return true;};
+ // A continuing graph owns only the native tier slot; every other authored entry must remain intact.
+ for(std::size_t i=0;i<authored.size();++i)if(!(continuing&&i/2==DisplayTier)&&resolution[i].value.integer()!=authored[i])return false;
+ auto matches=[&](ObjectId id,const auto& values){const auto& a=state.require(id).array;const std::size_t stride=values.size()==4?1:2;for(std::size_t i=0;i<values.size();++i)if(!(continuing&&i/stride==DisplayTier)&&a[i].value.raw()!=Value::from_double(values[i]).raw())return false;return true;};
  if(!matches(displayScale_,std::array{1.0,1.0,1.25,1.25,1.6,1.6,2.0,2.133,2.5,2.5})||
     !matches(displayScale2_,std::array{1.0,1.0,1.25,1.25,1.0,1.0,1.25,1.334,1.563,1.563})||
     !matches(displayFont_,std::array{1.0,1.166,1.611,2.0}))return false;
@@ -733,21 +750,27 @@ bool Engine::configure_display(Runtime& runtime,bool originalCampaignEntry,bool 
   else if(starts("BEP_"))role=DisplayRole::Boss;
   else if(starts("STMP_"))role=DisplayRole::Pause;
   else if(object->kind==Object::Kind::Panel&&(starts("AMP_")||starts("AYMP_")||starts("CMP_")||starts("YMP_")||starts("GMP_")||starts("SMP_")||starts("KSMP_")||starts("KONMP_")||starts("JKONMP_")||starts("YUMP_")))role=DisplayRole::Menu;
-  else if(object->kind==Object::Kind::Panel&&(starts("EMP_")||starts("PEMP_")||starts("KVMP_")||starts("KOMP_")))role=DisplayRole::Gameplay;
+  else if(object->kind==Object::Kind::Panel&&(starts("EMP_")||starts("PEMP_")||starts("KVMP_")||starts("KOMP_"))){role=DisplayRole::Gameplay;index=starts("PEMP_")||starts("KVMP_");}
   else for(auto name:textNames)if(is(name)){role=DisplayRole::Text;break;}
   displayObjects_.push_back({id,role,index});
   if(role==DisplayRole::Fill)displayFills_.insert(id);
  }
+ if(!continuing)authoredResolution_=std::uint8_t(number("GA_Cozunurluk"));
  nativeDisplay_=true;prepare_display();return true;
 }
 void Engine::prepare_display(){
  if(!display_admitted())return;
- const float width=float(currentWidth_),height=float(currentHeight_);auto ratio=[](float size,float basis){return float(Value::from_double(size/basis).real());};const float mx=ratio(width,1280),my=ratio(height,720),gx=ratio(width,640),gy=ratio(height,480);
+ const float width=float(currentWidth_),height=float(currentHeight_);auto ratio=[](float size,float basis){return float(Value::from_double(size/basis).real());};const float mx=ratio(width,1280),my=ratio(height,720),gx=ratio(width,640),gy=ratio(height,480),ax=ratio(width,1024),ay=ratio(height,768);
  const bool gameplay=number("LY_AktifLevelID")!=0&&number("level_yuklendi_ok")!=0&&number("game_over_start")==0&&number("STM_Acik")==0;
- auto pair=[&](ObjectId id,float x,float y){auto& a=state.require(id).array;a[0].value=Value::from_double(x);a[1].value=Value::from_double(y);};
- const float sourceScale2X=float(state.require(displayScale2_).array[0].value.real());
- pair(displayResolution_,width,height);pair(displayScale_,gameplay?gx:mx,gameplay?gy:my);pair(displayScale2_,gameplay?gx:mx,gameplay?gy:my);pair(displayFont_,mx,my);
- set_global("GA_Cozunurluk",{});set_global("GM_CursorCozunurluk",{});
+ // Original art rule (Kabusdismenu/YeniMenu/K22/PlayerEnerji/KoruView/kotu_koruyucu): GA_Cozunurluk>1 selects the
+ // 1024-tier art drawn with GA_ScaleOranlari2 = resolution/1024x768; every native size is >=1280x720, i.e. that tier.
+ auto pair=[&](ObjectId id,float x,float y){auto& a=state.require(id).array;a[2*DisplayTier].value=Value::from_double(x);a[2*DisplayTier+1].value=Value::from_double(y);};
+ const float sourceScale2X=float(state.require(displayScale2_).array[2*DisplayTier].value.real());
+ pair(displayResolution_,width,height);pair(displayScale_,gameplay?gx:mx,gameplay?gy:my);pair(displayScale2_,gameplay?ax:ratio(width,2048),gameplay?ay:ratio(height,1152));
+ state.require(displayFont_).array[DisplayTier].value=Value::from_double(mx);
+ set_global("GA_Cozunurluk",Value::from_int(DisplayTier));set_global("GM_CursorCozunurluk",Value::from_int(DisplayTier));
+ // Text keeps the tier-0 font set scaled by GA_FontOranlari (patch font model, D16); only art follows the tier.
+ for(auto name:{"LV_Fontlar","LV_EskiFontlar","LV_DokFontlar","timesfont_dizi","font_yukseklik_oran"}){auto value=global(name);auto* fonts=value.kind==Value::Kind::Object?state.get(value.bits):nullptr;if(fonts&&fonts->alive&&fonts->array.size()>DisplayTier)fonts->array[DisplayTier].value=fonts->array[0].value;}
  set_global("video_screen",Value::from_int(currentWindowMode==WindowMode::Fullscreen?1:2));
  const bool resized=displayWidth_!=currentWidth_||displayHeight_!=currentHeight_;
  if(resized)std::snprintf(displayLabel_.data(),displayLabel_.size(),"%dx%d",currentWidth_,currentHeight_);
@@ -773,8 +796,9 @@ void Engine::prepare_display(){
   switch(entry.role){
    case DisplayRole::Grid:scale(id,gx,gy);break;
    case DisplayRole::Fill:{const auto bitmap=object->fields.find("bmap");if(field(id,"visible")&&bitmap!=object->fields.end()&&bitmap->second.value){const auto size=bitmap_size(bitmap->second.value);scale(id,width/size.x,height/size.y);place(id,0,0);}break;}
-   case DisplayRole::IntroTitle:{const auto bitmap=object->fields.find("bmap");if(field(id,"visible")&&bitmap!=object->fields.end()&&bitmap->second.value){const auto size=bitmap_size(bitmap->second.value);scale(id,gx,gy);place(id,(width-size.x*gx)/2,(height-size.y*gy)/2);}break;}
-   case DisplayRole::EyeRight:case DisplayRole::EyeLeft:{const bool right=entry.role==DisplayRole::EyeRight;scale(id,gx,gy);place(id,(right?414:205)*gx,(right?376:377)*gy);break;}
+   case DisplayRole::IntroTitle:{const auto bitmap=object->fields.find("bmap");if(field(id,"visible")&&bitmap!=object->fields.end()&&bitmap->second.value){const auto size=bitmap_size(bitmap->second.value);scale(id,ax,ay);place(id,(width-size.x*ax)/2,(height-size.y*ay)/2);}break;}
+   // Kabusdismenu.wdl gozsag/gozsol_pos_x/y[2]: 1024-tier eye frames in 1024x768 space.
+   case DisplayRole::EyeRight:case DisplayRole::EyeLeft:{const bool right=entry.role==DisplayRole::EyeRight;scale(id,ax,ay);place(id,(right?662:327)*ax,(right?601:603)*ay);break;}
    case DisplayRole::CreditFrame:scale(id,mx,my);place(id,(width-400*mx)/2,(height-300*my)/2);break;
    case DisplayRole::Text:case DisplayRole::Document:case DisplayRole::InventoryLabel:case DisplayRole::Credit:case DisplayRole::LoadList:{
     scale(id,mx,entry.role==DisplayRole::LoadList?mx:my);
@@ -785,8 +809,8 @@ void Engine::prepare_display(){
     break;
    }
    case DisplayRole::LoadCursor:scale(id,mx,mx);place(id,(width-384*mx)/2,loadTop+(float(number("YUM_Cursor"))*18-displayLoadScroll_)*mx+6*my);break;
-   case DisplayRole::Bar:scale(id,gx,gy);break;
-   case DisplayRole::Boss:case DisplayRole::BossEnergy:{auto bitmap=object->fields.find("bmap");if(field(id,"visible")&&bitmap!=object->fields.end()&&bitmap->second.value){const auto size=bitmap_size(bitmap->second.value);float sx=gx;if(entry.role==DisplayRole::BossEnergy){sx=float(field(id,"scale_x"));if(sourceBossScaleX!=entry.bossScaleX&&sourceScale2X>0)sx=sourceBossScaleX*gx/sourceScale2X;}scale(id,sx,gy);entry.bossScaleX=float(field(id,"scale_x"));place(id,(width-size.x*gx)/2,218*gy+(height-size.y*gy)/2);}break;}
+   case DisplayRole::Bar:scale(id,gx,gy);break; // D10: patch cinematic.wdl bars W/640,H/480 instead of W/600,H/440.
+   case DisplayRole::Boss:case DisplayRole::BossEnergy:{auto bitmap=object->fields.find("bmap");if(field(id,"visible")&&bitmap!=object->fields.end()&&bitmap->second.value){const auto size=bitmap_size(bitmap->second.value);float sx=ax;if(entry.role==DisplayRole::BossEnergy){sx=float(field(id,"scale_x"));if(sourceBossScaleX!=entry.bossScaleX&&sourceScale2X>0)sx=sourceBossScaleX*ax/sourceScale2X;}scale(id,sx,ay);entry.bossScaleX=float(field(id,"scale_x"));place(id,(width-size.x*ax)/2,218*gy+(height-size.y*ay)/2);}break;}
    case DisplayRole::Pause:{
     scale(id,mx,my);const float bottom=height-32*my-10;
     if(core_equal(object->name,"STMP_Devam")||core_equal(object->name,"STMP_AnaMenu"))place(id,(width-172*mx)/2+22*mx,bottom-(core_equal(object->name,"STMP_Devam")?32*my:0));
@@ -801,8 +825,9 @@ void Engine::prepare_display(){
     break;
    }
    case DisplayRole::Gameplay:{
-    const float sx=float(field(id,"scale_x")),sy=float(field(id,"scale_y"));
-    if(sx>0&&sy>0&&(sx!=gx||sy!=gy)){place(id,float(field(id,"pos_x"))*gx/sx,float(field(id,"pos_y"))*gy/sy);scale(id,gx,gy);}
+    // index1: PlayerEnerji/KoruView HUD art follows GA_ScaleOranlari2 (1024 tier); others the 640 basis.
+    const float sx=float(field(id,"scale_x")),sy=float(field(id,"scale_y")),tx=entry.index?ax:gx,ty=entry.index?ay:gy;
+    if(sx>0&&sy>0&&(sx!=tx||sy!=ty)){place(id,float(field(id,"pos_x"))*tx/sx,float(field(id,"pos_y"))*ty/sy);scale(id,tx,ty);}
     break;
    }
    case DisplayRole::Ordinary:case DisplayRole::MapPixel:break;
@@ -818,6 +843,9 @@ void Engine::prepare_display(){
   set_global("GM_ParlakKor",Value::from_double(number("GM_ParlakKor")*rx));
  }
  if(loadVisible){set_global("Cer_hX1",Value::from_double((width-384*mx)/2));set_global("Cer_hX2",Value::from_double((width+384*mx)/2));set_global("Cer_hY1",Value::from_double(loadTop));set_global("Cer_hY2",Value::from_double(loadBottom));}
+ // CikisMenu.wdl:47 bottom 480*GA_ScaleOranlari[y]-DM_AltPay equals screen_size.y-16 in every authored table; native's
+ // H/720 menu scale breaks that identity (frame inverted above the question), so restore the authored bottom.
+ if(field(global("CMP_Soru").bits,"visible"))set_global("Cer_hY2",Value::from_double(height-16));
  auto camera=global("camera");if(camera){set_field(camera.bits,"size_x",width);set_field(camera.bits,"size_y",height);}
  displayWidth_=currentWidth_;displayHeight_=currentHeight_;
 }
@@ -826,6 +854,43 @@ float Engine::display_aspect(float authored)const{
  // Original0044e260/0044cd00: screen-mode factor, not a patch-added Hor+ projection.
  const float modeFactor=currentWindowMode==WindowMode::Fullscreen?float(currentHeight_)*320/(float(currentWidth_)*240):1;
  return 1/(authored*modeFactor);
+}
+void Engine::update_first_person(){
+ // Community patch 1.8.5 cam.wdl fps_camera_control on the original scripts: the patch guards every level camera
+ // writer off and its starter owns CAMERA; here the pose is applied after all scripts. Demir(0)/Ebru(1) only, in a
+ // level, controllable, unfrozen, CAMERA shown (Video_Cam cutscenes and freeze_mode keep their own cameras).
+ static constexpr std::array<std::string_view,7> names{"x","y","z","pan","tilt","roll","arc"};
+ const auto cameraValue=global("camera"),playerValue=global("player"),cutscene=global("Video_Cam");
+ const ObjectId camera=cameraValue.kind==Value::Kind::Object?cameraValue.bits:0,player=playerValue.kind==Value::Kind::Object?playerValue.bits:0;
+ const auto* actor=state.get(player);const int who=int(number("Aktif_Player"));
+ const bool active=cameraMode==CameraMode::FirstPerson&&camera&&actor&&actor->alive&&entities.contains(player)&&(who==0||who==1)&&number("LY_AktifLevelID")!=0&&(number("oyuncu_pasif")==0||number("koruyucu_pasif")==0)&&global("freeze_mode").raw()==0&&field(camera,"visible")!=0&&!(cutscene.kind==Value::Kind::Object&&field(cutscene.bits,"visible")!=0);
+ std::array<double,7> now{};if(camera)for(std::size_t i=0;i<names.size();++i)now[i]=field(camera,names[i]);
+ if(!active){
+  // Yield: fields the scripts did not rewrite since the last override return to their last script-authored values.
+  if(firstPersonActive_&&camera)for(std::size_t i=0;i<names.size();++i)if(now[i]==firstPersonWritten_[i])set_field(camera,names[i],firstPersonScript_[i]);
+  firstPersonActive_=false;return;
+ }
+ for(std::size_t i=0;i<names.size();++i)if(!firstPersonActive_||now[i]!=firstPersonWritten_[i])firstPersonScript_[i]=now[i];
+ if(!firstPersonActive_)firstPersonTilt_=0; // The patch's F5 toggle inherited a level-camera tilt; a persistent setting starts level.
+ const bool forward=number("Key_Ileri")!=0,aim=number("Key_SilahKaldir")==1,run=number("Key_Kosma")==1;
+ double distance=2,height=who==0?35:30,low=-45;
+ if(forward){distance=who==0?1:0;height=who==0?30:25;low=-30;}
+ firstPersonTilt_=std::clamp(firstPersonTilt_,low,40.0);
+ if(aim){distance=3;height=25;firstPersonTilt_=-5;}
+ if(run&&forward){distance=-8;height=25;firstPersonTilt_=std::clamp(firstPersonTilt_,-25.0,40.0);}
+ // ponytail: patch validate_view() is skipped; with |distance|<=8 the camera stays inside the player's own hull, so its
+ // wall traces (from player.z+50, threshold dist_total<=3) cannot trigger. Port it if the distances ever grow.
+ constexpr double radians=3.14159265358979323846/180;const double tilt3rd=5*radians,planar=std::cos(tilt3rd)*distance;
+ const auto origin=position(player);double pan=field(player,"pan");
+ const Vec3 eye{float(origin.x-std::cos(pan*radians)*planar),float(origin.y-std::sin(pan*radians)*planar),float(origin.z+height+std::sin(tilt3rd)*planar)};
+ // Patch cam.wdl: pan-=8*mouse_force.x*time; tilt+=8*mouse_force.y*time, on the original A6 mouse_force (update_input).
+ const auto force=vector(global_vector("mouse_force"));const double turn=8*number("time");
+ pan-=turn*force.x;set_field(player,"pan",pan);
+ firstPersonTilt_+=turn*force.y;double cameraPan=field(player,"pan"),cameraTilt=firstPersonTilt_;
+ if(number("bombacam_salla_s")!=0){const double shake=number("bombacam_salla_m");cameraPan+=shake*(std::generate_canonical<double,32>(random)*10-5);cameraTilt+=shake*(std::generate_canonical<double,32>(random)*10-5);}
+ const std::array<double,7> pose{eye.x,eye.y,eye.z,cameraPan,cameraTilt,0,70};
+ for(std::size_t i=0;i<names.size();++i){set_field(camera,names[i],pose[i]);firstPersonWritten_[i]=field(camera,names[i]);}
+ firstPersonActive_=true;
 }
 Value Engine::global(std::string_view n)const{auto i=state.globals.find(n);return i==state.globals.end()?Value{}:i->second.value;}
 Argument Engine::global_vector(std::string_view n)const{auto it=state.numericGlobals.find(n);if(it!=state.numericGlobals.end())return {global(n),{state.require(it->second).scalar,it->second,"x"}};auto v=global(n);if(v.kind!=Value::Kind::Object)throw std::runtime_error("unknown vector global "+std::string(n));return {v,{}};}
@@ -840,7 +905,11 @@ FunctionId Engine::callback(ObjectId id,std::string_view n)const{auto* o=state.g
 Vec3 Engine::position(ObjectId id)const{return {float(field(id,"x")),float(field(id,"y")),float(field(id,"z"))};}
 Vec3 Engine::angles(ObjectId id)const{return {float(field(id,"pan")),float(field(id,"tilt")),float(field(id,"roll"))};}
 void Engine::set_position(ObjectId id,Vec3 v){set_field(id,"x",v.x);set_field(id,"y",v.y);set_field(id,"z",v.z);}
-static std::array<const char*,3> core_vector_names(std::string_view f){if(core_equal(f,"pan")||core_equal(f,"angle")||core_equal(f,"angles"))return {"pan","tilt","roll"};if(core_equal(f,"scale")||core_equal(f,"scale_x"))return {"scale_x","scale_y","scale_z"};if(core_equal(f,"blue")||core_equal(f,"color"))return {"blue","green","red"};if(core_equal(f,"min_x"))return {"min_x","min_y","min_z"};if(core_equal(f,"max_x"))return {"max_x","max_y","max_z"};if(core_equal(f,"vel_x"))return {"vel_x","vel_y","vel_z"};return {"x","y","z"};}
+// A6 entity skills are contiguous floats (K22.exe 0043e390: entSkill41..44 at ENTITY+0x134..0x140, vecSkill41 passes +0x134 as a vector),
+// so a vector argument my.skillN addresses skillN..skillN+2 (Yrt_Temp=Skill33 / Yrt_HedefPan=Skill36 in klasik_yara.wdl).
+static std::array<const char*,3> core_vector_names(std::string_view f){if(core_equal(f,"pan")||core_equal(f,"angle")||core_equal(f,"angles"))return {"pan","tilt","roll"};if(core_equal(f,"scale")||core_equal(f,"scale_x"))return {"scale_x","scale_y","scale_z"};if(core_equal(f,"blue")||core_equal(f,"color"))return {"blue","green","red"};if(core_equal(f,"min_x"))return {"min_x","min_y","min_z"};if(core_equal(f,"max_x"))return {"max_x","max_y","max_z"};if(core_equal(f,"vel_x"))return {"vel_x","vel_y","vel_z"};
+ if(f.size()>5&&core_equal(f.substr(0,5),"skill")){unsigned n=0;auto [end,error]=std::from_chars(f.data()+5,f.data()+f.size(),n);if(error==std::errc{}&&end==f.data()+f.size()&&n>=1&&n<=100){static const auto skills=[]{std::array<std::string,103> names;for(unsigned i=1;i<names.size();++i)names[i]="skill"+std::to_string(i);return names;}();return {skills[n].c_str(),skills[n+1].c_str(),skills[n+2].c_str()};}}
+ return {"x","y","z"};}
 Vec3 Engine::vector(const Argument& a)const{const auto value=a.current();const auto ref=value.kind==Value::Kind::Object?Ref{}:a.ref;ObjectId id=value.kind==Value::Kind::Object?value.bits:ref.owner;auto* o=state.get(id);if(!o)throw std::runtime_error("vector argument is not an object/reference");if(!o->array.empty()&&(o->kind==Object::Kind::Vector||core_equal(ref.field,"skill"))){if(o->array.size()<ref.index+3)throw std::runtime_error("vector array range");return {float(o->array[ref.index].value.real()),float(o->array[ref.index+1].value.real()),float(o->array[ref.index+2].value.real())};}auto n=core_vector_names(ref.field);return {float(field(id,n[0])),float(field(id,n[1])),float(field(id,n[2]))};}
 void Engine::set_vector(const Argument& a,Vec3 v){const auto value=a.current();const auto ref=value.kind==Value::Kind::Object?Ref{}:a.ref;ObjectId id=value.kind==Value::Kind::Object?value.bits:ref.owner;auto& o=state.require(id);if(!o.array.empty()&&(o.kind==Object::Kind::Vector||core_equal(ref.field,"skill"))){if(o.array.size()<ref.index+3)throw std::runtime_error("vector array range");o.array[ref.index].value=Value::from_double(v.x);o.array[ref.index+1].value=Value::from_double(v.y);o.array[ref.index+2].value=Value::from_double(v.z);return;}auto n=core_vector_names(ref.field);set_field(id,n[0],v.x);set_field(id,n[1],v.y);set_field(id,n[2],v.z);}
 std::string_view Engine::string(Value v)const{if(!v.bits)return {};if(v.kind!=Value::Kind::Object&&v.kind!=Value::Kind::NativeText)throw std::runtime_error("expected string object/native bytes");auto& o=const_cast<State&>(state).require(v.bits);if(!o.alive)throw std::runtime_error("dead STRING/native bytes");if(o.nullStringBuffer)throw std::runtime_error("read from NULL STRING buffer");return o.text;}
@@ -854,12 +923,18 @@ void Engine::initialize_globals(){for(auto& d:nativeDefaults){if(d.bonusOnly&&st
  auto& temp=state.create(Object::Kind::Vector,"temp");temp.array.resize(5);set_global("temp",Value::object(temp.id));
  auto& font=state.create(Object::Kind::Font,"_a4font");font.text="engine/_a4font.pcx";set_field(font.id,"style",6);set_field(font.id,"size",9);set_global("_a4font",Value::object(font.id));
  auto& sprite=state.create(Object::Kind::Bmap,"_a4spr");sprite.text=font.text;set_global("_a4spr",Value::object(sprite.id));
- // Native 00415ad0/00415390 register the actual game's built-in particle MATERIAL before WDL.
- auto& particleMaterial=state.create(Object::Kind::Material,"mat_particle");set_global("mat_particle",Value::object(particleMaterial.id));
- for(auto [prefix,value]:{std::pair{"ambient",200},{"diffuse",0},{"specular",0},{"emissive",0},{"map",255}})for(auto channel:{"blue","green","red"})particleMaterial.field(std::string(prefix)+"_"+channel).value=Value::from_int(value);
- for(auto [name,value]:{std::pair{"albedo",0},{"power",0},{"alpha",100},{"cycle",480},{"scale1",0},{"scale2",0},{"flags",0}})particleMaterial.field(name).value=Value::from_int(value);
- for(auto name:{"effect","skin1","skin2","skin3","skin4"})particleMaterial.field(name).value=Value::object(0);
- particleMaterial.field("event").value=Value::function(0);
+ // Native 00415ad0/00415390 register the actual game's built-in MATERIALs before WDL (birth: map255, alpha100, cycle480).
+ // The mat_model/terrain/sprite/unlit/metal defaults are bound by A6 0042fa20; Bonus registers only mat_particle here.
+ struct BuiltinMaterial{const char* name;int ambient,diffuse,specular,emissive,albedo,power;};
+ static constexpr BuiltinMaterial builtinMaterials[]{{"mat_particle",200,0,0,0,0,0},{"mat_model",200,255,0,0,50,0},{"mat_terrain",200,255,0,0,50,0},{"mat_sprite",200,128,0,0,0,0},{"mat_unlit",0,0,0,128,0,0},{"mat_metal",100,100,200,0,50,4}};
+ for(const auto& builtin:builtinMaterials){
+  if(state.profile!=SemanticProfile::CampaignA6&&builtin.name!=std::string_view("mat_particle"))continue;
+  auto& material=state.create(Object::Kind::Material,builtin.name);set_global(builtin.name,Value::object(material.id));
+  for(auto [prefix,value]:{std::pair{"ambient",builtin.ambient},{"diffuse",builtin.diffuse},{"specular",builtin.specular},{"emissive",builtin.emissive},{"map",255}})for(auto channel:{"blue","green","red"})material.field(std::string(prefix)+"_"+channel).value=Value::from_int(value);
+  for(auto [name,value]:{std::pair{"albedo",builtin.albedo},{"power",builtin.power},{"alpha",100},{"cycle",480},{"scale1",0},{"scale2",0},{"flags",0}})material.field(name).value=Value::from_int(value);
+  for(auto name:{"effect","skin1","skin2","skin3","skin4"})material.field(name).value=Value::object(0);
+  material.field("event").value=Value::function(0);
+ }
  // Both source initializers register this live object; authored declarations may replace its binding.
  if(const auto existing=global("mat_shadow");!existing||!state.get(existing.bits)||!state.get(existing.bits)->alive){
   auto& shadowMaterial=state.create(Object::Kind::Material,"mat_shadow");set_global("mat_shadow",Value::object(shadowMaterial.id));
@@ -904,8 +979,18 @@ EntityData& Engine::register_entity(ObjectId id){
 void Engine::prepare(Runtime& runtime){ensure_font_palette(runtime.compiler_settings().entry);assets.initialize_native_lightmap_tables(global("GAMMA").raw(),global("D3D_MONOCHROME").bits!=0,renderer!=nullptr);const auto count=state.objects.size();for(std::size_t i=0;i<count;++i){auto& object=state.objects[i];if(!object.alive||object.kind!=Object::Kind::Entity||entities.contains(object.id))continue;ObjectId id=object.id;register_entity(id);auto fn=callback(id,"action");if(fn){if(state.profile==SemanticProfile::BonusA7)runtime.enqueue(fn,{},id,0);else runtime.start(fn,{},id,0);}}if(state.profile==SemanticProfile::BonusA7)for(std::size_t i=0;i<count;++i){const auto& object=state.objects[i];if(object.alive&&object.kind==Object::Kind::Entity)initialize_query_actor(object.id);}make_frame();}
 int legacy_scancode(int code){static constexpr int codes[]={SDL_SCANCODE_UNKNOWN,SDL_SCANCODE_ESCAPE,SDL_SCANCODE_1,SDL_SCANCODE_2,SDL_SCANCODE_3,SDL_SCANCODE_4,SDL_SCANCODE_5,SDL_SCANCODE_6,SDL_SCANCODE_7,SDL_SCANCODE_8,SDL_SCANCODE_9,SDL_SCANCODE_0,SDL_SCANCODE_MINUS,SDL_SCANCODE_EQUALS,SDL_SCANCODE_BACKSPACE,SDL_SCANCODE_TAB,SDL_SCANCODE_Q,SDL_SCANCODE_W,SDL_SCANCODE_E,SDL_SCANCODE_R,SDL_SCANCODE_T,SDL_SCANCODE_Y,SDL_SCANCODE_U,SDL_SCANCODE_I,SDL_SCANCODE_O,SDL_SCANCODE_P,SDL_SCANCODE_LEFTBRACKET,SDL_SCANCODE_RIGHTBRACKET,SDL_SCANCODE_RETURN,SDL_SCANCODE_LCTRL,SDL_SCANCODE_A,SDL_SCANCODE_S,SDL_SCANCODE_D,SDL_SCANCODE_F,SDL_SCANCODE_G,SDL_SCANCODE_H,SDL_SCANCODE_J,SDL_SCANCODE_K,SDL_SCANCODE_L,SDL_SCANCODE_SEMICOLON,SDL_SCANCODE_APOSTROPHE,SDL_SCANCODE_GRAVE,SDL_SCANCODE_LSHIFT,SDL_SCANCODE_BACKSLASH,SDL_SCANCODE_Z,SDL_SCANCODE_X,SDL_SCANCODE_C,SDL_SCANCODE_V,SDL_SCANCODE_B,SDL_SCANCODE_N,SDL_SCANCODE_M,SDL_SCANCODE_COMMA,SDL_SCANCODE_PERIOD,SDL_SCANCODE_SLASH,SDL_SCANCODE_RSHIFT,SDL_SCANCODE_KP_MULTIPLY,SDL_SCANCODE_LALT,SDL_SCANCODE_SPACE,SDL_SCANCODE_CAPSLOCK,SDL_SCANCODE_F1,SDL_SCANCODE_F2,SDL_SCANCODE_F3,SDL_SCANCODE_F4,SDL_SCANCODE_F5,SDL_SCANCODE_F6,SDL_SCANCODE_F7,SDL_SCANCODE_F8,SDL_SCANCODE_F9,SDL_SCANCODE_F10,SDL_SCANCODE_NUMLOCKCLEAR,SDL_SCANCODE_SCROLLLOCK,SDL_SCANCODE_HOME,SDL_SCANCODE_UP,SDL_SCANCODE_PAGEUP,SDL_SCANCODE_KP_MINUS,SDL_SCANCODE_LEFT,SDL_SCANCODE_KP_5,SDL_SCANCODE_RIGHT,SDL_SCANCODE_KP_PLUS,SDL_SCANCODE_END,SDL_SCANCODE_DOWN,SDL_SCANCODE_PAGEDOWN,SDL_SCANCODE_INSERT,SDL_SCANCODE_DELETE};if(code>=0&&code<int(std::size(codes)))return codes[code];switch(code){case 87:return SDL_SCANCODE_F11;case 88:return SDL_SCANCODE_F12;case 156:return SDL_SCANCODE_KP_ENTER;case 157:return SDL_SCANCODE_RCTRL;case 181:return SDL_SCANCODE_KP_DIVIDE;case 184:return SDL_SCANCODE_RALT;case 199:return SDL_SCANCODE_HOME;case 200:return SDL_SCANCODE_UP;case 201:return SDL_SCANCODE_PAGEUP;case 203:return SDL_SCANCODE_LEFT;case 205:return SDL_SCANCODE_RIGHT;case 207:return SDL_SCANCODE_END;case 208:return SDL_SCANCODE_DOWN;case 209:return SDL_SCANCODE_PAGEDOWN;case 210:return SDL_SCANCODE_INSERT;case 211:return SDL_SCANCODE_DELETE;default:return SDL_SCANCODE_UNKNOWN;}}
 static bool core_key_bits(const std::bitset<SDL_NUM_SCANCODES>& bits,int code){auto scan=legacy_scancode(code);bool result=scan!=SDL_SCANCODE_UNKNOWN&&bits[scan];int alias=SDL_SCANCODE_UNKNOWN;switch(code){case 28:alias=SDL_SCANCODE_KP_ENTER;break;case 29:alias=SDL_SCANCODE_RCTRL;break;case 56:alias=SDL_SCANCODE_RALT;break;case 53:alias=SDL_SCANCODE_KP_DIVIDE;break;case 71:alias=SDL_SCANCODE_KP_7;break;case 72:alias=SDL_SCANCODE_KP_8;break;case 73:alias=SDL_SCANCODE_KP_9;break;case 75:alias=SDL_SCANCODE_KP_4;break;case 77:alias=SDL_SCANCODE_KP_6;break;case 79:alias=SDL_SCANCODE_KP_1;break;case 80:alias=SDL_SCANCODE_KP_2;break;case 81:alias=SDL_SCANCODE_KP_3;break;case 82:alias=SDL_SCANCODE_KP_0;break;case 83:alias=SDL_SCANCODE_KP_PERIOD;break;case 86:alias=SDL_SCANCODE_NONUSBACKSLASH;break;default:break;}return result||(alias!=SDL_SCANCODE_UNKNOWN&&bits[alias]);}
-static int core_gamepad_key(int code){switch(code){case 28:return SDL_CONTROLLER_BUTTON_A;case 1:return SDL_CONTROLLER_BUTTON_B;case 72:return SDL_CONTROLLER_BUTTON_DPAD_UP;case 80:return SDL_CONTROLLER_BUTTON_DPAD_DOWN;case 75:return SDL_CONTROLLER_BUTTON_DPAD_LEFT;case 77:return SDL_CONTROLLER_BUTTON_DPAD_RIGHT;default:return -1;}}
-Value Engine::key_state(int code)const{if(code<0||code>=127)return {};bool down=core_key_bits(input.keys,code)||core_key_bits(input.pressed,code);auto pad=core_gamepad_key(code);if(pad>=0)down=down||input.controllerButtons[pad]||input.controllerPressed[pad];return Value::from_int(down);}
+// The d-pad doubles as the arrow keys in both controller modes. A/B → Enter/Esc only in modern mode: in original mode they
+// are raw JOY_1/JOY_2, the shipped aim/fire (GA_JTuslar), and Enter while aiming reloads instead (oyuncu2.wdl:2529).
+static int core_gamepad_key(int code,bool modern){switch(code){case 28:return modern?SDL_CONTROLLER_BUTTON_A:-1;case 1:return modern?SDL_CONTROLLER_BUTTON_B:-1;case 72:return SDL_CONTROLLER_BUTTON_DPAD_UP;case 80:return SDL_CONTROLLER_BUTTON_DPAD_DOWN;case 75:return SDL_CONTROLLER_BUTTON_DPAD_LEFT;case 77:return SDL_CONTROLLER_BUTTON_DPAD_RIGHT;default:return -1;}}
+Value Engine::key_state(int code)const{if(code<0||code>=127)return {};bool down=core_key_bits(input.keys,code)||core_key_bits(input.pressed,code);auto pad=core_gamepad_key(code,controller.modern);if(pad>=0)down=down||input.controllerButtons[pad]||input.controllerPressed[pad];
+ // Patch 1.8.5 YukleMenu.wdl: the load list also takes JOY_Button[GA_JTuslar[1]]/[2] as Enter/Esc and JOY_Ileri/Geri as
+ // Up/Down. Offered only in modern controller mode; original mode keeps the ISO keyboard-only list.
+ if(!down&&controller.modern&&(code==28||code==1||code==72||code==80)&&field(global("YUMT_Liste").bits,"visible")!=0){
+  auto array=[&](std::string_view name)->const Object*{auto v=global(name);return v.kind==Value::Kind::Object?state.get(v.bits):nullptr;};
+  if(code==72||code==80)down=number(code==72?"JOY_Ileri":"JOY_Geri")!=0;
+  else if(auto* map=array("GA_JTuslar"),*buttons=array("JOY_Button");map&&buttons&&map->array.size()>2){const auto b=map->array[code==28?1:2].value.integer();down=b>=0&&std::size_t(b)<buttons->array.size()&&buttons->array[std::size_t(b)].value.bits!=0;}
+ }
+ return Value::from_int(down);}
 void Engine::update_input(Runtime& runtime){auto edge=[&](Value fn,int code){if(fn.kind!=Value::Kind::Function||!fn.bits)return;auto prior=global("_arg1");set_global("_arg1",Value::from_int(code));std::array<Argument,1> args{{{Value::from_int(code),{}}}};runtime.start(fn.bits,args,0,0);set_global("_arg1",prior);};auto anykey=[&](int code){edge(global("on_anykey"),code);};
  if(state.profile==SemanticProfile::BonusA7){
   set_vector(global_vector("mouse_cursor"),{input.mouseX,input.mouseY,0});
@@ -914,17 +999,36 @@ void Engine::update_input(Runtime& runtime){auto edge=[&](Value fn,int code){if(
   if(global("mouse_mode").raw()>=3072)set_vector(global_vector("mouse_pos"),{input.mouseX,input.mouseY,0});
  }
  for(int code=0;code<127;++code)if(keyboard_[code])keyboard_[code]->value=key_state(code);
- set_global("key_any",Value::from_int(input.keys.any()||input.pressed.any()));for(int code=0;code<127;++code){auto pad=core_gamepad_key(code);if(core_key_bits(input.pressed,code)||(pad>=0&&input.controllerPressed[pad])){if(keyboardCallbacks_[code])edge(keyboardCallbacks_[code]->value,code);anykey(code);}}
+ set_global("key_any",Value::from_int(input.keys.any()||input.pressed.any()));for(int code=0;code<127;++code){auto pad=core_gamepad_key(code,controller.modern);if(core_key_bits(input.pressed,code)||(pad>=0&&input.controllerPressed[pad])){if(keyboardCallbacks_[code])edge(keyboardCallbacks_[code]->value,code);anykey(code);}}
  constexpr int mouseButtons[]={SDL_BUTTON_LEFT,SDL_BUTTON_RIGHT,SDL_BUTTON_MIDDLE};for(std::size_t i=0;i<3;++i){auto b=mouseButtons[i];mouse_[i]->value=Value::from_int(input.mouseButtons[b]||input.mousePressed[b]);if(input.mousePressed[b]){edge(mouseCallbacks_[i]->value,280+int(i));anykey(280+int(i));}}
  if(state.profile==SemanticProfile::CampaignA6)set_vector(global_vector("mouse_pos"),{input.mouseX,input.mouseY,0});
- set_vector(global_vector("mouse_force"),{input.mouseDX,input.mouseDY,input.wheelY});
+ // A6 K22.exe 00422000 (A7 acknex.dll 10027844 identical, constants 10.0/50.0): mickeys scaled by MOUSE_SENSE*10/max(raw
+ // TIME_FRAME,50), plus the previous frame's scaled mickeys, y up, truncated, clamped to +-2*MOUSE_SENSE; .z never written.
+ // Skipped (force kept) in MOUSE_MODE>=2. ponytail: WINDOW_FOCUS gate omitted; unfocused SDL windows deliver no motion.
+ if(global("mouse_mode").raw()<0x800){
+  // x87: scale stored as float; product and sum in extended precision; the prior product stored as float.
+  const std::int32_t sense=global("mouse_sense").raw();const float frame=float(global("time_frame").raw()),k=float(sense)*10.0f/(frame<=50?50.0f:frame);
+  const double x=double(input.mouseDX)*k,y=-(double(input.mouseDY)*k);
+  auto limit=[&](double v){auto r=std::int32_t(v);return Value::from_raw(r< -2*sense?-2*sense:r>2*sense?2*sense:r).real();};
+  const auto force=global_vector("mouse_force");
+  set_vector(force,{float(limit(x+mouseForcePrior_[0])),float(limit(y+mouseForcePrior_[1])),vector(force).z});
+  mouseForcePrior_={float(x),float(y)};
+ }
  set_global("mouse_moving",Value::from_int(input.mouseDX!=0||input.mouseDY!=0));
  if(number("enable_mouse")!=0&&number("mouse_moving")==0){auto stop=global("on_mouse_stop");if(stop.kind==Value::Kind::Function&&stop.bits)runtime.start(stop.bits,{},0,0);}
  for(std::size_t j=0;j<2;++j)for(std::size_t b=0;b<12;++b){joystick_[j][b]->value=Value::from_int(input.joystickButtons[j][b]||input.joystickPressed[j][b]);if(input.joystickPressed[j][b]){edge(joystickCallbacks_[j][b]->value,256+int(b));anykey(256+int(j)*12+int(b));}}
- set_global("num_joysticks",Value::from_int(int(input.joystickConnected[0])+int(input.joystickConnected[1])));set_vector(global_vector("joy_raw"),{input.joystickAxes[0][0]*100,input.joystickAxes[0][1]*100,input.joystickAxes[0][2]*100});set_vector(global_vector("joy2_raw"),{input.joystickAxes[1][0]*100,input.joystickAxes[1][1]*100,input.joystickAxes[1][2]*100});
- set_vector(global_vector("joy_force"),{input.controllerAxes[SDL_CONTROLLER_AXIS_LEFTX]*100,-input.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY]*100,input.controllerAxes[SDL_CONTROLLER_AXIS_TRIGGERLEFT]*100});set_vector(global_vector("joy_rot"),{input.controllerAxes[SDL_CONTROLLER_AXIS_RIGHTX]*100,input.controllerAxes[SDL_CONTROLLER_AXIS_RIGHTY]*100,input.controllerAxes[SDL_CONTROLLER_AXIS_TRIGGERRIGHT]*100});
- if(input.quit){auto close=global("on_close");if(close.kind==Value::Kind::Function)edge(close,0);else quit=true;}if(renderer&&state.profile==SemanticProfile::CampaignA6)renderer->set_mouse_mode(number("mouse_mode")!=0,number("mouse_mode")==0&&number("enable_mouse")!=0);}
+ // A6 00422000: JOY_RAW/JOY_ROT = (pos*255)/range-255 (-255..255); JOY_FORCE.x/y = trunc(deadzone32(raw)*JOY_SENSE*0.02f), y negated,
+ // clamped to +-2*JOY_SENSE (full stick 2.0, so Joy_Takip's JOY_Ileri=joy_force.y/2 reaches 1); JOY_FORCE.z is never written.
+ const auto a6Axis=[](float a){return float(std::clamp(int(std::floor(a*255.0f)),-255,255));};
+ const auto a6Force=[&](float a,bool negate){const int r=int(a6Axis(a)),dz=r>32?r-32:r<-32?r+32:0;const std::int64_t sense=global("JOY_SENSE").raw();
+  const double v=double(float(dz))*double(float(float(sense)*0.02f));return float(std::clamp<std::int64_t>(std::int64_t(negate?-v:v),-2*sense,2*sense))/1024;};
+ set_global("num_joysticks",Value::from_int(int(input.joystickConnected[0])+int(input.joystickConnected[1])));set_vector(global_vector("joy_raw"),{a6Axis(input.joystickAxes[0][0]),a6Axis(input.joystickAxes[0][1]),a6Axis(input.joystickAxes[0][2])});set_vector(global_vector("joy2_raw"),{a6Axis(input.joystickAxes[1][0]),a6Axis(input.joystickAxes[1][1]),a6Axis(input.joystickAxes[1][2])});
+ set_vector(global_vector("joy_force"),controller.modern?modernForce_:Vec3{a6Force(input.controllerAxes[SDL_CONTROLLER_AXIS_LEFTX],false),a6Force(input.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY],true),0});set_vector(global_vector("joy_rot"),{a6Axis(input.controllerAxes[SDL_CONTROLLER_AXIS_RIGHTX]),a6Axis(input.controllerAxes[SDL_CONTROLLER_AXIS_RIGHTY]),a6Axis(input.controllerAxes[SDL_CONTROLLER_AXIS_TRIGGERRIGHT])});
+ if(input.quit){auto close=global("on_close");if(close.kind==Value::Kind::Function)edge(close,0);else quit=true;}if(renderer&&state.profile==SemanticProfile::CampaignA6)renderer->set_mouse_mode(number("mouse_mode")!=0,number("mouse_mode")==0&&(number("enable_mouse")!=0||firstPersonActive_));}
 void Engine::tick(Runtime& runtime,const Input& in){ensure_font_palette(runtime.compiler_settings().entry);input=in;if(!std::isfinite(in.dt))throw std::runtime_error("nonfinite native frame duration");auto seconds=std::clamp(in.dt,0.0,1.0);time_+=std::max(0.0,in.dt);auto frameRaw=std::max<std::int32_t>(1,Value::from_double(seconds*16).raw());set_global("time_frame",Value::from_raw(frameRaw));set_global("total_ticks",Value::from_raw(std::bit_cast<std::int32_t>(global("total_ticks").bits+std::uint32_t(frameRaw))));set_global("total_secs",Value::from_double(time_));set_global("total_frames",Value::from_int(global("total_frames").integer()+1));set_global("fps",Value::from_double(seconds?1/seconds:0));
+ // A6 00414650 (004146e0-004147fb): every main-loop pass copies localtime into SYS_*; DOW is Monday=1..Sunday=7, DOY 1-based.
+ {const auto now=std::time(nullptr);std::tm t{};localtime_r(&now,&t);for(auto [name,value]:{std::pair{"sys_seconds",t.tm_sec},{"sys_minutes",t.tm_min},{"sys_hours",t.tm_hour},{"sys_day",t.tm_mday},{"sys_month",t.tm_mon+1},{"sys_year",t.tm_year+1900},{"sys_dow",(t.tm_wday+6)%7+1},{"sys_doy",t.tm_yday+1}})set_global(name,Value::from_int(value));}
+ rumble=0;if(controller.modern){modernForce_=apply_modern_controller(controller,input,controllerHeld_);if(controller.vibration){auto p=global("player");ObjectId id=p.kind==Value::Kind::Object&&entities.contains(p.bits)&&state.get(p.bits)&&state.get(p.bits)->alive?p.bits:0;rumble=damageRumble_.update(id,id?field(id,"skill1"):0);if(rumble>0&&renderer)renderer->rumble(rumble,250);}}
  auto timeRaw=number("fps_lock")!=0?Value::from_double(16/std::max(1.0,number("fps_max"))).raw():frameRaw;auto minfps=std::max(1.0,number("fps_min"));timeRaw=std::clamp(timeRaw,51,std::max(51,Value::from_double(16/minfps).raw()));auto mul=[](std::int32_t a,std::int32_t b){auto n=std::int64_t(a)*b+512;auto q=n>=0?n/1024:-((-n+1023)/1024);return std::bit_cast<std::int32_t>(std::uint32_t(q));};timeRaw=mul(timeRaw,global("time_factor").raw());auto prior=global("time").raw();auto diff=std::bit_cast<std::int32_t>(std::uint32_t(prior)-std::uint32_t(timeRaw));timeRaw=std::bit_cast<std::int32_t>(std::uint32_t(timeRaw)+std::uint32_t(mul(diff,global("time_smooth").raw())));set_global("time",Value::from_raw(timeRaw));set_global("time_fac",Value::from_raw(0x100000/std::max(51,timeRaw)));
  if(renderer){auto m=renderer->metrics();currentWidth_=m.width;currentHeight_=m.height;set_vector(global_vector("screen_size"),{float(m.width),float(m.height),0});}
  if(nativeDisplay_&&(displayWidth_!=currentWidth_||displayHeight_!=currentHeight_))prepare_display();
@@ -940,12 +1044,32 @@ void Engine::tick(Runtime& runtime,const Input& in){ensure_font_palette(runtime.
  std::erase_if(activeParticles,[&](const auto& p){auto* o=state.get(p.object);return !o||!o->alive;});set_global("num_particles",Value::from_int(std::int32_t(activeParticles.size())));
  if(state.profile==SemanticProfile::BonusA7){if(pendingLevelLoad&&!pendingExit_){auto next=std::move(pendingLevel);pendingLevelLoad=false;load_level(runtime,next);}update_query_actors(runtime);}
  else{worldFrameEvents(*this,runtime);if(pendingLevelLoad){auto next=std::move(pendingLevel);pendingLevelLoad=false;load_level(runtime,next);}}
- if(state.profile==SemanticProfile::CampaignA6)physics.step(runtime);
+ if(state.profile==SemanticProfile::CampaignA6){physics.step(runtime);update_first_person();}
  media.master_volume(number("sound_vol"),number("midi_vol"));media.update();auto camera=global("camera");if(camera.kind==Value::Kind::Object)media.listener(position(camera.bits),field(camera.bits,"pan"));make_frame();
  if(state.profile==SemanticProfile::BonusA7)update_ui(runtime);
  if(state.profile==SemanticProfile::BonusA7&&pendingExit_){pendingExit_=false;quit=true;}
 }
 void Engine::finish_frame(Runtime& runtime){if(state.profile==SemanticProfile::BonusA7)physics.step(runtime);}
+// Native convenience, not in the original. A6 cannot skip the startup logos (K22.wdl Menu_AcilisEkrani: sleeps and alpha fades,
+// about 15 s), and the New Game intro (YeniMenu.wdl YeniOyunBaslat) and level movies (LevelYonetim.wdl) only on key_esc.
+// Escape, Return, Space, a left click or pad A/B/Start fast-forwards the logos to the main menu (ordinary 1/60 s ticks without
+// drawing, so every script effect still happens) and acts as Escape in the intro and in a full-screen media_play movie (not the
+// media_loop main-menu background, Kabusdismenu.wdl kn_arg.k22). Afterwards the
+// game sees no input until everything is released, so the press never reaches the menu or the game.
+const Input& Engine::skip_intro(Runtime& runtime,const Input& in){
+ auto neutral=[&]{skipInput=Input{};skipInput.dt=in.dt;skipInput.quit=in.quit;skipInput.mouseX=in.mouseX;skipInput.mouseY=in.mouseY;skipInput.joystickConnected=in.joystickConnected;return std::cref(skipInput);};
+ if(skipHold){if(in.keys.any()||in.mouseButtons.any()||in.controllerButtons.any()||in.joystickButtons[0].any()||in.joystickButtons[1].any())return neutral();skipHold=false;}
+ const bool press=in.pressed[SDL_SCANCODE_ESCAPE]||in.pressed[SDL_SCANCODE_RETURN]||in.pressed[SDL_SCANCODE_KP_ENTER]||in.pressed[SDL_SCANCODE_SPACE]||in.mousePressed[SDL_BUTTON_LEFT]
+  ||in.controllerPressed[SDL_CONTROLLER_BUTTON_A]||in.controllerPressed[SDL_CONTROLLER_BUTTON_B]||in.controllerPressed[SDL_CONTROLLER_BUTTON_START];
+ if(!press||state.profile==SemanticProfile::BonusA7)return in;
+ if(auto logos=runtime.function("Menu_AcilisEkrani");runtime.running(logos)){
+  neutral();skipInput.dt=1.0/60;
+  for(int i=0;i<60*120&&runtime.running(logos)&&!quit;++i){tick(runtime,skipInput);finish_frame(runtime);}
+  skipHold=true;return neutral();
+ }
+ if(runtime.running(runtime.function("YeniOyunBaslat"))||(movie&&!movieLoop&&media.movie_playing(movie))){skipInput=in;skipInput.keys.set(SDL_SCANCODE_ESCAPE);skipInput.pressed.set(SDL_SCANCODE_ESCAPE);skipHold=true;return skipInput;}
+ return in;
+}
 Value Engine::builtin(Runtime& runtime,ProcessContext& ctx,std::string_view name,std::span<const Argument> args){
  ensure_font_palette(runtime.compiler_settings().entry);
  display_admitted();
@@ -1011,7 +1135,10 @@ Value Engine::builtin(Runtime& runtime,ProcessContext& ctx,std::string_view name
  if(core_equal(name,"txt_load")){
   if(args.size()!=2)throw std::runtime_error("txt_load needs text and filename");
   auto& o=state.require(args[0].current().bits);if(o.kind!=Object::Kind::Text)throw std::runtime_error("txt_load requires TEXT");
-  auto bytes=assets.read(string(args[1].current()));const std::size_t capacity=o.array.size();
+  std::vector<std::uint8_t> bytes;
+  if(state.profile==SemanticProfile::BonusA7){auto relative=svc_relative(string(args[1].current()));auto path=svc_private(saveRoot,relative);bytes=std::filesystem::exists(path)?svc_read_file(path):assets.read(relative.generic_string());}
+  else bytes=assets.read(string(args[1].current()));
+  const std::size_t capacity=o.array.size();
   const auto delimit=string(global("delimit_str"));const int stop=delimit.empty()?0:static_cast<signed char>(delimit.front());
   std::size_t cursor=0,stored=0;while(cursor<bytes.size()&&stored<capacity){
    while(cursor<bytes.size()&&bytes[cursor]<=31)++cursor;
@@ -1062,9 +1189,7 @@ std::vector<std::uint8_t> svc_read_file(const std::filesystem::path& path){
  std::ifstream f(path,std::ios::binary|std::ios::ate);if(!f)throw std::runtime_error("cannot open private file: "+path.string());auto end=f.tellg();if(end<0||end>64*1024*1024)throw std::runtime_error("private file exceeds limit");std::vector<std::uint8_t> bytes(static_cast<std::size_t>(end));f.seekg(0);if(!bytes.empty()&&!f.read(reinterpret_cast<char*>(bytes.data()),static_cast<std::streamsize>(bytes.size())))throw std::runtime_error("cannot read private file: "+path.string());return bytes;
 }
 void svc_flush(FileData& f){
- if(!f.writable)return;std::filesystem::create_directories(f.output.parent_path());
- auto temporary=f.output;temporary+=".tmp."+std::to_string(::getpid());int fd=::open(temporary.c_str(),O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC|O_NOFOLLOW,0600);if(fd<0)throw std::runtime_error("cannot write private file: "+temporary.string());std::size_t offset=0;while(offset<f.bytes.size()){auto written=::write(fd,f.bytes.data()+offset,f.bytes.size()-offset);if(written>0){offset+=std::size_t(written);continue;}if(written<0&&errno==EINTR)continue;::close(fd);throw std::runtime_error("private file write failed: "+temporary.string());}if(::fsync(fd)!=0){::close(fd);throw std::runtime_error("private file sync failed: "+temporary.string());}if(::close(fd)!=0)throw std::runtime_error("private file close failed: "+temporary.string());
- std::filesystem::rename(temporary,f.output);
+ if(f.writable)saves::write_atomic(f.output,f.bytes);
 }
 void svc_append(FileData& f,std::string_view s){if(!f.writable)throw std::runtime_error("file handle is read-only");if(s.size()>64*1024*1024-f.bytes.size())throw std::runtime_error("private file exceeds limit");f.bytes.insert(f.bytes.end(),s.begin(),s.end());f.cursor=f.bytes.size();}
 std::string_view svc_trim(std::string_view s){while(!s.empty()&&(s.front()==' '||s.front()=='\t'||s.front()=='\r'))s.remove_prefix(1);while(!s.empty()&&(s.back()==' '||s.back()=='\t'||s.back()=='\r'))s.remove_suffix(1);return s;}
@@ -1149,7 +1274,7 @@ void Engine::initialize_plugins(const Runtime& runtime){
  if(runtime.external_import("dl_pakaga")||runtime.external_import("dl_reset"))svc_plugin_open(*this,"renkayar.dll");
 }
 Engine::~Engine(){physics.clear();if(exitMessage_){if(auto* o=state.get(exitMessage_.bits))std::cerr<<'\n'<<o->text;exitMessage_={};}for(auto& [id,file]:files){try{svc_flush(file);}catch(const std::exception& error){std::cerr<<"save flush failed: "<<error.what()<<'\n';}}svc_disconnect(*this);}
-std::optional<Value> Engine::service_builtin(Runtime&,ProcessContext&,std::string_view name,std::span<const Argument> a){
+std::optional<Value> Engine::service_builtin(Runtime& runtime,ProcessContext&,std::string_view name,std::span<const Argument> a){
  auto count=[&](std::size_t n){if(a.size()!=n)throw std::runtime_error(std::string(name)+": invalid argument count");};
  auto num=[&](std::size_t i)->double{if(i>=a.size()||a[i].current().kind!=Value::Kind::Number)throw std::runtime_error(std::string(name)+": numeric argument required");return a[i].current().real();};
  auto integer=[&](std::size_t i){num(i);return a[i].current().integer();};
@@ -1170,7 +1295,7 @@ std::optional<Value> Engine::service_builtin(Runtime&,ProcessContext&,std::strin
  if(name=="sqrt"){count(1);if(num(0)<0)throw std::runtime_error("sqrt negative argument");return ret(std::sqrt(num(0)));}
  if(name=="pow"){count(2);return ret(std::pow(num(0),num(1)));}
  if(name=="random"){count(1);double range=num(0);if(range<0)throw std::runtime_error("negative random range");return ret(std::generate_canonical<double,32>(random)*range);}
- if(name=="randomize"){count(0);random.seed(std::random_device{}());return Value{};}
+ if(name=="randomize"){count(0);if(!fixedRandom)random.seed(std::random_device{}());return Value{};}
  if(core_equal(name,"vector")||core_equal(name,"_vec")){
   count(3);const bool nativeFloat=core_equal(name,"_vec");
   vectorTempCursor_=(vectorTempCursor_+1)%vectorTemps_.size();auto& v=*vectorTemps_[vectorTempCursor_];
@@ -1191,7 +1316,7 @@ std::optional<Value> Engine::service_builtin(Runtime&,ProcessContext&,std::strin
  if(name=="snd_stop"){count(1);media.sound_stop(std::uint32_t(integer(0)));return Value{};}
  if(name=="snd_tune"){count(4);media.sound_tune(std::uint32_t(integer(0)),num(1),num(2),num(3));return Value{};}
  if(name=="snd_stopall"){count(1);auto mode=integer(0);if(mode!=4)throw std::runtime_error("unsupported snd_stopall mode");media.sound_stop_all();return Value{};}
- if(name=="media_play"||name=="media_loop"){count(3);auto target=a[1].current();if(target&&(target.kind!=Value::Kind::Object||state.require(target.bits).kind!=Object::Kind::Bmap))throw std::runtime_error("movie target must be bitmap or NULL");auto h=media.movie_play(text(0),num(2),name=="media_loop");if(target){for(auto it=movieTargets.begin();it!=movieTargets.end();){if(it->second==target.bits){media.movie_stop(it->first);it=movieTargets.erase(it);}else ++it;}movieTargets[h]=target.bits;}else{if(movie)media.movie_stop(movie);movie=h;}set_global("media_handle",ret(h));return ret(h);}
+ if(name=="media_play"||name=="media_loop"){count(3);auto target=a[1].current();if(target&&(target.kind!=Value::Kind::Object||state.require(target.bits).kind!=Object::Kind::Bmap))throw std::runtime_error("movie target must be bitmap or NULL");auto h=media.movie_play(text(0),num(2),name=="media_loop");if(target){for(auto it=movieTargets.begin();it!=movieTargets.end();){if(it->second==target.bits){media.movie_stop(it->first);it=movieTargets.erase(it);}else ++it;}movieTargets[h]=target.bits;}else{if(movie)media.movie_stop(movie);movie=h;movieLoop=name=="media_loop";}set_global("media_handle",ret(h));return ret(h);}
  if(name=="media_playing"){count(1);auto h=std::uint32_t(integer(0));return ret(media.movie_status(h));}
  if(name=="media_stop"){count(1);auto h=std::uint32_t(integer(0));media.movie_stop(h);if(!h||h==movie)movie=0;return Value{};}
  if(name=="dll_open"){count(1);return svc_plugin_open(*this,text(0));}
@@ -1205,14 +1330,20 @@ std::optional<Value> Engine::service_builtin(Runtime&,ProcessContext&,std::strin
  if(name=="discordrpc_setstatedetails"){count(2);if(!pluginNative)throw std::runtime_error("Discord plugin service not opened");auto details=text(0),status=text(1);svc_receive(*this);if(!discordReady)return Value{};if(discordActivitySent&&details==discordDetails&&status==discordState)return Value::from_int(1);auto command="{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":"+std::to_string(::getpid())+",\"activity\":{\"details\":"+svc_json(details)+",\"state\":"+svc_json(status)+"}},\"nonce\":\""+std::to_string(discordNonce++)+"\"}";if(!svc_send(*this,1,command))return Value{};discordDetails=details;discordState=status;discordActivitySent=true;return Value::from_int(1);}
  if(name=="key_pressed"){
   count(1);int code=raw(0)>>10;
-  if(code>=0&&code<127)return key_state(code);
+  if(code>=0&&code<127){
+   // Patch GenelAyarlar.wdl Tuslari_Esitle: with the FPS camera, mouse right/left also hold aim (GA_SilahKaldir 4) and fire (GA_Ates 5).
+   if(firstPersonActive_)if(auto keys=global("GA_Tuslar");keys.kind==Value::Kind::Object)if(auto* bound=state.get(keys.bits);bound&&bound->array.size()>5){
+    if((code==bound->array[4].value.integer()&&number("mouse_right")!=0)||(code==bound->array[5].value.integer()&&number("mouse_left")!=0))return Value::from_int(1);
+   }
+   return key_state(code);
+  }
   constexpr std::array<std::string_view,24> joy{"joy_1","joy_2","joy_3","joy_4","joy_5","joy_6","joy_7","joy_8","joy_9","joy_10","joy_11","joy_12","joy2_1","joy2_2","joy2_3","joy2_4","joy2_5","joy2_6","joy2_7","joy2_8","joy2_9","joy2_10","joy2_11","joy2_12"};if(code>=256&&code<280)return global(joy[code-256]);if(code==280)return global("mouse_left");if(code==281)return global("mouse_right");if(code==282)return global("mouse_middle");return Value{};
  }
  if(name=="video_window"){count(4);Vec3 pos{};if(a[0].current())pos=vector(a[0]);if(a[1].current())throw std::runtime_error("non-NULL legacy video_window size not used by Kabus22");windowStyle=integer(2);if(windowStyle!=0&&windowStyle!=1&&windowStyle!=16)throw std::runtime_error("unsupported legacy window style");if(renderer){renderer->set_title(text(3));if(a[0].current())renderer->set_position(int(pos.x),int(pos.y));}else (void)text(3);return Value::from_int(1);}
  if(nativeDisplay_&&name=="video_set"){count(4);int w=integer(0),h=integer(1),depth=integer(2),mode=integer(3);if(w<=0||h<=0||w>16384||h>16384||(depth!=16&&depth!=24&&depth!=32)||mode<0||mode>2)throw std::runtime_error("invalid video mode");prepare_display();return Value::from_int(1);}
  if(name=="video_set"){count(4);int w=integer(0),h=integer(1),depth=integer(2),mode=integer(3);if(w<=0||h<=0||w>16384||h>16384||(depth!=16&&depth!=24&&depth!=32)||mode<0||mode>2)throw std::runtime_error("invalid video mode");auto windowMode=mode==0?currentWindowMode:(mode==1?WindowMode::Fullscreen:(windowStyle==1?WindowMode::Borderless:WindowMode::Windowed));if(renderer)renderer->set_mode(w,h,windowMode);currentWindowMode=windowMode;set_global("video_screen",ret(windowMode==WindowMode::Fullscreen?1:2));auto screenSize=global_vector("screen_size");set_vector(screenSize,{float(w),float(h),vector(screenSize).z});currentWidth_=w;currentHeight_=h;return Value::from_int(1);}
  if(nativeDisplay_&&name=="video_switch"){count(3);int mode=integer(0),depth=integer(1),screen=integer(2);if(mode<6||mode>10||(depth!=16&&depth!=24&&depth!=32)||screen<0||screen>2)throw std::runtime_error("unsupported video_switch mode");prepare_display();set_global("video_mode",ret(mode));return ret(mode);}
- if(name=="video_switch"){count(3);int mode=integer(0),depth=integer(1),screen=integer(2);constexpr std::array<std::array<int,2>,5> modes{{{640,480},{800,600},{1024,768},{1280,1024},{1600,1200}}};if(mode<6||mode>10||(depth!=16&&depth!=24&&depth!=32)||screen<0||screen>2)throw std::runtime_error("unsupported video_switch mode");auto dimensions=modes[mode-6];auto windowMode=screen==0?currentWindowMode:(screen==1?WindowMode::Fullscreen:WindowMode::Windowed);if(renderer)renderer->set_mode(dimensions[0],dimensions[1],windowMode);currentWindowMode=windowMode;currentWidth_=dimensions[0];currentHeight_=dimensions[1];auto screenSize=global_vector("screen_size");set_vector(screenSize,{float(currentWidth_),float(currentHeight_),vector(screenSize).z});set_global("video_mode",ret(mode));set_global("video_screen",ret(screen==0?(windowMode==WindowMode::Fullscreen?1:2):screen));return ret(mode);}
+ if(name=="video_switch"){count(3);int mode=integer(0),depth=integer(1),screen=integer(2);if(mode<6||mode>10||(depth!=16&&depth!=24&&depth!=32)||screen<0||screen>2)throw std::runtime_error("unsupported video_switch mode");auto dimensions=a6VideoModes[mode-6];auto windowMode=screen==0?currentWindowMode:(screen==1?WindowMode::Fullscreen:WindowMode::Windowed);if(renderer)renderer->set_mode(dimensions[0],dimensions[1],windowMode);currentWindowMode=windowMode;currentWidth_=dimensions[0];currentHeight_=dimensions[1];auto screenSize=global_vector("screen_size");set_vector(screenSize,{float(currentWidth_),float(currentHeight_),vector(screenSize).z});set_global("video_mode",ret(mode));set_global("video_screen",ret(screen==0?(windowMode==WindowMode::Fullscreen?1:2):screen));return ret(mode);}
  if(name=="sys_metrics"){count(1);auto metric=integer(0);if(metric!=0&&metric!=1)throw std::runtime_error("unsupported system metric");SDL_DisplayMode display{};if(SDL_GetDesktopDisplayMode(0,&display)==0)return ret(metric?display.h:display.w);if(!renderer&&currentWidth_>0&&currentHeight_>0)return ret(metric?currentHeight_:currentWidth_);throw std::runtime_error(std::string("cannot query display metrics: ")+SDL_GetError());}
  if(name=="add_resource"){count(1);assets.mount(text(0));return Value::from_int(1);}
  if(name=="bmap_width"||name=="bmap_height"){count(1);const auto& image=svc_bitmap(*this,a[0].current());return ret(name=="bmap_width"?image.width:image.height);}
@@ -1223,21 +1354,29 @@ std::optional<Value> Engine::service_builtin(Runtime&,ProcessContext&,std::strin
   if(nativeDisplay_&&view.id==global("camera").bits){set_field(view.id,"size_x",currentWidth_);set_field(view.id,"size_y",currentHeight_);}
   Camera camera;camera.position=position(view.id);camera.angles=angles(view.id);camera.horizontalFov=float(setting("arc",60));camera.pixelAspect=float(setting("aspect",1));camera.nearClip=float(std::max(.01,setting("clip_near",1)));camera.farClip=float(std::max(double(camera.nearClip)+.01,setting("clip_far",10000)));camera.viewport={float(setting("pos_x",0)),float(setting("pos_y",0)),float(setting("size_x",0)),float(setting("size_y",0))};camera.widescreen=false;
   camera.pixelAspect=display_aspect(camera.pixelAspect);
-  WindowMetrics metrics=renderer?renderer->metrics():WindowMetrics{currentWidth_,currentHeight_,currentWidth_,currentHeight_,1,1};auto result=Renderer::project(p,camera,metrics);set_vector(a[0],result);auto width=camera.viewport.width>0?camera.viewport.width:float(metrics.width),height=camera.viewport.height>0?camera.viewport.height:float(metrics.height);bool visible=setting("visible",1)!=0;auto storedFlags=view.fields.find("flags");if(storedFlags!=view.fields.end())visible=visible&&(std::uint32_t(storedFlags->second.value.integer())&0x4000)!=0;
-  return Value::from_int(visible&&result.z>=camera.nearClip&&result.z<=camera.farClip&&result.x>=camera.viewport.x&&result.x<camera.viewport.x+width&&result.y>=camera.viewport.y&&result.y<camera.viewport.y+height);
+  // K22.exe 00404020 -> 0044ee20: the result depends only on depth and the view rectangle; the view's VISIBLE flag is not read.
+  WindowMetrics metrics=renderer?renderer->metrics():WindowMetrics{currentWidth_,currentHeight_,currentWidth_,currentHeight_,1,1};auto result=Renderer::project(p,camera,metrics);set_vector(a[0],result);auto width=camera.viewport.width>0?camera.viewport.width:float(metrics.width),height=camera.viewport.height>0?camera.viewport.height:float(metrics.height);
+  return Value::from_int(result.z>=camera.nearClip&&result.z<=camera.farClip&&result.x>=camera.viewport.x&&result.x<camera.viewport.x+width&&result.y>=camera.viewport.y&&result.y<camera.viewport.y+height);
  }
  if(name=="dl_reset"){count(0);if(!pluginGamma)throw std::runtime_error("gamma service not opened");for(auto& channel:nativeAdjustment.gammaRamp)for(std::size_t i=0;i<channel.size();++i)channel[i]=std::uint16_t(i*257);nativeAdjustment.enabled=true;return Value{};}
  if(name=="dl_pakaga"){count(4);if(!pluginGamma)throw std::runtime_error("gamma service not opened");auto b=raw(0)>>10,c=(raw(1)>>10)+100,g=raw(2)>>10,mode=raw(3)>>10;for(std::uint32_t i=0;i<256;++i){auto product=std::bit_cast<std::int32_t>((255u-i)*i*std::uint32_t(g));auto n=std::uint16_t(std::int64_t(std::trunc(i+double(product)/25600.0)));double contrast=std::clamp((int(n)-128)*(c*0.01)+128,0.0,255.0);auto v=std::clamp(int(std::uint16_t(std::trunc(contrast)))+b,0,255);auto w=std::uint16_t(v*257);for(int channel=0;channel<3;++channel)nativeAdjustment.gammaRamp[channel][i]=mode==1?std::uint16_t(65535-w):((mode>=2&&mode<=4&&channel!=mode-2)?0:w);}nativeAdjustment.enabled=true;return Value{};}
  if(name=="file_open_read"||name=="file_open_write"){
   count(1);auto relative=svc_relative(text(0));auto path=svc_private(saveRoot,relative);FileData data;
-  if(name=="file_open_write"){data.writable=true;data.output=path;svc_flush(data);}
-  else if(std::filesystem::exists(path))data.bytes=svc_read_file(path);
+  // Save slots/index: rotate the previous file into backups/, then replace atomically at file_close (no truncating pre-flush).
+  if(name=="file_open_write"){data.writable=true;data.output=path;if(saves::rotated(relative.filename().string()))saves::backup(saveRoot,relative);else svc_flush(data);}
+  else if(std::filesystem::exists(path)){if(saves::slot_number(relative.filename().string())>=0)saves::migrate_meta(path,{saves::MetaFormat,K22_VERSION,"","","",""},std::cerr);data.bytes=svc_read_file(path);}
   else if(assets.contains(relative.generic_string()))data.bytes=assets.read(relative.generic_string());
   else if(relative.parent_path()=="_data/saves"&&assets.contains(relative.filename().string()))data.bytes=assets.read(relative.filename().string());
   else return Value{};
+  if(!data.writable&&!data.bytes.empty()&&core_equal(relative.filename().string(),"options.k22")&&display_admitted())authoredResolution_=data.bytes[0];
   if(nextFile>=2097152)throw std::runtime_error("file handle range exhausted");auto handle=nextFile++;files.emplace(handle,std::move(data));return ret(handle);
  }
- if(name=="file_close"){count(1);auto& data=file();svc_flush(data);files.erase(std::uint32_t(integer(0)));return Value{};}
+ if(name=="file_close"){count(1);auto& data=file();
+  // GA_AyarlariKaydet writes the in-memory native tier; persist the user's authored GA_Cozunurluk instead.
+  if(data.writable&&!data.bytes.empty()&&core_equal(data.output.filename().string(),"options.k22")&&display_admitted())data.bytes[0]=authoredResolution_;
+  svc_flush(data);
+  if(data.writable&&saves::slot_number(data.output.filename().string())>=0){const auto& entry=runtime.compiler_settings().entry;if(!saveScriptKnown_){if(assets.contains(entry))saveScript_=saves::fnv1a64(assets.read(entry));saveScriptKnown_=true;}saves::write_meta(data.output,{saves::MetaFormat,K22_VERSION,saves::now_utc(),entry,saveScript_,"native"});}
+  files.erase(std::uint32_t(integer(0)));return Value{};}
  if(name=="file_asc_read"){count(1);auto& data=file();if(data.writable)throw std::runtime_error("file handle is write-only");if(data.cursor==data.bytes.size())return Value::from_int(-1);return Value::from_int(data.bytes[data.cursor++]);}
  if(name=="file_asc_write"){count(2);auto& data=file();auto byte=std::uint8_t(raw(1)>>10);svc_append(data,std::string_view(reinterpret_cast<const char*>(&byte),1));return Value::from_int(byte);}
  if(name=="file_str_write"){count(2);auto& data=file();auto source=text(1);auto nul=source.find('\0');if(nul!=std::string_view::npos)source=source.substr(0,nul);svc_append(data,source);return ret(source.size());}
@@ -1289,6 +1428,14 @@ bool wPublicHullRay(Vec3 start,Vec3 direction,Vec3 center,const std::array<Vec3,
  return true;
 }
 // A7 10068440's stack packets and 10080ee0's source-ordered contact algorithm.
+// A6 00467530 / A7 1006d370: float length, normalized components and strict snapping.
+float wNormalizeMovement(Vec3& value){
+ const float squared=float((static_cast<long double>(value.x)*value.x+static_cast<long double>(value.y)*value.y)+static_cast<long double>(value.z)*value.z);
+ const float length=float(std::sqrt(double(squared))),epsilon=std::bit_cast<float>(0x38d1b717u);
+ if(length<=epsilon){value={};return 0;}
+ for(float* component:{&value.x,&value.y,&value.z}){*component=float(static_cast<long double>(*component)/length);if(std::abs(*component)<epsilon)*component=0;}
+ return length;
+}
 struct WPublicHull {Vec3 center;std::array<Vec3,3> axes;Vec3 half;};
 using WHullMatrix=std::array<std::array<float,3>,3>;
 long double wHullDot(Vec3 a,Vec3 b){return (static_cast<long double>(a.z)*b.z+static_cast<long double>(a.y)*b.y)+static_cast<long double>(a.x)*b.x;}
@@ -1397,7 +1544,31 @@ bool wSweepEllipsoid(Vec3 start,Vec3 delta,Vec3 extent,Vec3 a,Vec3 b,Vec3 c,floa
  const std::array<Vec3,3> points{a,b,c};for(int i=0;i<3;++i){Vec3 p=points[i],edge=wSub(points[(i+1)%3],p);float length=wDot(edge,edge);if(length<1e-16f)continue;Vec3 q=wMul(p,-1),qPerp=wSub(q,wMul(edge,wDot(q,edge)/length)),vPerp=wSub(velocity,wMul(edge,wDot(velocity,edge)/length));float t;if(!root(qPerp,vPerp,t))continue;Vec3 center=wMul(velocity,t);float s=wDot(wSub(center,p),edge)/length;if(s>=0&&s<=1)accept(t,wSub(center,wAdd(p,wMul(edge,s))));}
  if(!found)return false;fraction=best;normal=wUnit({selected.x/radii.x,selected.y/radii.y,selected.z/radii.z});return true;
 }
-void wBounds(Engine& e,ObjectId id,const Model& model){e.set_field(id,"min_x",model.min.x);e.set_field(id,"min_y",model.min.y);e.set_field(id,"min_z",model.min.z);e.set_field(id,"max_x",model.max.x);e.set_field(id,"max_y",model.max.y);e.set_field(id,"max_z",model.max.z);}
+// Birth/morph bounds. A6 00435730: MDL/sprite/HMP resource box times SCALE (WMB unscaled); with neither NARROW nor FAT, the XY size picks
+// FAT (>6*HULL_NARROWMAX.y), NARROW (>=HULL_NARROWMAX.y) or none (ENABLE_POLYCOLLISION>=2: both); unless both, MDL/sprite XY become
+// a square of the averaged min/max corners with any excess beyond +-16 halved, and WMB a cube. Stored truncated (ftol 005b72cc).
+// ponytail: recomputed at birth and ent_morph only; A6 00432cb0 also recomputes after per-frame SCALE changes. Every SCALE write
+// in the original campaign scripts after birth targets a PASSABLE entity (weapons, effects, decals) and every script trace/move
+// uses IGNORE_PASSABLE, so the recompute has no observable effect there (docs/KNOWN_ISSUES.md); port it if a script needs it.
+void wBounds(Engine& e,ObjectId id,const EntityData& d){
+ const auto& model=*d.model;
+ if(e.state.profile!=SemanticProfile::CampaignA6){e.set_field(id,"min_x",model.min.x);e.set_field(id,"min_y",model.min.y);e.set_field(id,"min_z",model.min.z);e.set_field(id,"max_x",model.max.x);e.set_field(id,"max_y",model.max.y);e.set_field(id,"max_z",model.max.z);return;}
+ const Vec3 lo=d.type==2?model.resourceMin:model.min,hi=d.type==2?model.resourceMax:model.max; // MDL: first-frame resource box (+0x38).
+ std::array<float,6> b{lo.x,lo.y,lo.z,hi.x,hi.y,hi.z};
+ if(d.type!=4){const auto s=wScale(e,id);for(int i=0;i<6;++i)b[i]*=std::array{s.x,s.y,s.z}[i%3];}
+ auto& eflags=e.state.require(id).field("flags2").value;std::uint32_t hull=eflags.bits&3;
+ if(!hull){const float size=float((double(b[4])-b[1]+b[3])-b[0]);
+  if(e.global("enable_polycollision").raw()>=0x800)hull=3;
+  else{const float narrow=float(e.vector(e.global_vector("hull_narrowmax")).y);hull=narrow*6<size?2:size>=narrow?1:0;}
+  eflags.bits|=hull;}
+ if(hull!=3&&d.type==4){const float lo=std::min(std::min(b[0],b[1])-32.f,b[2]-16.f),hi=std::max(std::max(b[3],b[4])+32.f,b[5]+16.f),r=std::max(-lo,hi);b={-r,-r,-r,r,r,r};}
+ else if(hull!=3&&(d.type==1||d.type==2)){
+  const float cx=float((double(b[3])+b[0])*.5),cy=float((double(b[4])+b[1])*.5);float lo=float((double(b[1])+b[0])*.5),hi=float((double(b[4])+b[3])*.5);
+  if(hi>16)hi=float(hi-(double(hi)-16)*.5);if(lo<-16)lo=float(lo-(double(lo)+16)*.5);
+  b[0]=lo+cx;b[1]=lo+cy;b[3]=hi+cx;b[4]=hi+cy;}
+ constexpr std::array names{"min_x","min_y","min_z","max_x","max_y","max_z"};
+ for(int i=0;i<6;++i)e.state.member(id,names[i]).set(Value::from_raw(std::int32_t(std::trunc(double(b[i])*1024))));
+}
 Vec3 wExtent(const Engine& e,ObjectId id){return {float((e.field(id,"max_x")-e.field(id,"min_x"))*.5),float((e.field(id,"max_y")-e.field(id,"min_y"))*.5),float((e.field(id,"max_z")-e.field(id,"min_z"))*.5)};}
 Vec3 wCenter(const Engine& e,ObjectId id){return {float((e.field(id,"max_x")+e.field(id,"min_x"))*.5),float((e.field(id,"max_y")+e.field(id,"min_y"))*.5),float((e.field(id,"max_z")+e.field(id,"min_z"))*.5)};}
 int wWorldContent(const World* world,Vec3 point){if(!world||world->bspNodes.empty())return 1;std::int32_t index=0;for(std::size_t step=0;step<=world->bspNodes.size();++step){if(index<0){std::size_t leaf=std::size_t(-std::int64_t(index)-1);if(leaf>=world->bspLeaves.size())throw std::runtime_error("invalid collision BSP leaf");int content=world->bspLeaves[leaf].content;if(content==-128)return 3;if(content==-126)return 2;if(content==-256)return 1;throw std::runtime_error("unsupported WMB collision leaf content: "+std::to_string(content));}if(std::size_t(index)>=world->bspNodes.size())throw std::runtime_error("invalid collision BSP node");const auto& node=world->bspNodes[std::size_t(index)];if(node.plane>=world->planes.size())throw std::runtime_error("invalid collision BSP plane");const auto& plane=world->planes[node.plane];index=node.children[wDot(point,plane.normal)>=plane.distance?0:1];}throw std::runtime_error("cyclic collision BSP");}
@@ -1646,7 +1817,7 @@ void Engine::prepare_legacy_hit(Hit& hit,Vec3 start,Vec3 end,std::uint32_t mode,
  const auto correction=wQueryFixedRaw(extra);
  hit.resultRaw_=std::bit_cast<std::int32_t>(std::uint32_t(hit.resultRaw_)+std::uint32_t(correction));
 }
-Engine::Hit Engine::collide_legacy(Vec3 start,Vec3 end,std::uint32_t mode,ObjectId ignore,const ProcessContext* context){
+Engine::Hit Engine::collide_legacy(Vec3 start,Vec3 end,std::uint32_t mode,ObjectId ignore,const ProcessContext* context,bool movement){
  const ObjectId actor=context?context->my:collisionActor,you=context?context->you:collisionYou;
  Vec3 queryMin{},queryMax{};if((mode&8192)&&actor)wLegacyBounds(*this,actor,queryMin,queryMax);
  const auto shape=(mode&8192)&&actor?std::min(2u,unsigned(field(actor,"narrow")!=0)|(unsigned(field(actor,"fat")!=0)<<1)):0u;
@@ -1674,8 +1845,8 @@ Engine::Hit Engine::collide_legacy(Vec3 start,Vec3 end,std::uint32_t mode,Object
   for(const auto* object:state.handles){
    if(!object||!object->alive)continue;const auto id=object->id;const auto found=entities.find(id);
    if(found==entities.end()||!found->second.scannable||!found->second.model||found->second.type==0||field(id,"view")!=0||id==ignore||((mode&2)&&id==you))continue;
-   const auto& data=found->second;const auto f=flags(id);const bool pass=(f&512)!=0;
-   if(((mode&512)&&actor&&field(id,"push")<field(actor,"push"))||((mode&4)&&pass)||((mode&0x100000)&&(f&256))||((mode&8)&&pass&&data.type!=4))continue;
+   const auto& data=found->second;if(movement&&data.legacyPushEpoch==legacyMoveEpoch_)continue;const auto f=flags(id);const bool pass=(f&512)!=0;
+   if((!movement&&(mode&512)&&actor&&field(id,"push")<field(actor,"push"))||((mode&4)&&pass)||((mode&0x100000)&&(f&256))||((mode&8)&&pass&&data.type!=4))continue;
    if(((mode&128)&&data.type==4)||((mode&16)&&data.type==2)||((mode&32)&&data.type==1)||((mode&256)&&data.type==5))continue;
    const auto pos=position(id);
    Vec3 lo=wAdd(pos,{float(field(id,"min_x")),float(field(id,"min_y")),float(field(id,"min_z"))}),hi=wAdd(pos,{float(field(id,"max_x")),float(field(id,"max_y")),float(field(id,"max_z"))});
@@ -1729,33 +1900,44 @@ Engine::Hit Engine::collide(Vec3 start,Vec3 end,Vec3 extent,std::uint32_t mode,O
   if(narrow!=fat){lo=vector(global_vector(narrow?"hull_narrowmin":"hull_fatmin"));hi=vector(global_vector(narrow?"hull_narrowmax":"hull_fatmax"));}
   const float buffer=float(number("move_buffer"))+(fixedLength==0?.0498046875f:0.f);const Vec3 padding{buffer,buffer,buffer};lo=wSub(lo,padding);hi=wAdd(hi,padding);
   auto span=wSub(hi,lo);for(float* component:{&span.x,&span.y,&span.z})if(!(*component>0))*component=1;
-  extent=wMul(span,.5f);const auto offset=wRotate(wAdd(lo,extent),angles(queryActor));
-  start=wAdd(start,offset);end=wAdd(end,offset);delta=wSub(end,start);
+  extent=wMul(span,.5f);const auto a=angles(queryActor);
+  const std::array axes{wRotate({1,0,0},a),wRotate({0,1,0},a),wRotate({0,0,1},a)};
+  const auto offset=wBasisRotate(wAdd(lo,extent),axes);
+  start=wAdd(start,offset);end=wAdd(end,offset);delta=wSub(end,start);movingHull=WPublicHull{start,axes,extent};
  }
+ std::optional<modern_box::Query> meshBox;
+ // Original stationary packet98 is uninitialized stack. Retain the existing
+ // deterministic native stationary query; only evidenced moving primitives cut over.
+ if(modern&&movingHull&&(delta.x!=0||delta.y!=0||delta.z!=0))meshBox.emplace(start,movingHull->axes,movingHull->half,delta,bonusModern?0.f:.0498046875f,bonusModern);
+ const Vec3 broadExtent=meshBox?meshBox->broadExtent():extent;
+ const float correctionFraction=meshBox&&!bonusModern&&rayLength>0?.0498046875f/rayLength:0.f;
+ auto geometricHorizon=[&]{return std::min(1.f,best.fraction+correctionFraction);};
  const bool staticBox=movingHull&&std::abs(rawDirection.x)<=rayEpsilon&&std::abs(rawDirection.y)<=rayEpsilon&&std::abs(rawDirection.z)<=rayEpsilon;
  const float boxHorizon=staticBox?0.f:float(fixedLength)/1024;const auto boxDirection=staticBox?rawDirection:rayDirection;
  const float queryRadius=float(fixedLength)/1024.f+((mode&8192)&&queryActor?float(.5f*float(std::sqrt(double(float((static_cast<long double>(2*extent.x)*float(2*extent.x)+static_cast<long double>(2*extent.y)*float(2*extent.y))+static_cast<long double>(2*extent.z)*float(2*extent.z)))))):0.f);
  float markerFraction=std::numeric_limits<float>::infinity();ObjectId markerOwner=0;
- auto triangle=[&](Vec3 a,Vec3 b,Vec3 c,ObjectId id,std::uint32_t index,std::uint32_t surface,const Material* material,bool auxiliary=false,bool typeRejected=false,const std::array<std::uint32_t,3>* sourceVertices=nullptr){
+ auto triangle=[&](Vec3 a,Vec3 b,Vec3 c,ObjectId id,std::uint32_t index,std::uint32_t surface,const Material* material,bool auxiliary=false,bool typeRejected=false,const std::array<std::uint32_t,3>* sourceVertices=nullptr,const Vec3* retainedA=nullptr,const Vec3* retainedB=nullptr,const Vec3* retainedC=nullptr){
   const bool marker=bonusModern&&(auxiliary||(!id&&(surface&64)));float fraction=bonusModern?1.f:best.fraction;Vec3 normal;
-  if(!wSweepEllipsoid(start,delta,extent,a,b,c,fraction,normal))return;
+  std::optional<modern_box::Contact> boxContact;
+  if(meshBox){boxContact=meshBox->triangle(a,b,c,retainedA?*retainedA:a,retainedB?*retainedB:b,retainedC?*retainedC:c);if(!boxContact)return;fraction=boxContact->fraction;normal=boxContact->normal;}
+  else if(!wSweepEllipsoid(start,delta,extent,a,b,c,fraction,normal))return;
   if(marker){best.onPassable=true;if(fraction<markerFraction){markerFraction=fraction;markerOwner=id;}}
   if(typeRejected||(marker?(mode&(id?8u:4u)):((mode&4)&&(surface&(id?512u:64u)))))return;
-  Hit hit;hit.hit=true;hit.fraction=fraction;if(bonusModern)hit.queryScalar_=float(static_cast<long double>(fraction)*rayLength);hit.normal=normal;hit.entity=id;hit.triangle=index;hit.surfaceFlags=surface;hit.material=material;
-  const auto contact=wAdd(start,wMul(delta,fraction));const float da=wDot(wSub(a,contact),wSub(a,contact)),db=wDot(wSub(b,contact),wSub(b,contact)),dc=wDot(wSub(c,contact),wSub(c,contact));const auto corner=da<=db&&da<=dc?0u:db<=dc?1u:2u;
+  Hit hit;hit.hit=true;hit.fraction=fraction;hit.queryScalar_=boxContact?boxContact->scalar:float(static_cast<long double>(fraction)*rayLength);if(boxContact)hit.position=boxContact->position;hit.normal=normal;hit.entity=id;hit.triangle=index;hit.surfaceFlags=surface;hit.material=material;
+  const auto contact=boxContact?boxContact->position:wAdd(start,wMul(delta,fraction));const float da=wDot(wSub(a,contact),wSub(a,contact)),db=wDot(wSub(b,contact),wSub(b,contact)),dc=wDot(wSub(c,contact),wSub(c,contact));const auto corner=da<=db&&da<=dc?0u:db<=dc?1u:2u;
   const Model* model=id?entities.at(id).model:world?&world->mesh:nullptr;hit.vertex=corner;
   if(sourceVertices)hit.vertex=(*sourceVertices)[corner]+1;
   else if(!id&&world&&index<world->collision.triangles.size())hit.vertex=world->collision.triangles[index][corner]+1;
   else if(model&&index<model->triangles.size()){const auto render=model->triangles[index].indices[corner];hit.vertex=(model->vertexSources.empty()?render:model->vertexSources.at(render))+1;}
-  if(contacts)contacts->push_back({hit,model});
-  if(!best.hit||fraction<best.fraction){const auto content=best;best=hit;bestSourcePoint=false;best.textureScan=content.textureScan;best.contentQuery=content.contentQuery;best.inPassable=content.inPassable;best.onPassable=content.onPassable;best.passableEntity=content.passableEntity;}
+  if(contacts)contacts->push_back({hit,model,bool(boxContact)});
+  if(!best.hit||(boxContact?hit.queryScalar_<best.queryScalar_:fraction<best.fraction)){const auto content=best;best=hit;bestSourcePoint=bool(boxContact);best.textureScan=content.textureScan;best.contentQuery=content.contentQuery;best.inPassable=content.inPassable;best.onPassable=content.onPassable;best.passableEntity=content.passableEntity;}
  };
  // A6 modern 004728d4 filters global WMB; A7 10067cc0 bypasses entity type masks for it.
  // Both legacy wrappers suppress it only for IGNORE_ME with a positive ME.PUSH.
  auto worldContacts=[&]{if(world&&!(query&&((modern&&state.profile==SemanticProfile::CampaignA6&&(mode&128))||(!modern&&(mode&1)&&queryActor&&field(queryActor,"push")>0)))){
   auto staticTriangle=[&](std::uint32_t index){const auto& mesh=world->collision;const auto& t=mesh.triangles[index];const Material* m=nullptr;std::uint32_t f=index<mesh.flags.size()?mesh.flags[index]:0;if(bonusModern&&(mode&4)&&(f&64))return; // 10078b00: CE gates global marker1 submission before contact observation.
    if(index<world->mesh.triangles.size()){auto mi=world->mesh.triangles[index].materialIndex;if(mi<world->mesh.materials.size())m=&world->mesh.materials[mi];}triangle(mesh.vertices[t[0]],mesh.vertices[t[1]],mesh.vertices[t[2]],0,index,f,m);};
-  if(!collisionNodes.empty()){std::array<std::uint32_t,64> stack{};std::size_t count=1;while(count){const auto& node=collisionNodes[stack[--count]];float f=bonusModern?1.f:best.fraction;Vec3 n;if(!wSweepBox(start,delta,extent,node.min,node.max,f,n))continue;if(node.count){for(std::uint32_t i=node.begin;i<node.begin+node.count;++i)staticTriangle(collisionOrder[i]);}else{if(count+2>stack.size())throw std::runtime_error("collision BVH exceeds balanced tree depth");stack[count++]=node.left;stack[count++]=node.right;}}}
+  if(!collisionNodes.empty()){std::array<std::uint32_t,64> stack{};std::size_t count=1;while(count){const auto& node=collisionNodes[stack[--count]];float f=bonusModern?1.f:geometricHorizon();Vec3 n;if(!wSweepBox(start,delta,broadExtent,node.min,node.max,f,n))continue;if(node.count){for(std::uint32_t i=node.begin;i<node.begin+node.count;++i)staticTriangle(collisionOrder[i]);}else{if(count+2>stack.size())throw std::runtime_error("collision BVH exceeds balanced tree depth");stack[count++]=node.left;stack[count++]=node.right;}}}
   else for(std::uint32_t i=0;i<world->collision.triangles.size();++i)staticTriangle(i);
  }};
  if(!bonusModern)worldContacts();
@@ -1781,12 +1963,12 @@ Engine::Hit Engine::collide(Vec3 start,Vec3 end,Vec3 extent,std::uint32_t mode,O
    found=entities.find(id);object=state.get(id);if(found==entities.end()||!object||!object->alive||!queryActors_.contains(id))continue;const auto& live=found->second;const auto& actor=queryActors_.at(id);
    auto vertex=[&](std::uint32_t index){const auto p=actor.vertices.at(index);return actor.baked?p:wAdd(actor.selected,wBasisRotate(p,actor.axes));};
    auto material=[&](std::uint32_t index)->const Material*{return live.model&&index<live.model->materials.size()?&live.model->materials[index]:nullptr;};
-   if(actor.type==4){const auto& payload=actor.auxiliary.empty()?actor.primary:actor.auxiliary;auto submit=[&](bool auxiliary){for(const auto& t:payload)triangle(vertex(t.indices[0]),vertex(t.indices[1]),vertex(t.indices[2]),id,t.renderTriangle,f&~512u,material(t.material),auxiliary,typeRejected,&t.indices);};
+   if(actor.type==4){const auto& payload=actor.auxiliary.empty()?actor.primary:actor.auxiliary;auto submit=[&](bool auxiliary){for(const auto& t:payload)triangle(vertex(t.indices[0]),vertex(t.indices[1]),vertex(t.indices[2]),id,t.renderTriangle,f&~512u,material(t.material),auxiliary,typeRejected,&t.indices,&actor.vertices.at(t.indices[0]),&actor.vertices.at(t.indices[1]),&actor.vertices.at(t.indices[2]));};
     // 100704a0 admission uses route0 count; 1006fef8 binds AUX payload onto PRIMARY.
     if(!actor.primary.empty()&&!(pass&&(mode&4)))submit(false);
     if(live.type==4&&(!(mode&8)||(!best.inPassable&&best.contentQuery))&&pass&&!actor.primary.empty())submit(true);
    }else if(!typeRejected&&!(pass&&(mode&(actor.type==5?8u:12u)))){
-    if(actor.type==5||(f&0x04000000u)||(mode&0x80000u)){if(actor.type==1)throw std::runtime_error("A7 Sprite POLYGON private frontend +94 factory is unsupported (10072af0 / 1016e258)");for(const auto& t:actor.triangles)triangle(vertex(t.indices[0]),vertex(t.indices[1]),vertex(t.indices[2]),id,t.renderTriangle,f&~512u,material(t.material));}
+    if(actor.type==5||(f&0x04000000u)||(mode&0x80000u)){if(actor.type==1)throw std::runtime_error("A7 Sprite POLYGON private frontend +94 factory is unsupported (10072af0 / 1016e258)");for(const auto& t:actor.triangles)triangle(vertex(t.indices[0]),vertex(t.indices[1]),vertex(t.indices[2]),id,t.renderTriangle,f&~512u,material(t.material),false,false,nullptr,&actor.vertices.at(t.indices[0]),&actor.vertices.at(t.indices[1]),&actor.vertices.at(t.indices[2]));}
     else{
      // 10068440 deliberately uses LIVE public candidate hull/pose, even with a body attached.
      Vec3 lo{float(field(id,"min_x")),float(field(id,"min_y")),float(field(id,"min_z"))},hi{float(field(id,"max_x")),float(field(id,"max_y")),float(field(id,"max_z"))};const bool narrow=field(id,"narrow")!=0,fat=field(id,"fat")!=0;if(narrow!=fat){lo=vector(global_vector(narrow?"hull_narrowmin":"hull_fatmin"));hi=vector(global_vector(narrow?"hull_narrowmax":"hull_fatmax"));}auto span=wSub(hi,lo);for(float* component:{&span.x,&span.y,&span.z})if(!(*component>0))*component=1;hi=wMul(span,.5f);const auto a=angles(id);const std::array axes{wRotate({1,0,0},a),wRotate({0,1,0},a),wRotate({0,0,1},a)};const auto hullPosition=wAdd(position(id),wBasisRotate(wAdd(lo,hi),axes));float scalar=0;Vec3 normal,sourcePoint{};bool hitHull=false;
@@ -1800,7 +1982,7 @@ Engine::Hit Engine::collide(Vec3 start,Vec3 end,Vec3 extent,std::uint32_t mode,O
   if((mode&4)&&pass)continue;if((mode&8)&&pass&&(data.type==2||data.type==1))continue;if(typeRejected)continue;
   bool polygon=data.model&&((f&0x4000000)||data.type==4||data.type==5||(mode&8192));Vec3 pos=position(id),lo=wAdd(pos,{float(field(id,"min_x")),float(field(id,"min_y")),float(field(id,"min_z"))}),hi=wAdd(pos,{float(field(id,"max_x")),float(field(id,"max_y")),float(field(id,"max_z"))});
   if(polygon){Vec3 s=wScale(*this,id),a=angles(id),mn=data.model->min,mx=data.model->max;auto changed=meshOverrides.find(data.model);if(changed!=meshOverrides.end()){std::size_t first=data.model->frames.empty()?0:std::size_t(std::max(1.,std::floor(field(id,"frame")))-1),next=field(id,"next_frame")>=1?std::size_t(field(id,"next_frame")-1):data.model->frames.empty()?0:std::min(first+1,data.model->frames.size()-1);for(std::size_t frame:{first,next}){auto found=changed->second.find(frame);if(found!=changed->second.end()){mn=wMin(mn,found->second.min);mx=wMax(mx,found->second.max);}}}lo={INFINITY,INFINITY,INFINITY};hi={-INFINITY,-INFINITY,-INFINITY};for(unsigned corner=0;corner<8;++corner){Vec3 v{(corner&1?mx.x:mn.x)*s.x,(corner&2?mx.y:mn.y)*s.y,(corner&4?mx.z:mn.z)*s.z};v=wAdd(pos,wRotate(v,a));lo=wMin(lo,v);hi=wMax(hi,v);}}
-  Vec3 broadLo=lo,broadHi=hi;if(!polygon){Vec3 center=wMul(wAdd(lo,hi),.5f);float radius=std::max(hi.x-lo.x,hi.y-lo.y)*.5f;broadLo.x=center.x-radius;broadLo.y=center.y-radius;broadHi.x=center.x+radius;broadHi.y=center.y+radius;}float broad=contacts?1.f:best.fraction;Vec3 n;if(!wSweepBox(start,delta,extent,broadLo,broadHi,broad,n))continue;
+  Vec3 broadLo=lo,broadHi=hi;if(!polygon){Vec3 center=wMul(wAdd(lo,hi),.5f);float radius=std::max(hi.x-lo.x,hi.y-lo.y)*.5f;broadLo.x=center.x-radius;broadLo.y=center.y-radius;broadHi.x=center.x+radius;broadHi.y=center.y+radius;}float broad=contacts?1.f:geometricHorizon();Vec3 n;if(!wSweepBox(start,delta,broadExtent,broadLo,broadHi,broad,n))continue;
   if(polygon){for(std::uint32_t i=0;i<data.model->triangles.size();++i){const auto& t=data.model->triangles[i];const Material* mat=t.materialIndex<data.model->materials.size()?&data.model->materials[t.materialIndex]:nullptr;std::uint32_t surface=f;if(mat&&data.type==4&&(mat->flags&64))surface|=512;triangle(wWorldVertex(*this,id,data,t.indices[0]),wWorldVertex(*this,id,data,t.indices[1]),wWorldVertex(*this,id,data,t.indices[2]),id,i,surface,mat);}}
   else {float fraction=contacts?1.f:best.fraction;if(wSweepCylinder(start,delta,extent,lo,hi,fraction,n)){Hit hit;hit.hit=true;hit.fraction=fraction;hit.normal=n;hit.entity=id;hit.surfaceFlags=f;hit.material=data.model&&!data.model->materials.empty()?&data.model->materials.front():nullptr;if(contacts)contacts->push_back({hit,data.model});if(!best.hit||fraction<best.fraction){best.hit=true;best.fraction=fraction;best.normal=n;best.entity=id;best.triangle=~0u;best.vertex=0;best.surfaceFlags=f;best.material=hit.material;}}}
  }
@@ -1808,7 +1990,18 @@ Engine::Hit Engine::collide(Vec3 start,Vec3 end,Vec3 extent,std::uint32_t mode,O
  if(contacts){sort_query_contacts(*contacts);const auto content=best;best={};bestSourcePoint=false;best.textureScan=content.textureScan;best.contentQuery=content.contentQuery;best.inPassable=content.inPassable;best.onPassable=content.onPassable;best.passableEntity=content.passableEntity;for(const auto& candidate:*contacts){const auto& hit=candidate.hit;if(hit.entity){const auto actor=entities.find(hit.entity);const auto* object=state.get(hit.entity);if(actor==entities.end()||!object||!object->alive||actor->second.model!=candidate.model)continue;}best.hit=true;best.fraction=hit.fraction;best.queryScalar_=hit.queryScalar_;best.position=hit.position;bestSourcePoint=candidate.sourcePoint;best.normal=hit.normal;best.entity=hit.entity;best.triangle=hit.triangle;best.vertex=hit.vertex;best.surfaceFlags=hit.surfaceFlags;best.material=hit.material;break;}}
  if(!best.passableEntity)best.passableEntity=markerOwner;
  if(bonusModern&&best.hit&&best.queryScalar_>0)best.queryScalar_=wQueryFixed(best.queryScalar_); // 100785c0 quantizes positive return distance, not its contact point.
- if(!bestSourcePoint){best.position=wAdd(start,wMul(delta,best.fraction));if(best.hit){float denominator=std::sqrt(extent.x*extent.x*best.normal.x*best.normal.x+extent.y*extent.y*best.normal.y*best.normal.y+extent.z*extent.z*best.normal.z*best.normal.z);if(denominator>0)best.position=wSub(best.position,{extent.x*extent.x*best.normal.x/denominator,extent.y*extent.y*best.normal.y/denominator,extent.z*extent.z*best.normal.z/denominator});}}return best;
+ if(!bestSourcePoint){best.position=wAdd(start,wMul(delta,best.fraction));if(best.hit){float denominator=std::sqrt(extent.x*extent.x*best.normal.x*best.normal.x+extent.y*extent.y*best.normal.y*best.normal.y+extent.z*extent.z*best.normal.z*best.normal.z);if(denominator>0)best.position=wSub(best.position,{extent.x*extent.x*best.normal.x/denominator,extent.y*extent.y*best.normal.y/denominator,extent.z*extent.z*best.normal.z/denominator});}}
+ if(modern&&callbacks&&best.hit&&best.entity&&(mode&(1024|2048))){
+  // 00472800 / 100785c0: selected-query publication and SHOOT/SONAR
+  // precede the mover's per-pass public-position write and contact callback.
+  best.modernTexture=true;best.textureScan=(mode&65536)!=0;
+  auto context=query?*query:ProcessContext{};publish_hit(context,best,start);
+  auto recipientAlive=[&]{const auto* object=state.get(best.entity);return object&&object->alive&&object->kind==Object::Kind::Entity&&entities.contains(best.entity);};
+  if((mode&1024)&&recipientAlive())invoke_event(*callbacks,best.entity,queryActor,9);
+  const auto* actor=state.get(queryActor);if(queryActor&&(!actor||!actor->alive))return best;
+  if((mode&2048)&&recipientAlive())invoke_event(*callbacks,best.entity,queryActor,11);
+ }
+ return best;
 }
 struct TextureSample {int light=128,fog=0;std::array<int,3> color{};bool mapped=false;std::uint32_t flags=0;bool named=false;const Material* material=nullptr;};
 namespace {
@@ -1948,6 +2141,168 @@ void Engine::publish_movement_hit(const Hit& hit,Vec3 displacement){
  const float reflected=float(((static_cast<long double>(hit.normal.z)*displacement.z+static_cast<long double>(hit.normal.y)*displacement.y)+static_cast<long double>(hit.normal.x)*displacement.x)*-2.f);
  set_vector(global_vector("bounce"),wAdd(displacement,wMul(hit.normal,reflected)));
 }
+Engine::Hit Engine::move_a6_legacy(Runtime& runtime,ProcessContext& query,ObjectId id,Vec3& current,Vec3 velocity,std::uint32_t mode){
+ // A6 00453940: six bumps, five retained planes, fractional time and source contact XYZ.
+ // c_move has a different four-pass solver (0046f730); Bonus is not routed here.
+ const Vec3 originalVelocity=velocity,origin=current;Vec3 planeVelocity=velocity;
+ std::array<Vec3,5> planes{};std::size_t planeCount=0;float time=1;Hit contact;
+ bool worldEvent=false,blocked=false;++legacyMoveEpoch_;
+ auto alive=[&]{const auto* o=state.get(id);return o&&o->alive&&entities.contains(id);};
+ auto quantize=[](Vec3 v){return Vec3{wQueryFixed(v.x),wQueryFixed(v.y),wQueryFixed(v.z)};};
+ auto block=[&](ObjectId other){if(std::uint32_t(field(id,"event_flags"))&8u){invoke_event(runtime,id,other,3);blocked=true;}};
+ auto clip=[&](Vec3 v,Vec3 n){
+  // 004537a0: unclamped MOVE_FRICTION, 1.01 overclip, strict .2*(1-friction) deadband.
+  const float keep=float(1.L-static_cast<long double>(float(global("move_friction").raw()))/1024.L);
+  const float dead=float(static_cast<long double>(keep)*.2);
+  const float back=float(((static_cast<long double>(v.x)*n.x+static_cast<long double>(v.y)*n.y)+static_cast<long double>(v.z)*n.z)*1.01);
+  auto component=[&](float value,float normal){float out=float((static_cast<long double>(value)-static_cast<long double>(back)*normal)*keep);return out>-dead&&out<dead?0.f:out;};
+  return Vec3{component(v.x,n.x),component(v.y,n.y),component(v.z,n.z)};
+ };
+ for(int bump=0;bump<6&&alive();++bump){
+  Vec3 end{float(static_cast<long double>(time)*velocity.x+current.x),float(static_cast<long double>(time)*velocity.y+current.y),float(static_cast<long double>(time)*velocity.z+current.z)};
+  current=quantize(current);end=quantize(end);
+  const Hit h=collide_legacy(current,end,mode,id,&query,true);
+  if(h.entity&&(mode&512)&&field(id,"push")>field(h.entity,"push")){
+   const auto* recipient=state.get(h.entity);
+   if(recipient&&recipient->alive&&recipient->kind==Object::Kind::Entity&&entities.contains(h.entity)&&(std::uint32_t(field(h.entity,"event_flags"))&16u)){Hit opposite=h;opposite.normal=wMul(h.normal,-1);publish_movement_hit(opposite,originalVelocity);invoke_event(runtime,h.entity,id,4);}
+   if(auto found=entities.find(h.entity);found!=entities.end())found->second.legacyPushEpoch=legacyMoveEpoch_;
+   --bump;continue; // 00453b9b retries without consuming one of the six bumps.
+  }
+  set_global("in_solid",{});set_global("in_passable",Value::from_int((h.status&0x40)!=0));
+  if(h.hit)contact=h;
+  if(h.status&1){
+   block(h.entity);
+   velocity=wMul(velocity,h.entity?.5f:.1f);
+   if(!h.entity){
+    current=wAdd(origin,velocity);
+    if(blocked)return contact;
+    if(!worldEvent&&(std::uint32_t(field(id,"event_flags"))&2u)){Hit reject=h;reject.status=0;reject.fraction=0;publish_movement_hit(reject,originalVelocity);invoke_event(runtime,id,0,1);worldEvent=true;}
+    return contact;
+   }
+   if(auto found=entities.find(h.entity);found!=entities.end())found->second.legacyPushEpoch=legacyMoveEpoch_;
+   if(!blocked&&(std::uint32_t(field(id,"event_flags"))&4u)){Hit reject=h;reject.status=0;reject.fraction=0;publish_movement_hit(reject,originalVelocity);invoke_event(runtime,id,h.entity,2);}
+   continue;
+  }
+  if(h.fraction>0){planeVelocity=velocity;current=h.position;planeCount=0;}
+  if(h.fraction==1)break;
+  publish_movement_hit(h,originalVelocity);
+  const Vec3 savedNormal=vector(global_vector("normal")),savedBounce=vector(global_vector("bounce"));
+  if(h.entity){
+   invoke_event(runtime,id,h.entity,2);
+   const auto* recipient=state.get(h.entity);
+   if(recipient&&recipient->alive&&recipient->kind==Object::Kind::Entity&&entities.contains(h.entity)&&(std::uint32_t(field(h.entity,"event_flags"))&32u)){Hit opposite=h;opposite.normal=wMul(h.normal,-1);publish_movement_hit(opposite,originalVelocity);invoke_event(runtime,h.entity,id,5);}
+   set_vector(global_vector("normal"),savedNormal);set_vector(global_vector("bounce"),savedBounce);
+  }else if(!worldEvent){invoke_event(runtime,id,0,1);worldEvent=true;}
+  if(!alive())return contact;
+  if(state.require(id).kind==Object::Kind::View||(mode&262144)==0)break; // 00453eb9 VIEW tag0x63, not USE_BOX.
+  const bool contactCallback=(std::uint32_t(field(id,"event_flags"))&(1u<<(h.entity?2:1)))!=0;
+  if(contactCallback&&(mode&0x800000u)){velocity={};break;}
+  time=float(static_cast<long double>(time)-static_cast<long double>(h.fraction)*time);
+  if(planeCount==planes.size()){velocity={};break;}
+  planes[planeCount++]=h.normal;const Vec3 before=velocity;bool accepted=false;
+  for(std::size_t i=0;i<planeCount;++i){
+   Vec3 candidate=clip(planeVelocity,planes[i]);bool clear=true;
+   for(std::size_t j=0;j<planeCount;++j)if(j!=i&&wHullDot(candidate,planes[j])<0){clear=false;break;}
+   if(clear){velocity=candidate;accepted=true;break;}
+  }
+  if(!accepted){
+   if(planeCount!=2){velocity={};break;}
+   const auto a=planes[0],b=planes[1];
+   const Vec3 crease{float(static_cast<long double>(a.y)*b.z-static_cast<long double>(a.z)*b.y),float(static_cast<long double>(a.z)*b.x-static_cast<long double>(a.x)*b.z),float(static_cast<long double>(a.x)*b.y-static_cast<long double>(a.y)*b.x)};
+   const float along=float(wHullDot(crease,velocity));velocity=wMul(crease,along); // Do not normalize the original crease.
+  }
+  if((static_cast<long double>(originalVelocity.z)*velocity.z+static_cast<long double>(originalVelocity.x)*velocity.x)+static_cast<long double>(originalVelocity.y)*velocity.y<0){velocity={};block(0);break;}
+  const Vec3 change=wSub(velocity,before);const auto arg=global_vector("vglide");
+  const auto vectorId=arg.ref.owner?arg.ref.owner:arg.current().bits;
+  const std::array delta{change.x,change.y,change.z};const std::array axes{"x","y","z"};
+  for(std::size_t i=0;i<delta.size();++i){auto ref=state.member(vectorId,axes[i]);auto old=ref.get();ref.set(Value::from_raw(std::bit_cast<std::int32_t>(old.bits+std::uint32_t(wQueryFixedRaw(delta[i])))));}
+ }
+ if(!blocked&&alive()){
+  const float intended=(std::abs(originalVelocity.x)+std::abs(originalVelocity.z))+std::abs(originalVelocity.y);
+  const auto travelled=wSub(current,origin);const float actual=(std::abs(travelled.x)+std::abs(travelled.z))+std::abs(travelled.y);
+  if(intended>4&&static_cast<long double>(actual)*100<intended)block(0);
+ }
+ return contact;
+}
+Engine::Hit Engine::move_a6_modern(Runtime& runtime,ProcessContext& query,ObjectId id,Vec3& current,Vec3 displacement,std::uint32_t mode){
+ // 0046f730/0046f3b0: four passes, UNIT direction plus quantized DISTANCE.
+ // Neither legacy plane history/MOVE_FRICTION/VGLIDE nor A7 penetration encoding belongs here.
+ Vec3 direction=displacement;float distance=wQueryFixed(wNormalizeMovement(direction));
+ Vec3 originalDirection=displacement;wNormalizeMovement(originalDirection);
+ const auto extent=wExtent(*this,id);Hit contact;float minimumZ=-99.f;
+ auto fixed=[](Vec3 p){return Vec3{wQueryFixed(p.x),wQueryFixed(p.y),wQueryFixed(p.z)};};
+ for(int pass=0;pass<4&&distance>std::bit_cast<float>(0x3c23d70au);++pass){
+  Vec3 desiredEnd=wAdd(current,wMul(direction,distance));const Vec3 segmentStart=fixed(current);
+  for(float* component:{&direction.x,&direction.y,&direction.z})if(std::abs(*component)<std::bit_cast<float>(0x3ca3d70au))*component=0;
+  wNormalizeMovement(direction); // 0046f45a: snapping must not shorten distance-based travel.
+  const Vec3 segmentEnd=fixed(wAdd(segmentStart,wMul(direction,distance)));
+  auto h=collide(segmentStart,segmentEnd,extent,mode,id,&query,true,&runtime);
+  const auto* actor=state.get(id);if(!actor||!actor->alive||!entities.contains(id))return contact;
+  h.modernTexture=true;h.textureScan=(mode&65536)!=0;
+  if(pass==0)publish_hit(query,h,segmentStart); // 004706d0 precedes this pass's position write.
+  if(!h.hit){
+   const auto segment=wSub(segmentEnd,segmentStart);const float length=wQueryFixed(wLength(segment));
+   set_position(id,wAdd(current,wMul(direction,length)));current=position(id);break;
+  }
+  contact=h;const float travel=std::max(0.f,wQueryFixed(h.queryScalar_));
+  if(travel!=0)set_position(id,wAdd(current,wMul(direction,travel)));
+  Hit publication=h;publication.fraction=0;publish_movement_hit(publication,displacement);
+  invoke_event(runtime,id,h.entity,h.entity?2:1);
+  if(h.entity){const auto* recipient=state.get(h.entity);if(recipient&&recipient->alive&&recipient->kind==Object::Kind::Entity&&entities.contains(h.entity)&&(std::uint32_t(field(h.entity,"event_flags"))&32u)){publication.normal=wMul(h.normal,-1);publish_movement_hit(publication,displacement);invoke_event(runtime,h.entity,id,5);}if(entities.contains(h.entity))physics.wake_query_body(h.entity);}
+  actor=state.get(id);if(!actor||!actor->alive||!entities.contains(id))return contact;
+  current=position(id); // Callbacks may legitimately move their public actor.
+  if(!(mode&262144))break;
+  if(minimumZ==-99.f)minimumZ=float(number("move_min_z")); // Capture after first contact callback.
+  const auto n=h.normal;
+  const float originDot=float((static_cast<long double>(current.y)*n.y+static_cast<long double>(current.z)*n.z)+static_cast<long double>(current.x)*n.x);
+  const float planeDelta=float(((static_cast<long double>(n.x)*desiredEnd.x+static_cast<long double>(n.z)*desiredEnd.z)+static_cast<long double>(n.y)*desiredEnd.y)-originDot);
+  const Vec3 scaledNormal=wMul(n,std::bit_cast<float>(0x3f8147aeu)),offset=wMul(scaledNormal,planeDelta);
+  Vec3 remainder=wSub(wSub(desiredEnd,offset),current);
+  if(std::bit_cast<std::int32_t>(global("disable_z_glide").bits&0xfffffc00u)>0||n.z<minimumZ)remainder.z=0;
+  distance=wNormalizeMovement(remainder);direction=remainder;
+  if(wHullDot(originalDirection,direction)<0)distance=0;
+ }
+ return contact;
+}
+Engine::Hit Engine::move_a7_modern(Runtime& runtime,ProcessContext& query,ObjectId id,Vec3& current,Vec3 displacement,std::uint32_t mode){
+ // 10075e80/10075bb0/100757e0, separately qualified from both A6 movers.
+ Vec3 direction=displacement;float distance=wQueryFixed(wNormalizeMovement(direction));
+ const float minimumZ=float(number("move_min_z"));const auto extent=wExtent(*this,id);Hit contact;
+ auto fixed=[](Vec3 p){return Vec3{wQueryFixed(p.x),wQueryFixed(p.y),wQueryFixed(p.z)};};
+ for(int pass=0;pass<4&&distance>=std::bit_cast<float>(0x3c75c28fu);++pass){
+  const Vec3 desiredEnd=wAdd(current,wMul(direction,distance));auto h=collide(current,desiredEnd,extent,mode,id,&query,true,&runtime);
+  const auto* actor=state.get(id);if(!actor||!actor->alive||!entities.contains(id))return contact;
+  h.modernTexture=true;h.textureScan=(mode&65536)!=0;if(pass==0)publish_hit(query,h,current);
+  float scalar=h.queryScalar_;
+  if(scalar>0)scalar=std::max(0.f,float(-3-wQueryFixedRaw(-scalar))/1024.f); // 10075bb0's -1024 conversion, not a fraction.
+  if(!h.hit){set_position(id,fixed(wAdd(current,wMul(direction,wLength(wSub(desiredEnd,current))))));current=position(id);break;}
+  contact=h;if(scalar>0)set_position(id,fixed(wAdd(current,wMul(direction,scalar))));
+  Hit publication=h;publication.fraction=0;publish_movement_hit(publication,displacement);
+  invoke_event(runtime,id,h.entity,h.entity?2:1);
+  if(h.entity){const auto* recipient=state.get(h.entity);if(recipient&&recipient->alive&&recipient->kind==Object::Kind::Entity&&entities.contains(h.entity)&&(std::uint32_t(field(h.entity,"event_flags"))&32u)){publication.normal=wMul(h.normal,-1);publish_movement_hit(publication,displacement);invoke_event(runtime,h.entity,id,5);}if(entities.contains(h.entity))physics.wake_query_body(h.entity);}
+  actor=state.get(id);if(!actor||!actor->alive||!entities.contains(id))return contact;
+  current=position(id);if(!(mode&262144))break;
+  Vec3 remainder;const auto n=h.normal;
+  if(scalar<0)remainder=wMul(n,std::min(distance,std::max(-scalar,std::bit_cast<float>(0x3c8b4395u))));
+  else{
+   const float approach=float(-wHullDot(direction,n));
+   if(approach>0&&approach<std::bit_cast<double>(0x3feccccccccccccdull)){
+    const float endpointDot=float((static_cast<long double>(n.z)*current.z+static_cast<long double>(n.x)*current.x)+static_cast<long double>(n.y)*current.y);
+    const float projection=float(((static_cast<long double>(n.x)*desiredEnd.x+static_cast<long double>(n.z)*desiredEnd.z)+static_cast<long double>(n.y)*desiredEnd.y)-endpointDot);
+    const auto offset=wMul(wMul(n,std::bit_cast<float>(0x3f8147aeu)),projection);
+    remainder=wMul(wSub(wSub(desiredEnd,offset),current),float(1.L-static_cast<long double>(float(global("move_friction").raw()))/1024.L));
+   }else{
+    // Original 1007584e/10075863 skips all three local stores here. Keep
+    // native's existing deterministic response at this undefined-stack boundary.
+    remainder=wSub(desiredEnd,current);const float into=wDot(remainder,n);if(into<0)remainder=wSub(remainder,wMul(n,into));
+    remainder=wMul(remainder,float(1-std::clamp(number("move_friction"),0.,1.)));
+   }
+  }
+  if((global("disable_z_glide").bits&0xfffffc00u)==1024u||n.z<minimumZ)remainder.z=0;
+  distance=wNormalizeMovement(remainder);direction=remainder;mode&=0xfffea3ffu;
+ }
+ return contact;
+}
 void Engine::publish_hit(ProcessContext& context,const Hit& hit,Vec3 start){
  auto vectorGlobal=[&](std::string_view name,Vec3 v){set_vector(global_vector(name),v);};
  auto textureName=[&](std::string_view name){auto value=global("tex_name");auto* object=value.kind==Value::Kind::Object?state.get(value.bits):nullptr;if(object&&object->kind==Object::Kind::String)object->text=name;else set_global("tex_name",new_string(std::string(name)));};
@@ -2006,11 +2361,13 @@ std::optional<Value> Engine::world_builtin(Runtime& runtime,ProcessContext& cont
   Hit hit=collide(start,end,extent,mode,ignored,&context,modern,&runtime);
   if(hit.legacyQuery)prepare_legacy_hit(hit,start,end,mode,context.my);
   if(!modern&&bonus&&hit.hit&&hit.fraction>=1){hit={};hit.position=end;hit.textureScan=(mode&65536)!=0;}
-  hit.modernTexture=modern;if(modern)hit.textureScan=(mode&65536)!=0;publish_hit(context,hit,start);if(!(mode&2))context.you=hit.endpoint_?0:hit.entity;const auto result=hit.legacyQuery?Value::from_raw(hit.resultRaw_):bonus&&modern?Value::from_raw(hit.hit?wQueryFixedRaw(hit.queryScalar_):0):Value::from_double(hit.hit?wLength(wSub(end,start))*hit.fraction:0);set_global("result",result);
+  // A6 004546f0 always rewrites YOU storage 006441dc (hit entity, else NULL), IGNORE_YOU only filters candidates.
+  hit.modernTexture=modern;if(modern)hit.textureScan=(mode&65536)!=0;publish_hit(context,hit,start);if(!(mode&2)||hit.legacyQuery)context.you=hit.endpoint_?0:hit.entity;const auto result=hit.legacyQuery?Value::from_raw(hit.resultRaw_):bonus&&modern?Value::from_raw(hit.hit?wQueryFixedRaw(hit.queryScalar_):0):Value::from_double(hit.hit?wLength(wSub(end,start))*hit.fraction:0);set_global("result",result);
+  if(modern&&!(mode&2)&&context.you){const auto* recipient=state.get(context.you);if(!recipient||!recipient->alive||!entities.contains(context.you))context.you=0;}
   if(hit.legacyQuery&&hit.endpoint_)return result;
   const bool reverseNormal=hit.legacyQuery&&hit.entity&&(mode&(1024|2048));Vec3 savedNormal{};
   if(reverseNormal){savedNormal=vector(global_vector("normal"));set_vector(global_vector("normal"),wMul(savedNormal,-1));}
-  if(hit.entity&&(mode&1024))invoke_event(runtime,hit.entity,context.my,9);if(hit.entity&&(mode&2048))invoke_event(runtime,hit.entity,context.my,11);
+  if(!modern){if(hit.entity&&(mode&1024))invoke_event(runtime,hit.entity,context.my,9);if(hit.entity&&(mode&2048))invoke_event(runtime,hit.entity,context.my,11);}
   if(reverseNormal)set_vector(global_vector("normal"),savedNormal);return result;
  }
  if(name=="ent_move"||name=="c_move"){
@@ -2018,19 +2375,22 @@ std::optional<Value> Engine::world_builtin(Runtime& runtime,ProcessContext& cont
   std::uint32_t rawMode=explicitC?args[3].current().bits:global(bonus&&a7WorldQueryRoute_?"trace_mode":"move_mode").bits;const bool modern=cBackend(cEntry,rawMode);
   if(cEntry)set_global("move_mode",Value::from_raw(std::bit_cast<std::int32_t>(rawMode)));
   const auto mode=std::uint32_t(std::bit_cast<std::int32_t>(rawMode|0x00800400u)>>10);ObjectId ignoredYou=context.you;collisionYou=ignoredYou;collisionActor=id;auto query=context;query.my=id;const bool bonusModern=bonus&&modern,legacyA6=!bonus&&!modern;Vec3 start=position(id),delta=wAdd(wRotate(vector(args[explicitC?1:0]),angles(id)),vector(args[explicitC?2:1])),centerOffset=modern||legacyA6?Vec3{}:wCenter(*this,id),current=wAdd(start,centerOffset),extent=wExtent(*this,id),remaining=delta;Hit contact;bool ownPass=flags(id)&512;
-  if(bonusModern){set_global("in_passable",{});set_global("in_solid",{});}
+  if(modern){set_global("in_passable",{});set_global("in_solid",{});}
   auto moving=[&]{return bonusModern?(std::abs(remaining.x)>std::bit_cast<float>(0x38d1b717u)||std::abs(remaining.y)>std::bit_cast<float>(0x38d1b717u)||std::abs(remaining.z)>std::bit_cast<float>(0x38d1b717u)):legacyA6?(remaining.x!=0||remaining.y!=0||remaining.z!=0):wLength(remaining)>1e-6f;};
   const bool requestedMovement=moving();
   if(legacyA6&&requestedMovement&&!ownPass)for(auto output:{"normal","bounce","vglide"})set_vector(global_vector(output),{});
-  if((bonusModern||legacyA6)&&ownPass)current=wAdd(current,remaining);
-  else for(int step=0;step<6&&moving();++step){Vec3 segmentStart=current,segmentEnd=wAdd(current,remaining);if(legacyA6){segmentStart={wQueryFixed(segmentStart.x),wQueryFixed(segmentStart.y),wQueryFixed(segmentStart.z)};segmentEnd={wQueryFixed(segmentEnd.x),wQueryFixed(segmentEnd.y),wQueryFixed(segmentEnd.z)};}Hit h=collide(segmentStart,segmentEnd,extent,mode,id,&query,modern,&runtime);if(legacyA6){set_global("in_solid",{});set_global("in_passable",Value::from_int((h.status&0x40)!=0));publish_movement_hit(h,delta);}if(bonusModern&&(step==0||h.hit)&&h.contentQuery){set_global("passable_ent",Value::object(h.passableEntity));set_global("in_passable",Value::from_int(h.inPassable));set_global("on_passable",Value::from_int(h.onPassable&&!h.inPassable));}if(!entities.contains(id)||!state.require(id).alive)return Value{};if(!h.hit||ownPass){current=wAdd(current,remaining);if(h.hit)contact=h;break;}contact=h;float length=wLength(remaining),fraction=std::max(0.f,h.fraction-(length>0?0.001f/length:0));current=wAdd(current,wMul(remaining,fraction));if(!(mode&262144))break;remaining=wMul(remaining,1-fraction);float into=wDot(remaining,h.normal);if(into<0)remaining=wSub(remaining,wMul(h.normal,into));remaining=wMul(remaining,float(1-std::clamp(number("move_friction"),0.,1.)));}
+  if((modern||legacyA6)&&ownPass)current=wAdd(current,remaining);
+  else if(legacyA6){if(requestedMovement)contact=move_a6_legacy(runtime,query,id,current,delta,mode);}
+  else if(modern)contact=bonusModern?move_a7_modern(runtime,query,id,current,delta,mode):move_a6_modern(runtime,query,id,current,delta,mode);
+  else for(int step=0;step<6&&moving();++step){Hit h=collide(current,wAdd(current,remaining),extent,mode,id,&query,false,&runtime);if(!entities.contains(id)||!state.require(id).alive)return Value{};if(!h.hit||ownPass){current=wAdd(current,remaining);if(h.hit)contact=h;break;}contact=h;float length=wLength(remaining),fraction=std::max(0.f,h.fraction-(length>0?0.001f/length:0));current=wAdd(current,wMul(remaining,fraction));if(!(mode&262144))break;remaining=wMul(remaining,1-fraction);float into=wDot(remaining,h.normal);if(into<0)remaining=wSub(remaining,wMul(h.normal,into));remaining=wMul(remaining,float(1-std::clamp(number("move_friction"),0.,1.)));}
+  if(!entities.contains(id)||!state.require(id).alive)return Value{};
   contact.modernTexture=modern;contact.textureScan=modern&&(mode&65536)!=0;contact.contentQuery=false; // Segment publication is source-ordered, not replayed from the final contact.
-  Vec3 destination=wSub(current,centerOffset);const auto storedDestination=bonusModern?Vec3{wQueryFixed(destination.x),wQueryFixed(destination.y),wQueryFixed(destination.z)}:destination;set_position(id,storedDestination);Vec3 travelled=wSub(destination,start);set_vector(global_vector("my_speed"),travelled);float distance=wLength(travelled);if(!contact.hit)contact.position=current;if(!legacyA6)publish_hit(context,contact,wAdd(start,centerOffset));set_global("result",Value::from_double(distance));
-  if(legacyA6){if(ownPass){const auto content=wLegacyPointContent(world,storedDestination);set_global("in_passable",Value::from_int(content==-126));set_global("in_solid",Value::from_int(content==-128));}}
-  else if(!bonusModern){int worldContent=wWorldContent(world,destination);bool inPassable=worldContent==2;if(worldContent!=3)for(const auto& [other,data]:entities){if(other==id||(data.type!=4&&data.type!=5)||!(flags(other)&512))continue;Vec3 v=wSub(destination,wAdd(position(other),wCenter(*this,other))),ext=wExtent(*this,other);if(std::abs(v.x)<=ext.x&&std::abs(v.y)<=ext.y&&std::abs(v.z)<=ext.z){inPassable=true;break;}}set_global("in_passable",Value::from_int(inPassable));set_global("in_solid",Value::from_int(worldContent==3));}
-  if(!legacyA6&&!(mode&2))context.you=contact.entity;if(contact.hit){if(bonusModern){if(contact.entity&&(mode&1024))invoke_event(runtime,contact.entity,id,9);if(contact.entity&&(mode&2048))invoke_event(runtime,contact.entity,id,11);invoke_event(runtime,id,contact.entity,contact.entity?2:1);if(contact.entity){invoke_event(runtime,contact.entity,id,5);physics.wake_query_body(contact.entity);}}else if(mode&(1024|2048)){if(contact.entity&&(mode&1024))invoke_event(runtime,contact.entity,id,9);if(contact.entity&&(mode&2048))invoke_event(runtime,contact.entity,id,11);}else{invoke_event(runtime,id,contact.entity,contact.entity?2:1);if(distance<=1e-6f)invoke_event(runtime,id,contact.entity,3);if(contact.entity)invoke_event(runtime,contact.entity,id,5);}}
+  Vec3 destination=wSub(current,centerOffset);const auto storedDestination=bonusModern?Vec3{wQueryFixed(destination.x),wQueryFixed(destination.y),wQueryFixed(destination.z)}:destination;set_position(id,storedDestination);Vec3 travelled=wSub(destination,start);set_vector(global_vector("my_speed"),travelled);float distance=wLength(travelled);if(!contact.hit)contact.position=current;if(!legacyA6&&!modern)publish_hit(context,contact,wAdd(start,centerOffset));set_global("result",Value::from_double(distance));
+  if(!bonus&&(legacyA6||modern)){if(ownPass){const auto content=wLegacyPointContent(world,storedDestination);set_global("in_passable",Value::from_int(content==-126));set_global("in_solid",Value::from_int(content==-128));}}
+  else if(!modern){int worldContent=wWorldContent(world,destination);bool inPassable=worldContent==2;if(worldContent!=3)for(const auto& [other,data]:entities){if(other==id||(data.type!=4&&data.type!=5)||!(flags(other)&512))continue;Vec3 v=wSub(destination,wAdd(position(other),wCenter(*this,other))),ext=wExtent(*this,other);if(std::abs(v.x)<=ext.x&&std::abs(v.y)<=ext.y&&std::abs(v.z)<=ext.z){inPassable=true;break;}}set_global("in_passable",Value::from_int(inPassable));set_global("in_solid",Value::from_int(worldContent==3));}
+  if(!legacyA6&&!(mode&2)){const auto* recipient=state.get(contact.entity);context.you=recipient&&recipient->alive&&entities.contains(contact.entity)?contact.entity:0;}if(!legacyA6&&!modern&&contact.hit){if(mode&(1024|2048)){if(contact.entity&&(mode&1024))invoke_event(runtime,contact.entity,id,9);if(contact.entity&&(mode&2048))invoke_event(runtime,contact.entity,id,11);}else{invoke_event(runtime,id,contact.entity,contact.entity?2:1);if(distance<=1e-6f)invoke_event(runtime,id,contact.entity,3);if(contact.entity)invoke_event(runtime,contact.entity,id,5);}}
   if((!bonusModern||ownPass)&&(mode&4096)&&field(id,"trigger_range")>0&&requestedMovement)throw std::runtime_error("positive-range legacy trigger actor tree is unsupported (106bfe64 / cached ENTITY278/284)");
-  if(mode&512){WorldQuerySnapshot snapshot(*this);for(ObjectId other:*snapshot.ids){const auto* o=state.get(other);if(other==id||!o||!o->alive||!entities.contains(other))continue;if((mode&2)&&other==ignoredYou)continue;if(field(other,"push")<field(id,"push")){auto ext=wExtent(*this,other),ctr=wAdd(position(other),wCenter(*this,other));float f=1;Vec3 n;if(wSweepBox(wAdd(start,wCenter(*this,id)),delta,extent,wSub(ctr,ext),wAdd(ctr,ext),f,n))invoke_event(runtime,other,id,4);}}}
+  if(!legacyA6&&!modern&&(mode&512)){WorldQuerySnapshot snapshot(*this);for(ObjectId other:*snapshot.ids){const auto* o=state.get(other);if(other==id||!o||!o->alive||!entities.contains(other))continue;if((mode&2)&&other==ignoredYou)continue;if(field(other,"push")<field(id,"push")){auto ext=wExtent(*this,other),ctr=wAdd(position(other),wCenter(*this,other));float f=1;Vec3 n;if(wSweepBox(wAdd(start,wCenter(*this,id)),delta,extent,wSub(ctr,ext),wAdd(ctr,ext),f,n))invoke_event(runtime,other,id,4);}}}
   if(bonusModern){if(!ownPass)set_position(id,storedDestination);auto actor=queryActors_.find(id);if(actor==queryActors_.end())throw std::runtime_error("A7 modern c_move owner has no context (1007631b source fault)");refresh_query_pose(id,actor->second);}
   return Value::from_double(distance);
  }
@@ -2072,7 +2432,17 @@ EntityData load_entity_asset(Assets& assets,std::string_view file,std::uint32_t&
   quad.min={0,-halfWidth,-halfHeight};quad.max={0,halfWidth,halfHeight};
   quad.vertices={{{0,-halfWidth,-halfHeight},{1,0,0},{0,1},{}},{{0,halfWidth,-halfHeight},{1,0,0},{1,1},{}},{{0,halfWidth,halfHeight},{1,0,0},{1,0},{}},{{0,-halfWidth,halfHeight},{1,0,0},{0,0},{}}};
   quad.triangles={{{0,1,2},0,0},{{0,2,3},0,0}};
-  Material skin;skin.name=file;skin.textureName=file;skin.texture=std::move(image);skin.uvScale={1.f/float(spriteFrames),1};quad.materials.push_back(std::move(skin));data.model=&quad;
+  // A6 00459a90 cuts a "+N" strip into N frame textures of width/N. Native keeps one texture; a strip wider than a GPU
+  // texture (s_alev+61.tga in Seytan_k, 18300 px) holds the same frames as a grid of cells. The shaders address frame f at
+  // cell (f mod cols, f div cols) with uvScale (1/cols, 1/rows); an ordinary strip is the one-row case.
+  // ponytail: fixed 16384 limit (GL_MAX_TEXTURE_SIZE / maxImageDimension2D of current desktop GPUs); query the device if smaller GPUs matter.
+  Vec2 cell{1.f/float(spriteFrames),1};
+  if(constexpr std::uint32_t maxWidth=16384;image->width>maxWidth){
+   const std::uint32_t frameWidth=image->width/spriteFrames,cols=maxWidth/frameWidth,rows=cols?(spriteFrames+cols-1)/cols:0;if(!cols||std::uint64_t(rows)*image->height>maxWidth)throw std::runtime_error("sprite frame strip exceeds texture limits: "+std::string(file));
+   auto grid=std::make_shared<Image>(*image);grid->width=cols*frameWidth;grid->height=rows*image->height;grid->rgba.assign(std::size_t(grid->width)*grid->height*4,0);
+   for(std::uint32_t f=0;f<spriteFrames;++f)for(std::uint32_t y=0;y<image->height;++y)std::copy_n(image->rgba.begin()+(std::size_t(y)*image->width+std::size_t(f)*frameWidth)*4,std::size_t(frameWidth)*4,grid->rgba.begin()+((std::size_t(f/cols)*image->height+y)*grid->width+std::size_t(f%cols)*frameWidth)*4);
+   image=std::move(grid);cell={1.f/float(cols),1.f/float(rows)};}
+  Material skin;skin.name=file;skin.textureName=file;skin.texture=std::move(image);skin.uvScale=cell;quad.materials.push_back(std::move(skin));data.model=&quad;
  } else throw std::runtime_error("unsupported entity asset extension: "+std::string(file));
  return data;
 }
@@ -2094,7 +2464,7 @@ ObjectId Engine::create_entity(Runtime& runtime,std::string_view file,Vec3 pos,F
  for(unsigned i=1;i<=100;++i)object.field("skill"+std::to_string(i)).value={};
  if(state.profile==SemanticProfile::CampaignA6&&!loadingPlacedEntities_)object.field("event_flags").value.bits|=1u; // 00431546–00431550: every dynamic birth, before optional action.
  if(state.profile==SemanticProfile::BonusA7&&!loadingPlacedEntities_&&data.model)object.field("event_flags").value=Value::from_raw(1); // 10039598 EMASK60|1, before initial mode3/construction.
- set_position(id,pos);if(data.model)wBounds(*this,id,*data.model);
+ set_position(id,pos);if(data.model)wBounds(*this,id,data);
  entities.emplace(id,std::move(data));levelEntities_.push_back(id);
  if(state.profile==SemanticProfile::BonusA7&&!loadingPlacedEntities_)initialize_query_actor(id);
  set_global("num_entities",Value::from_int(std::int32_t(std::count_if(entities.begin(),entities.end(),[](const auto& entry){return entry.second.scannable;}))));
@@ -2144,7 +2514,7 @@ void Engine::level_progress(Runtime& runtime,std::int64_t stage){
 }
 void Engine::load_level(Runtime& runtime,std::string_view filename) {
  // The caller can pass an entity-owned string; preserve it before tombstoning the old level.
- std::string level(filename);auto oldEntities=std::move(levelEntities_);levelEntities_.clear();
+ std::string level(filename);currentLevel=level;auto oldEntities=std::move(levelEntities_);levelEntities_.clear();
  assets.set_native_alpha_depth(global("D3D_ALPHADEPTH").real());
  assets.set_native_shadow_depth(global("D3D_SHADOWDEPTH").real(),renderer!=nullptr);
  assets.initialize_native_lightmap_tables(global("GAMMA").raw(),global("D3D_MONOCHROME").bits!=0,renderer!=nullptr);
@@ -2220,7 +2590,12 @@ void Engine::load_level(Runtime& runtime,std::string_view filename) {
   if(source.attachedEntityIndex){if(source.attachedEntityIndex>=entityRecords.size())throw std::runtime_error("WMB entity attachment outside entity record list");data.parent=entityRecords[source.attachedEntityIndex];object.field("parent").value=Value::object(data.parent);}
   set_field(id,"flags",source.flags);set_field(id,"pan",source.angle.x);set_field(id,"tilt",source.angle.y);set_field(id,"roll",source.angle.z);
   set_field(id,"scale_x",source.scale.x);set_field(id,"scale_y",source.scale.y);set_field(id,"scale_z",source.scale.z);
-  if(data.model){Vec3 a=data.model->min,b=data.model->max,s=source.scale;a={a.x*s.x,a.y*s.y,a.z*s.z};b={b.x*s.x,b.y*s.y,b.z*s.z};Vec3 lo=wMin(a,b),hi=wMax(a,b);set_field(id,"min_x",lo.x);set_field(id,"min_y",lo.y);set_field(id,"min_z",lo.z);set_field(id,"max_x",hi.x);set_field(id,"max_y",hi.y);set_field(id,"max_z",hi.z);}
+  if(data.model&&state.profile==SemanticProfile::CampaignA6){
+   // 004315d0 ASM 004316be-004316e8: WMB stores the resource bottom; placed Z -= SCALE_Z*resource min_z (raw, truncated).
+   const float resourceMinZ=data.type==2?data.model->resourceMin.z:data.model->min.z; // MDL resource box is frame 0 (assets.hpp).
+   auto& z=object.field("z").value;z=Value::from_raw(std::int32_t(std::trunc(double(float(z.raw()))-double(float(object.field("scale_z").value.raw()))*resourceMinZ)));
+   object.field("flags2").value.bits&=~3u;wBounds(*this,id,data);} // 004315d0: one 00430920 pass at the placed SCALE.
+  else if(data.model){Vec3 a=data.model->min,b=data.model->max,s=source.scale;a={a.x*s.x,a.y*s.y,a.z*s.z};b={b.x*s.x,b.y*s.y,b.z*s.z};Vec3 lo=wMin(a,b),hi=wMax(a,b);set_field(id,"min_x",lo.x);set_field(id,"min_y",lo.y);set_field(id,"min_z",lo.z);set_field(id,"max_x",hi.x);set_field(id,"max_y",hi.y);set_field(id,"max_z",hi.z);}
   set_field(id,"ambient",(source.ambient.r+source.ambient.g+source.ambient.b)*100/3);set_field(id,"albedo",source.albedo*100);
   set_field(id,"sound_volume",source.soundVolume);set_field(id,"sound_range",source.soundRange);
   for(unsigned skill=0;skill<100;++skill)set_field(id,"skill"+std::to_string(skill+1),source.skills[skill]);
@@ -2280,7 +2655,7 @@ std::optional<Value> worldModelBuiltin(Engine& e,Runtime&,ProcessContext& contex
   const bool sameResource=old.model==replacement.model||(old.type==1&&replacement.type==1&&old.model&&replacement.model&&wmEqual(old.file,replacement.file));
   replacement.light=old.light;replacement.light.model=replacement.model;if(!sameResource)replacement.light.dirty=true;
   replacement.visibleLod=old.visibleLod;replacement.lightResident=old.lightResident;
-  if(sameResource)replacement.skinObjects=std::move(old.skinObjects);if(old.ownedModel){if(e.renderer)e.renderer->purge_model(old.model);e.meshOverrides.erase(old.model);}old=std::move(replacement);auto& o=e.state.require(id);o.text=file;o.field("file").value=e.new_string(file);e.set_field(id,"type",old.type);e.set_field(id,"sprite_frames",spriteFrames);e.set_field(id,"frame",1);e.set_field(id,"next_frame",0);e.set_field(id,"skin",1);if(old.model)wBounds(e,id,*old.model);return Value{};}
+  if(sameResource)replacement.skinObjects=std::move(old.skinObjects);if(old.ownedModel){if(e.renderer)e.renderer->purge_model(old.model);e.meshOverrides.erase(old.model);}old=std::move(replacement);auto& o=e.state.require(id);o.text=file;o.field("file").value=e.new_string(file);e.set_field(id,"type",old.type);e.set_field(id,"sprite_frames",spriteFrames);e.set_field(id,"frame",1);e.set_field(id,"next_frame",0);e.set_field(id,"skin",1);if(old.model)wBounds(e,id,old);return Value{};}
  if(name=="ent_animate"||name=="ent_frame"||name=="ent_cycle"){
   bool explicitEntity=name=="ent_animate";count(explicitEntity?4:2);ObjectId id=explicitEntity?object(0):context.my;auto& d=wmEntity(e,id);const auto& m=wmModel(d);Value sceneValue=arguments[explicitEntity?1:0].current();Value percentValue=arguments[explicitEntity?2:1].current();if(percentValue.kind!=Value::Kind::Number)throw std::runtime_error("animation percent must be numeric");double percent=percentValue.real();std::uint32_t mode=name=="ent_cycle"?1u:0u;
   const bool bonus=e.state.profile==SemanticProfile::BonusA7;
@@ -2302,7 +2677,10 @@ std::optional<Value> worldModelBuiltin(Engine& e,Runtime&,ProcessContext& contex
  }
  if(name=="ent_vertices"){count(1);const auto& d=wmEntity(e,object(0));return Value::from_int(std::int32_t(wmSourceCount(wmModel(d))));}
  if(name=="ent_vertex"||name=="vec_for_mesh"||name=="vec_for_vertex"||name=="vec_to_mesh"){
-  bool legacy=name=="ent_vertex";count(legacy?2:3);ObjectId id=legacy?context.my:object(1);auto& d=wmEntity(e,id);const auto& m=wmModel(d);std::size_t index=wmVertexIndex(arguments[legacy?1:2].current(),m);
+  bool legacy=name=="ent_vertex";count(legacy?2:3);ObjectId id=legacy?context.my:object(1);auto& d=wmEntity(e,id);const auto& m=wmModel(d);
+  // A6 vec_for_vertex 004040d0->00449dc0 mode0: index=(raw>>10)-1 clamped to [0,vertices-1], never rejected (Ebru's ebru_silah.mdl has 6 vertices, oyuncu2_ebru.wdl:70 asks 169).
+  auto a6Clamp=[&](Value v){auto n=std::int64_t(v.raw()>>10)-1;return std::size_t(std::clamp<std::int64_t>(n,0,std::int64_t(wmSourceCount(m))-1));};
+  std::size_t index=name=="vec_for_vertex"&&e.state.profile==SemanticProfile::CampaignA6&&wmSourceCount(m)?a6Clamp(arguments[2].current()):wmVertexIndex(arguments[legacy?1:2].current(),m);
   if(name=="vec_to_mesh"){if(d.type!=2&&d.type!=5)throw std::runtime_error("vec_to_mesh supports only models and non-chunked terrain");Vec3 v=e.vector(arguments[0]);auto& geometry=wmMaterialize(e,id,d);if(!m.vertexSources.empty()&&(m.sourceRenderOffsets.size()!=wmSourceCount(m)+1||m.sourceRenderIndices.size()!=geometry.mesh.size()))throw std::runtime_error("model lacks original-to-render vertex reverse map");if(d.type==5){auto previous=geometry.sourceMesh.at(index);v.x=previous.x;v.y=previous.y;}geometry.sourceMesh.at(index)=v;if(m.vertexSources.empty())geometry.mesh.at(index)=v;else for(auto at=m.sourceRenderOffsets.at(index);at<m.sourceRenderOffsets.at(index+1);++at)geometry.mesh.at(m.sourceRenderIndices.at(at))=v;geometry.min=wMin(geometry.min,v);geometry.max=wMax(geometry.max,v);++geometry.revision;return Value{};}
   if(name=="vec_for_mesh"&&d.type!=2&&d.type!=5)throw std::runtime_error("vec_for_mesh supports only models and non-chunked terrain");Vec3 v=wmSourceVertex(e,id,d,index,false,name!="vec_for_mesh");if(name!="vec_for_mesh"){Vec3 scale=wScale(e,id);v=wAdd(e.position(id),wRotate({v.x*scale.x,v.y*scale.y,v.z*scale.z},e.angles(id)));}e.set_vector(arguments[0],v);return Value{};
  }
@@ -2355,7 +2733,7 @@ std::uint32_t Engine::material_index(Value value){
  ScriptMaterialState material;material.sourceId=object->id;material.flags=ui_value(*object,"flags").bits;
  auto color=[&](std::string_view red,std::string_view green,std::string_view blue){return Color{ui_number(*object,red),ui_number(*object,green),ui_number(*object,blue),1};};
  material.ambient=color("ambient_red","ambient_green","ambient_blue");material.diffuse=color("diffuse_red","diffuse_green","diffuse_blue");material.specular=color("specular_red","specular_green","specular_blue");material.emissive=color("emissive_red","emissive_green","emissive_blue");
- material.power=ui_number(*object,"power");material.alpha=ui_number(*object,"alpha");material.albedo=ui_number(*object,"albedo");
+ material.power=ui_number(*object,"power");material.alpha=ui_number(*object,"alpha");material.albedoRaw=ui_value(*object,"albedo").raw();
  static constexpr std::array<std::string_view,8> skills{"skill1","skill2","skill3","skill4","skill5","skill6","skill7","skill8"};
  for(std::size_t i=0;i<skills.size();++i)material.skillBits[i]=ui_value(*object,skills[i]).bits;
  if(auto effect=materialEffects_.find(object->id);effect!=materialEffects_.end()){material.effect=effect->second.kind;material.effectGeneration=effect->second.generation;}
@@ -2399,6 +2777,7 @@ void Engine::make_frame(bool mouseOutput){
  if(bonusMouse&&mouseOutput&&global("mouse_mode").bits){auto pos=global_vector("mouse_pos");auto& object=state.require(pos.ref.owner);auto x=state.member(object.id,"x"),y=state.member(object.id,"y");x.set(Value::from_raw(std::clamp(x.get().raw(),0,(currentWidth_-1)*1024)));y.set(Value::from_raw(std::clamp(y.get().raw(),0,(currentHeight_-1)*1024)));auto spot=global_vector("mouse_spot");auto& hot=state.require(spot.ref.owner);mouseHit_={float(std::bit_cast<std::int32_t>(x.get().bits+spot.current().bits))/1024,float(std::bit_cast<std::int32_t>(y.get().bits+state.member(hot.id,"y").get().bits))/1024};}
  std::optional<Button> previousPressed,previousHovered;if(pressedButton_&&*pressedButton_<buttons_.size())previousPressed=buttons_[*pressedButton_];if(hoveredButton_&&*hoveredButton_<buttons_.size())previousHovered=buttons_[*hoveredButton_];
  draws_.clear();shadows_.clear();cameras_.clear();ui_.clear();particles_.clear();lights_.clear();buttons_.clear();uiObjects_.clear();uiTextUsed_=0;frame_.world=world;frame_.adjustment=nativeAdjustment;frame_.video=nullptr;frame_.videoSerial=0;frame_.videoRect={};frame_.fogStart=frame_.fogEnd=0;
+ frame_.nativeFixedLightBank=!bonusMouse||(global("patch").bits&0x2000u)||(world&&!world->sections[3].empty());
  frame_.lightContext=this;frame_.prepareEntityLight=[](void* context,const DrawInstance& draw,const Camera& camera){return static_cast<Engine*>(context)->prepare_entity_light(draw,camera);};
  frame_.cachedEntityShadow=[](void* context,const DrawInstance& draw){const auto& entities=static_cast<Engine*>(context)->entities;auto found=entities.find(draw.objectId);return found==entities.end()?draw.nativeShadow:found->second.light.shadow;};
  materials_.clear();if(++materialGeneration_==0){materialIndices_.clear();materialGeneration_=1;}
@@ -2494,9 +2873,17 @@ void Engine::make_frame(bool mouseOutput){
   const auto falloff=light.type==2?spotFalloff:pointFalloff;light.attenuation={falloff.z,falloff.y/radius,falloff.x/(radius*radius)};light.theta=spotCone.x;light.phi=spotCone.x+spotCone.y;light.falloff=1+spotCone.z;
   int red=ui_value(object,"red").raw()>>10,green=ui_value(object,"green").raw()>>10,blue=ui_value(object,"blue").raw()>>10;if(global("D3D_MONOCHROME").bits)red=green=blue=(red+green+blue)/3;light.color={red/255.f,green/255.f,blue/255.f,1};
  }
- const bool sunEnabled=frame_.hardwareLighting&&global("SUN_LIGHT").bits!=0;
+ const bool sunEnabled=frame_.hardwareLighting&&(bonusMouse?global("SUN_LIGHT").raw()>0:global("SUN_LIGHT").bits!=0);
  if(!sunEnabled){for(auto& slot:entityLightSlots_)if(slot.synthetic)slot={};}
- else if(auto* slot=light_slot(0,true,false,1)){auto& light=slot->light;light.type=3;light.synthetic=true;light.direction={cp*ct,sp*ct,st};const float level=float(global("SUN_LIGHT").raw())/1024.f*.01f;light.color={level,level,level,1};light.range=1;light.intensity=1;}
+ else if(auto* slot=light_slot(0,true,false,1)){
+  // A6 00437800: D3DLIGHT9.Direction = zero vector 006c8e64 - unit SUN_ANGLE vector (light travels away from the sun);
+  // 00438470 stores it into the directional slot. Bonus keeps the unverified A7 sign.
+  auto& light=slot->light;light.type=3;light.synthetic=true;light.direction=bonusMouse?Vec3{cp*ct,sp*ct,st}:Vec3{-(cp*ct),-(sp*ct),-st};
+  const float sunlight=float(global("SUN_LIGHT").raw())/1024.f;
+  if(bonusMouse){const auto bgr=vector(global_vector("sun_color"));const float scale=float(double(sunlight)/25500.0);light.color={float(static_cast<long double>(bgr.z)*scale),float(static_cast<long double>(bgr.y)*scale),float(static_cast<long double>(bgr.x)*scale),1};}
+  else{const float level=float(static_cast<long double>(sunlight)*std::bit_cast<float>(0x3ca3d70au));light.color={level,level,level,1};}
+  light.range=1;light.intensity=1;
+ }
  for(std::size_t i=0;i<lightCount;++i)if(entityLightSlots_[i].occupied())lights_.push_back(entityLightSlots_[i].light);
  // Serialized WMB lights remain the existing enhanced baked-light route, not fabricated native active slots.
  if(world)for(const auto& source:world->lights){RenderLight light{source.position,source.color,source.range,1,true};light.synthetic=true;lights_.push_back(light);}
@@ -2515,6 +2902,11 @@ void Engine::make_frame(bool mouseOutput){
   if(d.translucent&&state.profile==SemanticProfile::BonusA7){const auto alpha=o->fields.find("alpha");d.alpha=float(alpha==o->fields.end()?102400:alpha->second.value.raw())*std::bit_cast<float>(0x3723d70au);}
   else d.alpha=d.translucent?std::clamp(ui_number(*o,"alpha",100)/100,0.0f,1.0f):1;
   d.ambient=ui_number(*o,"ambient");d.tint=rgb(*o,1);d.unlit=field(id,"unlit");d.additive=field(id,"bright");d.overlay=field(id,"overlay");d.flare=field(id,"flare");d.invertFlare=d.flare&&d.translucent;d.billboard=data.type==1&&!field(id,"oriented");d.viewSpace=viewEntity;
+  // A6 0043ee40 (models) and 00443350 (world sprites) blend only for FLARE, TRANSPARENT or view opacity < 255; BRIGHT alone draws opaque.
+  if(state.profile==SemanticProfile::CampaignA6&&!d.translucent&&!d.flare)d.additive=false;
+  // A sprite whose BMAP has the 32-bit TGA alpha flag 0x100 (0040e2b0, a6AlphaFormat) is alpha-blended without TRANSPARENT: A6 00440e90 does so for
+  // VIEW sprites; world sprites match the original observed under Wine (Start4 telbasla.tga fence). The 00443350 state for such world sprites is unresolved.
+  if(state.profile==SemanticProfile::CampaignA6&&data.type==1&&!d.translucent&&!d.model->materials.empty()&&d.model->materials[0].texture&&d.model->materials[0].texture->a6AlphaFormat)d.translucent=true;
   d.nativeLightScalar=data.light.scalar;d.nativeLightDelta=data.light.delta;d.bright=(flags(id)&0x200000u)!=0;
   d.nativeShadow=data.light.shadow;
   d.shadowRequested=(flags(id)&0x40000u)!=0;
@@ -2522,6 +2914,8 @@ void Engine::make_frame(bool mouseOutput){
   d.nativeFloorLight=state.profile!=SemanticProfile::CampaignA6||data.physicsGeometry;
   if(!d.nativeFloorLight)d.nativeSpecialColor={ui_value(*o,"blue").raw()>>10,ui_value(*o,"green").raw()>>10,ui_value(*o,"red").raw()>>10};
   if(state.profile==SemanticProfile::BonusA7&&(flags(id)&0x80000u)&&ui_value(*o,"lightrange").raw()<1)d.nativeLightBias={ui_value(*o,"blue").raw()>>10,ui_value(*o,"green").raw()>>10,ui_value(*o,"red").raw()>>10};
+  // A6 00430920/0044f970 -> 0042fa20: an entity without MATERIAL gets a persistent built-in one (METAL, UNLIT, then resource type).
+  if(state.profile==SemanticProfile::CampaignA6&&!ui_value(*o,"material")){const auto f=flags(id);const char* name=(f&0x400000u)?"mat_metal":(f&0x20000u)?"mat_unlit":data.type==5?"mat_terrain":data.type==1?"mat_sprite":data.type==2?"mat_model":nullptr;if(name)state.member(id,"material").set(global(name));}
   if(viewEntity){ObjectId reference=ui_value(*o,"view").bits;if(!reference)reference=mainCamera;if(!reference||!field(reference,"visible"))continue;float layer=ui_number(*o,"layer");std::size_t group=cameras_.size();for(std::size_t i=0;i<cameras_.size();++i)if(!cameras_[i].drawWorld&&cameras_[i].layer==layer&&cameras_[i].viewport.x==ui_number(state.require(reference),"pos_x")&&cameras_[i].viewport.y==ui_number(state.require(reference),"pos_y")){group=i;break;}if(group==cameras_.size()){if(cameras_.size()>=31)throw std::runtime_error("too many independently layered VIEW entities");Camera c=camera_for(reference);c.position={};c.angles={};c.drawWorld=false;c.foreground=true;c.layer=layer;c.layers=1u<<cameras_.size();cameras_.push_back(c);}d.layers=cameras_[group].layers;}d.materialIndex=material_index(ui_value(*o,"material"));draws_.push_back(d);
   // Visible LOD is one source actor cache shared by successive views, not a default shadow slot.
   if(!viewEntity&&(data.type==2||data.type==5)&&(bonusMouse||(ui_value(*o,"flags3").bits&0x20000u)==0)){
@@ -2551,7 +2945,10 @@ void Engine::make_frame(bool mouseOutput){
    }
   }
  }
- for(const auto& active:activeParticles){const Object* o=state.get(active.object);if(!o||!o->alive)continue;Particle p;p.position=position(o->id);auto image=bitmap(ui_value(*o,"bmap"));p.image=image.image;const float opacity=ui_number(*o,"alpha",100)/100;p.color=rgb(*o,1);p.color.a=state.profile==SemanticProfile::BonusA7?opacity:std::clamp(opacity,0.0f,1.0f);p.alphaRaw=o->fields.contains("alpha")?ui_value(*o,"alpha").raw():102400;p.translucent=field(o->id,"transparent");p.size=ui_number(*o,"size",1);p.angle=ui_number(*o,"angle");p.additive=field(o->id,"bright");p.velocity={ui_number(*o,"vel_x"),ui_number(*o,"vel_y"),ui_number(*o,"vel_z")};p.scaleZ=ui_number(*o,"scale_z",1);p.overlay=field(o->id,"overlay");p.flare=field(o->id,"flare");p.invertFlare=p.flare&&p.translucent;p.beam=field(o->id,"beam");p.streak=field(o->id,"streak");p.materialIndex=material_index(ui_value(*o,"material"));particles_.push_back(p);}
+ // Campaign emit() particles: screen-pixel SIZE (legacy_particle_quants) at the selected original video mode's width (native display: 1024 tier).
+ // ponytail: one conversion from the camera view's ARC for every view; per-view ARC only if a non-camera view shows emit particles.
+ double legacyScale=1;if(state.profile==SemanticProfile::CampaignA6){const int mode=global("video_mode").raw()>>10;const auto* view=state.get(global("camera").bits);legacyScale=legacy_particle_quants(view?ui_number(*view,"arc",60):60,mode>=6&&mode<=10?a6VideoModes[std::size_t(mode-6)][0]:std::max(currentWidth_,1));}
+ for(const auto& active:activeParticles){const Object* o=state.get(active.object);if(!o||!o->alive)continue;Particle p;p.position=position(o->id);auto image=bitmap(ui_value(*o,"bmap"));p.image=image.image;const float opacity=ui_number(*o,"alpha",100)/100;p.color=rgb(*o,1);p.color.a=state.profile==SemanticProfile::BonusA7?opacity:std::clamp(opacity,0.0f,1.0f);p.alphaRaw=o->fields.contains("alpha")?ui_value(*o,"alpha").raw():102400;p.translucent=field(o->id,"transparent");p.size=float(ui_number(*o,"size",1)*(active.legacy?legacyScale:1));p.angle=ui_number(*o,"angle");p.additive=field(o->id,"bright");p.velocity={ui_number(*o,"vel_x"),ui_number(*o,"vel_y"),ui_number(*o,"vel_z")};p.scaleZ=ui_number(*o,"scale_z",1);p.overlay=field(o->id,"overlay");p.flare=field(o->id,"flare");p.invertFlare=p.flare&&p.translucent;p.beam=field(o->id,"beam");p.streak=field(o->id,"streak");p.materialIndex=material_index(ui_value(*o,"material"));particles_.push_back(p);}
  ui_order(uiObjects_,[&](ObjectId a,ObjectId b){return ui_number(state.require(a),"layer")<ui_number(state.require(b),"layer");});
  auto text_command=[&](const Object& o,std::string_view text,Value fontValue,float x,float y,int* budget=nullptr,int scroll=0){
   if(auto zero=text.find('\0');zero!=std::string_view::npos)text=text.substr(0,zero);
@@ -2581,7 +2978,7 @@ void Engine::make_frame(bool mouseOutput){
   if(o.kind==Object::Kind::Text){
    Value fontValue=ui_value(o,"font");if(!fontValue)fontValue=global("_a4font");const FontAtlas* atlas=font(fontValue);if(!atlas)continue;const Object* nativeFont=state.get(fontValue.bits);
    float offsetValue=ui_number(o,"offset_y");
-   if(nativeDisplay_&&std::find(displayScrolls_.begin(),displayScrolls_.end(),id)!=displayScrolls_.end())offsetValue/=float(state.require(displayFont_).array[0].value.real());
+   if(nativeDisplay_&&std::find(displayScrolls_.begin(),displayScrolls_.end(),id)!=displayScrolls_.end())offsetValue/=float(state.require(displayFont_).array[DisplayTier].value.real());
    if(nativeDisplay_&&id==global("YUMT_Liste").bits){offsetValue+=displayLoadScroll_;}
    int height=int(nativeFont?ui_number(*nativeFont,"size",atlas->lineHeight):atlas->lineHeight),initial=std::max(0,int(ui_number(o,"size_y",1000))),offset=std::max(0,int(offsetValue)),covered=0,scroll=-1;
    if(nativeDisplay_&&id==global("YUMT_Liste").bits&&displayLoadBudget_)initial=std::min(initial,displayLoadBudget_);
@@ -2589,7 +2986,9 @@ void Engine::make_frame(bool mouseOutput){
    for(const auto& slot:o.array){if(!slot.value)continue;const Object* source=state.get(slot.value.bits);if(!source||!source->alive)continue;if(ui_value(*source,"flags").bits&2u)continue;std::string_view text=string(slot.value);if(auto zero=text.find('\0');zero!=std::string_view::npos)text=text.substr(0,zero);int end=covered+height*(1+int(std::count(text.begin(),text.end(),'\n')));if(scroll<0){if(offset>end){covered=end;continue;}scroll=offset-covered;}covered=end;float baseY=std::trunc(y+(initial-remaining)*sy);text_command(o,text,fontValue,std::trunc(x),baseY,&remaining,scroll);scroll=0;if(remaining<1)break;}
    continue;
   }
-  auto image_command=[&](UIBitmap image,float px,float py,float width,float height){if(!image.image||width<=0||height<=0)return;UICommand c;c.rect={x+px*sx,y+py*sy,width*sx,height*sy};c.image=image.image;c.dynamicImage=image.dynamic;c.imageSerial=image.serial;c.uv={image.pixels.x/image.image->width,image.pixels.y/image.image->height,image.pixels.width/image.image->width,image.pixels.height/image.image->height};c.color=rgb(o,opacity);c.overlay=field(id,"overlay");c.filter=field(id,"filter");c.angle=ui_number(o,"angle");c.layer=ui_number(o,"layer");ui_.push_back(c);};
+  // A6 004447e0: BMAP0x100 (32-bit TGA) panel bitmaps always blend with alpha byte min(2*a,255), a = 0040ce80(ALPHA), TRANSPARENT or not.
+  auto a6_alpha_format_opacity=[&]{const std::int64_t raw=std::max<std::int64_t>(o.fields.contains("alpha")?ui_value(o,"alpha").raw():102400,0),p=raw*0xa33;const auto a=std::min<std::int64_t>(((p>>10)+((p>>9)&1))>>10,255);return float(std::min<std::int64_t>(2*a,255))/255.f;};
+  auto image_command=[&](UIBitmap image,float px,float py,float width,float height){if(!image.image||width<=0||height<=0)return;UICommand c;c.rect={x+px*sx,y+py*sy,width*sx,height*sy};c.image=image.image;c.dynamicImage=image.dynamic;c.imageSerial=image.serial;c.uv={image.pixels.x/image.image->width,image.pixels.y/image.image->height,image.pixels.width/image.image->width,image.pixels.height/image.image->height};c.color=rgb(o,image.image->a6AlphaFormat?a6_alpha_format_opacity():opacity);c.overlay=field(id,"overlay");c.filter=field(id,"filter");c.angle=ui_number(o,"angle");c.layer=ui_number(o,"layer");ui_.push_back(c);};
   auto background=bitmap(ui_value(o,"bmap"));if(background.image){if(nativeDisplay_&&displayFills_.contains(id)){x=0;y=0;sx=float(currentWidth_)/background.pixels.width;sy=float(currentHeight_)/background.pixels.height;}image_command(background,0,0,background.pixels.width,background.pixels.height);}
   FunctionId panelClick=callback(id,"on_click");if(panelClick&&background.image)buttons_.push_back({{x,y,background.pixels.width*sx,background.pixels.height*sy},panelClick,0,0,id,0,ui_number(o,"angle")});int buttonNumber=0;
   for(const auto& property:o.properties){const auto& a=property.arguments;auto require=[&](std::size_t n){if(a.size()!=n)throw std::runtime_error("invalid PANEL "+property.name+" argument count: "+o.name);};auto n=[&](std::size_t i){return float(a.at(i).current().real());};

@@ -30,6 +30,7 @@ FetchContent_Declare(kabus_ode
 )
 FetchContent_MakeAvailable(kabus_ode)
 include("${CMAKE_CURRENT_LIST_DIR}/KabusODEContact.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/KabusODELcp.cmake")
 add_subdirectory("${kabus_ode_SOURCE_DIR}" "${kabus_ode_BINARY_DIR}")
 # Source-local options preserve live PC64 operation order without changing the
 # rest of ODE or the engine's compiler/solver defaults.

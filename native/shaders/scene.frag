@@ -4,9 +4,23 @@
 #define K22_RAY_QUERY 0
 #endif
 #if K22_RAY_QUERY
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_nonuniform_qualifier : require
+#endif
+layout(set=0,binding=5,std430) readonly buffer Lights { vec4 lightData[]; };
+#if K22_RAY_QUERY
 #include "ray_query.glsl"
 #endif
 #include "raster_uniform.glsl"
+#define K22_LIGHT(i) lightData[i]
+float pbrLightVisibility(int i);
+#define K22_PBR_LIGHT_VISIBILITY(i) pbrLightVisibility(i)
+#include "pbr.glsl"
+layout(location=9) in vec3 worldTangent;
+layout(set=0,binding=7) uniform sampler2D pbrNormal;
+layout(set=0,binding=8) uniform sampler2D pbrOrm;
 layout(location=0) in vec3 worldPosition;
 layout(location=1) in vec3 worldNormal;
 layout(location=2) in vec2 uv;
@@ -14,17 +28,56 @@ layout(location=3) in vec2 lmuv;
 layout(location=4) in vec3 vertexDynamicLight;
 layout(location=5) in vec3 effectLight;
 layout(location=6) in vec3 effectView;
+layout(location=7) in vec3 vertexMaterialDiffuse;
+layout(location=8) in vec3 vertexMaterialSpecular;
 layout(location=0) out vec4 color;
 layout(set=0,binding=1) uniform sampler2D skin;
 layout(set=0,binding=2) uniform sampler2D lightmap;
 layout(set=0,binding=3) uniform sampler2D portalImage;
 layout(set=0,binding=4) uniform sampler2D normalSkin;
-layout(set=0,binding=5,std430) readonly buffer Lights { vec4 lightData[]; };
+// Wave-2: shadow maps (raster fallback) and denoised screen-space ray-traced signals of the primary view.
+layout(set=0,binding=9) uniform sampler2DShadow sunShadowMap;
+layout(set=0,binding=10) uniform samplerCubeShadow cubeShadowMap;
+layout(set=0,binding=11) uniform sampler2D rtMask; // r dynamic-light visibility, g sun visibility, b contact shadow.
+layout(set=0,binding=12) uniform sampler2D rtGi; // linear one-bounce irradiance (albedo applied here).
+layout(set=0,binding=13) uniform sampler2D rtReflect; // rgb reflected radiance, a transmitted fraction.
+layout(set=0,binding=14) uniform sampler2D gbufferDepth;
+#define K22_FLIP_Y 1
+#include "effects.glsl"
+float sunMapVisibility(vec3 n){return k22SunShadow(sunShadowMap,u.dataSunShadow,worldPosition,n,u.dataEffects.z);}
+float cubeMapVisibility(int i,vec3 n){return u.dataShadowLight.w>0.0&&i==int(u.dataEffects.w)?k22CubeShadow(cubeShadowMap,u.dataShadowLight.xyz,worldPosition,n,k22CubeShadowNear,u.dataShadowLight.w):1.0;}
+// Shadow-map ratio for per-vertex native dynamic lighting, the same per-channel scaling as the ray-traced path.
+vec3 shadowMappedNativeDynamic(vec3 p,vec3 n){
+    vec3 result=vec3(0),unshadowed=vec3(0);
+    for(int i=0;i<lightCount;++i){
+        vec4 a=lightData[i*5],b=lightData[i*5+1],d=lightData[i*5+2],e=lightData[i*5+3],c=lightData[i*5+4];
+        if(b.a<0||c.z>0.5)continue;
+        vec3 delta=a.xyz-p;float distance=length(delta);
+        vec3 direction=d.w==3?-d.xyz:delta/max(distance,.0001);
+        float attenuation=d.w==3?1:(distance<=a.w?1/max(e.x+e.y*distance+e.z*distance*distance,.0001):0);
+        if(d.w==2){float rho=dot(-direction,d.xyz);attenuation*=rho>=c.x?1:rho<=c.y?0:pow((rho-c.y)/max(c.x-c.y,.0001),e.w);}
+        vec3 contribution=b.rgb*abs(b.a)*attenuation*max(dot(n,direction),0);
+        unshadowed+=contribution;result+=contribution*cubeMapVisibility(i,n);
+    }
+    result=clamp(result,0,1);unshadowed=clamp(unshadowed,0,1);
+    return vertexDynamicLight*vec3(unshadowed.x>0?result.x/unshadowed.x:1,unshadowed.y>0?result.y/unshadowed.y:1,unshadowed.z>0?result.z/unshadowed.z:1);
+}
+// Primary-view fragments whose depth equals the G-buffer prepass sample use the screen-space RT signals.
+bool onSignalPixel(){return (k22RtSignals&7)!=0&&abs(texelFetch(gbufferDepth,ivec2(gl_FragCoord.xy),0).r-gl_FragCoord.z)<=1e-5;}
+vec4 gbufferData(vec2 coord){
+    vec3 n=normalize(worldNormal);if(dot(n,cameraPosition-worldPosition)<0.0)n=-n;
+    vec2 o=n.xy/(abs(n.x)+abs(n.y)+abs(n.z));if(n.z<0.0)o=(1.0-abs(o.yx))*vec2(o.x>=0.0?1.0:-1.0,o.y>=0.0?1.0:-1.0);
+    float flags=(hasLightmap?1.0:0.0)+(worldVertexLighting?2.0:0.0)+((unlit||explicitMaterial||effectKind!=0)?4.0:0.0)+(!portalEnabled&&reflectionWeight>0.0?8.0:0.0);
+    return vec4(o,k22PbrOn&&k22RoughnessMap?texture(pbrOrm,coord).g:0.0,flags);
+}
 #if K22_RAY_QUERY
+// A6 lights never occlude (D3D9 fixed-function lighting; static shadows live in the lightmaps): visibility rays run only
+// with the optional shadows=rt (k22RtShadowMode), never on the default ray-traced path.
 float directVisibility(vec3 direction,float maxDistance){
     float magnitude=length(direction);
-    return magnitude>0&&maxDistance>0?rtVisibility(worldPosition,direction/magnitude,maxDistance):1;
+    return k22RtShadowMode&&magnitude>0&&maxDistance>0?rtVisibility(worldPosition,direction/magnitude,maxDistance):1;
 }
+float lightVisibility(vec3 delta,float distance){return directVisibility(delta,distance-rtLightClearance);}
 vec3 visibleNativeDynamic(vec3 p,vec3 n){
     vec3 result=vec3(0),unshadowed=vec3(0);
     for(int i=0;i<lightCount;++i){
@@ -38,7 +91,7 @@ vec3 visibleNativeDynamic(vec3 p,vec3 n){
         float diffuse=max(dot(n,direction),0);
         vec3 contribution=b.rgb*abs(b.a)*attenuation*diffuse;
         unshadowed+=contribution;
-        if(attenuation>0&&diffuse>0)result+=contribution*directVisibility(direction,d.w==3?rayMaxDistance():distance);
+        if(attenuation>0&&diffuse>0)result+=contribution*(d.w==3?directVisibility(direction,rayMaxDistance()):lightVisibility(direction,distance));
     }
     result=clamp(result,0,1);unshadowed=clamp(unshadowed,0,1);
     vec3 visibility=vec3(unshadowed.x>0?result.x/unshadowed.x:1,unshadowed.y>0?result.y/unshadowed.y:1,unshadowed.z>0?result.z/unshadowed.z:1);
@@ -52,6 +105,18 @@ vec3 reflectedRadiance(vec3 rgb){
     return rgb;
 }
 #endif
+// Signal-pixel state of main(), shared with the PBR dynamic-light visibility hook.
+bool signalShadows=false;vec4 mask=vec4(1);
+// A dynamic light's PBR specular gets the visibility its diffuse term receives (signal mask, shadow cube, inline ray).
+float pbrLightVisibility(int i){
+    if(signalShadows)return mask.r;
+    if(k22ShadowMaps)return cubeMapVisibility(i,normalize(worldNormal));
+#if K22_RAY_QUERY
+    vec4 a=lightData[i*5],d=lightData[i*5+2];vec3 delta=a.xyz-worldPosition;
+    if(lightData[i*5+1].a>=0)return d.w==3?directVisibility(-d.xyz,rayMaxDistance()):lightVisibility(delta,length(delta));
+#endif
+    return 1.0;
+}
 vec3 enhancedBaked(vec3 p,vec3 n){
     if(hasLightmap)return vec3(0);
     vec3 result=vec3(0);
@@ -66,84 +131,85 @@ vec3 enhancedBaked(vec3 p,vec3 n){
 void main(){
     if(skyMask){color=vec4(1);return;}
     vec2 coord=uv*uvScale+uvOffset;vec4 texel;
-    if(spriteFrames>1)texel=mix(texture(skin,coord+vec2(float(frame0)/spriteFrames,0)),texture(skin,coord+vec2(float(frame1)/spriteFrames,0)),interpolation);else texel=texture(skin,coord);
+    // Sprite frame f sits at cell (f mod cols, f div cols); cols=1/uvScale.x (one row for an ordinary strip, engine.cpp load_entity_asset).
+    if(spriteFrames>1){float cols=floor(1.0/uvScale.x+0.5),f0=float(frame0),f1=float(frame1);texel=mix(texture(skin,coord+vec2(mod(f0,cols)/cols,floor(f0/cols)*uvScale.y)),texture(skin,coord+vec2(mod(f1,cols)/cols,floor(f1/cols)*uvScale.y)),interpolation);}else texel=texture(skin,coord);
+    // Shadow-caster (depth only) and G-buffer prepass draws keep only the native alpha rejection below.
+    if(effectKind!=0&&k22Pass!=0){color=k22Pass==2?gbufferData(coord):vec4(0);return;}
     if(effectKind!=0){
         vec3 bump=2*texture(normalSkin,uv*normalUvScale+uvOffset).rgb-1;
         vec3 reflection=normalize(2*dot(bump,effectLight)*bump-effectLight);
         float specular=skillMain.z*pow(clamp(dot(reflection,normalize(effectView)),0,1),skillMain.w);
         vec4 sunlight=effectKind==1?vec4(.9,.9,1,.9):skillExtra;
         color=(skillMain.x*preparedAmbient+skillMain.y*clamp(dot(effectLight,bump),0,1)*sunlight+vec4(specular))*texel;
-#if K22_RAY_QUERY
-        float visibility=directVisibility(-(sunDirection+(effectKind==1?skillExtra.xyz:vec3(0))),rayMaxDistance());
-        color.rgb=(skillMain.x*preparedAmbient.rgb+(skillMain.y*clamp(dot(effectLight,bump),0,1)*sunlight.rgb+vec3(specular))*visibility)*texel.rgb;
-        color.rgb=reflectedRadiance(color.rgb);
-#endif
         return;
     }
     if(overlay&&(max(max(texel.r,texel.g),texel.b)<0.001||texel.a<0.5))discard;
     if(flare&&!textureAlpha){float brightness=max(max(texel.r,texel.g),texel.b);texel.a*=invertFlare?1-brightness:brightness;}
     vec4 t=texel*tint;t.a*=alpha;if(t.a<0.01)discard;
+    if(k22Pass!=0){color=k22Pass==2?gbufferData(coord):vec4(0);return;}
+#if K22_RAY_QUERY
+    bool signals=onSignalPixel();signalShadows=signals&&(k22RtSignals&1)!=0;
+    if(signalShadows)mask=texelFetch(rtMask,ivec2(gl_FragCoord.xy),0);
+#endif
     vec3 illumination=vec3(1);
     if(!unlit&&!explicitMaterial){
         illumination=hasLightmap?2*clamp(texture(lightmap,lmuv).rgb+vec3(surfaceAmbient),0,1):vec3(materialAmbient);
+#if K22_RAY_QUERY
+        if(signalShadows)illumination*=mask.b;
+#endif
         vec3 n=normalize(worldNormal);
         if(!hasLightmap){
 #if K22_RAY_QUERY
-            illumination+=vec3(max(dot(n,sunDirection),0))*directVisibility(sunDirection,rayMaxDistance());
+            if(signalShadows)illumination+=vec3(max(dot(n,sunDirection),0))*mask.g;
+            else if(k22ShadowMaps)illumination+=vec3(max(dot(n,sunDirection),0))*sunMapVisibility(n);
+            else illumination+=vec3(max(dot(n,sunDirection),0))*directVisibility(sunDirection,rayMaxDistance());
 #else
-            illumination+=vec3(max(dot(n,sunDirection),0));
+            if(k22ShadowMaps)illumination+=vec3(max(dot(n,sunDirection),0))*sunMapVisibility(n);
+            else illumination+=vec3(max(dot(n,sunDirection),0));
 #endif
         }
         if(worldVertexLighting){
 #if K22_RAY_QUERY
-            illumination+=visibleNativeDynamic(worldPosition,n)+enhancedBaked(worldPosition,n);
+            if(signalShadows)illumination+=vertexDynamicLight*mask.r+enhancedBaked(worldPosition,n);
+            else if(k22ShadowMaps)illumination+=shadowMappedNativeDynamic(worldPosition,n)+enhancedBaked(worldPosition,n);
+            else illumination+=(k22RtShadowMode?visibleNativeDynamic(worldPosition,n):vertexDynamicLight)+enhancedBaked(worldPosition,n);
 #else
-            illumination+=vertexDynamicLight+enhancedBaked(worldPosition,n);
+            if(k22ShadowMaps)illumination+=shadowMappedNativeDynamic(worldPosition,n)+enhancedBaked(worldPosition,n);
+            else illumination+=vertexDynamicLight+enhancedBaked(worldPosition,n);
 #endif
         }else for(int i=0;i<lightCount;++i){
-            vec4 a=lightData[i*5],b=lightData[i*5+1];if(hasLightmap&&b.a<0)continue;
+            vec4 a=lightData[i*5],b=lightData[i*5+1];if((lightData[i*5+4].z>0.5&&b.a>=0&&lightData[i*5+2].w==3)||(hasLightmap&&b.a<0))continue;
             vec3 d=a.xyz-worldPosition;float distance=length(d);float attenuation=max(1-distance/max(a.w,0.0001),0);
             vec3 contribution=b.rgb*abs(b.a)*attenuation*attenuation*max(dot(n,d/max(distance,0.0001)),0);
 #if K22_RAY_QUERY
-            if(b.a>=0&&attenuation>0)contribution*=directVisibility(d,distance);
-#endif
-            illumination+=contribution;
-        }
-    }
-    if(explicitMaterial){
-        float sunIntensity=length(sunDirection);
-        vec3 n=normalize(worldNormal),light=sunIntensity>0?sunDirection/sunIntensity:vec3(0),view=normalize(cameraPosition-worldPosition);
-        float diffuse=max(dot(n,light),0),specular=sunIntensity>0&&any(notEqual(preparedSpecular,vec3(0)))?pow(max(dot(reflect(-light,n),view),0),materialPower):0;
-        illumination=preparedEmissive+preparedAmbient.rgb*ambientLight;
-        vec3 sunlight=(preparedDiffuse*diffuse+preparedSpecular*specular)*(materialSunStrength*sunIntensity);
-#if K22_RAY_QUERY
-        sunlight*=directVisibility(light,rayMaxDistance());
-#endif
-        illumination+=sunlight;
-        if(worldVertexLighting){
-#if K22_RAY_QUERY
-            illumination+=preparedDiffuse*(visibleNativeDynamic(worldPosition,n)+enhancedBaked(worldPosition,n));
+            if(b.a>=0&&attenuation>0)contribution*=signalShadows?mask.r:k22ShadowMaps?cubeMapVisibility(i,n):lightVisibility(d,distance);
 #else
-            illumination+=preparedDiffuse*(vertexDynamicLight+enhancedBaked(worldPosition,n));
-#endif
-        }else for(int i=0;i<lightCount;++i){
-            vec4 a=lightData[i*5],b=lightData[i*5+1];if(hasLightmap&&b.a<0)continue;
-            vec3 d=a.xyz-worldPosition;float distance=length(d),attenuation=max(1-distance/max(a.w,.0001),0);
-            vec3 contribution=preparedDiffuse*b.rgb*abs(b.a)*attenuation*attenuation*max(dot(n,d/max(distance,.0001)),0);
-#if K22_RAY_QUERY
-            if(b.a>=0&&attenuation>0)contribution*=directVisibility(d,distance);
+            if(k22ShadowMaps&&b.a>=0&&attenuation>0)contribution*=cubeMapVisibility(i,n);
 #endif
             illumination+=contribution;
         }
+#if K22_RAY_QUERY
+        if(signals&&(k22RtSignals&2)!=0)illumination=k22Gamma(k22Linear(illumination)+texelFetch(rtGi,ivec2(gl_FragCoord.xy),0).rgb);
+#endif
     }
-    vec3 rgb=t.rgb*illumination*(explicitMaterial?2:1);
+    vec3 rgb=explicitMaterial?clamp(clamp(t.rgb*vertexMaterialDiffuse*2,0,1)+vertexMaterialSpecular,0,1):t.rgb*illumination;
+    if(k22PbrOn&&!unlit&&!explicitMaterial){
+#if K22_RAY_QUERY
+        float sunVisibility=hasLightmap?1.0:signalShadows?mask.g:k22ShadowMaps?sunMapVisibility(normalize(worldNormal)):directVisibility(sunDirection,rayMaxDistance());
+#else
+        float sunVisibility=k22ShadowMaps&&!hasLightmap?sunMapVisibility(normalize(worldNormal)):1.0;
+#endif
+        rgb=k22Pbr(t.rgb,illumination,worldPosition,normalize(worldNormal),worldTangent,normalOrientation,texture(pbrNormal,coord).rgb,texture(pbrOrm,coord),k22RoughnessMap,k22LegacyRoughness,cameraPosition,sunDirection,sunVisibility,!hasLightmap);
+    }
     if(!noFog&&fogRange.y>fogRange.x){float f=clamp((length(worldPosition-cameraPosition)-fogRange.x)/(fogRange.y-fogRange.x),0,1);rgb=mix(rgb,fogColor,f);}
     if(portalEnabled&&reflectionWeight>0&&abs(dot(portalPlane,vec4(worldPosition,1)))<0.1){
         vec4 reflected=portalProjection*vec4(worldPosition,1);
         if(reflected.w>0){vec2 coord=vec2(reflected.x/reflected.w*.5+.5,.5-reflected.y/reflected.w*.5)*portalViewport.zw+portalViewport.xy;rgb=mix(rgb,texture(portalImage,coord).rgb,reflectionWeight);}
     }
 #if K22_RAY_QUERY
-    rgb=reflectedRadiance(rgb);
+    if(signals&&(k22RtSignals&4)!=0){if(!portalEnabled&&reflectionWeight>0){vec4 r=texelFetch(rtReflect,ivec2(gl_FragCoord.xy),0);rgb=mix(rgb,r.rgb+r.a*rgb,reflectionWeight);}}
+    else rgb=reflectedRadiance(rgb);
 #endif
+    if(k22PbrOn&&k22ToneInShader)rgb=k22ToneMap(rgb);
     color=vec4(rgb,t.a);
 }

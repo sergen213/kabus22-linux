@@ -1,0 +1,42 @@
+# requires: saves
+# Ebru at Kanalizasyon (slot 20 = kayit19.sav): her only weapon, the Magnum (8), selected through the original inventory
+# (M → Silahlar → slot 0 → Kullan), raised with S, fired with D (silah.wdl Ates_Et), reloaded with Enter (oyuncu2_ebru.wdl:1675 →
+# Oy_Kursun_Doldur), then the S+Q kick (oyuncu2_ebru.wdl:1500, ent_frame "teme", player.skill32 0→100).
+realtime off
+load-save 19
+wait until LY_AktifLevelID == 65 && Aktif_Player == 1 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 && EnvaterAcilabilirmi == 1 && oyun_ilk_basladi == 0 timeout 7200
+assert Silahlar[0] == 8
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+capture ebru_inventory
+press Return
+wait until EM_Bolge == 2 timeout 300
+press Up
+assert EM_CursorNesne+EM_NesneKafa == 0
+press Return
+wait until EM_Bolge == 6 timeout 300
+press Return
+wait until Aktif_Silah == 8 && EM_Bolge == 2 timeout 300
+press M
+wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 600
+store ammo S_Kursun_Sayisi[8]
+press D 8
+wait until S_Kursun_Sayisi[8] < @ammo timeout 300
+frames 10
+capture ebru_magnum_fired
+press-until D S_Kursun_Sayisi[8] < @ammo - 1 timeout 600
+store fired S_Kursun_Sayisi[8]
+store reserve Kursun_Sayisi[8]
+press-until Return S_Kursun_Sayisi[8] > @fired timeout 600
+assert S_Kursun_Sayisi[8] == Silah_Kapasite[8]
+assert S_Kursun_Sayisi[8] + Kursun_Sayisi[8] == @fired + @reserve
+wait until player.skill34 >= 100 timeout 600
+press Q 6
+wait until player.skill32 < 50 timeout 120
+wait until player.skill32 > 40 timeout 300
+capture ebru_kick
+wait until player.skill32 >= 100 timeout 600
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 timeout 900

@@ -11,8 +11,24 @@ layout(set=0,binding=0,std140) uniform Uniform {
     vec4 dataViewport,dataSkyConeScroll,dataSkyParameters;
     ivec4 dataFlags[4];
     vec4 dataParameters[3];
+    vec4 dataPbr; // x PBR on, y tone map in shader (LDR views), z pack roughness present, w legacy roughness.
+    // Wave-2 effects (zero = original path).
+    mat4 dataSunShadow,dataInverseViewProjection,dataPreviousViewProjection;
+    vec4 dataShadowLight; // xyz cube shadow light position, w its far plane (range); 0 = no cube shadow.
+    vec4 dataEffects; // x shadow maps on, y RT bits (1 shadows, 2 GI, 4 reflections signals of the primary view; 8 shadows=rt in every view), z sun shadow texel (world), w cube shadow light index.
+    vec4 dataPass; // x pass (0 scene, 1 shadow caster, 2 G-buffer; effect passes: effect mode), y frame seed, zw texel size.
+    vec4 dataCamera; // xyz camera forward, w near plane.
+    vec4 dataRange; // x far plane, yz fog start/end, w effect parameter.
 } u;
+#define k22ShadowMaps (u.dataEffects.x!=0)
+#define k22RtSignals int(u.dataEffects.y)
+#define k22RtShadowMode ((k22RtSignals&8)!=0)
+#define k22Pass int(u.dataPass.x)
 float rayMaxDistance(){return u.dataCameraPosition.w;}
+#define k22PbrOn (u.dataPbr.x!=0)
+#define k22ToneInShader (u.dataPbr.y!=0)
+#define k22RoughnessMap (u.dataPbr.z!=0)
+#define k22LegacyRoughness u.dataPbr.w
 #define model u.dataModel
 #define viewProjection u.dataViewProjection
 #define normalMatrix mat3(u.dataNormalMatrix)
@@ -42,6 +58,8 @@ float rayMaxDistance(){return u.dataCameraPosition.w;}
 #define materialPower u.dataPreparedSpecular.w
 #define ambientLight u.dataAmbientLight.xyz
 #define materialSunStrength u.dataAmbientLight.w
+#define selectedLight int(u.dataPreparedDiffuse.w)
+#define infiniteViewer u.dataParameters[2].yzw
 #define viewport u.dataViewport.xy
 #define imageSize ivec2(u.dataViewport.zw)
 #define cone u.dataSkyConeScroll.xy

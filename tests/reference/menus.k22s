@@ -1,0 +1,37 @@
+# Reference comparison with the original (docs/GAMEPLAY_TESTING.md#reference-comparison): startup logos, main menu, options,
+# load list and exit confirmation. tools/wine-reference/wineref.py replays the same keys on the original K22.exe; its timing
+# comes from the "#wine:" lines (anchor: the A6 log's "1st frame" line).
+realtime on
+#wine: wait-log 1st
+wait until Menu_Acilis.visible == 1 timeout 900
+#wine: sleep 1.5
+frames 150
+capture logo_fip
+frames 390
+capture logo_sonisik
+wait until AMP_YeniOyun.visible == 1 && AM_Cursor == 0 timeout 3600
+#wine: sleep 12
+frames 300
+capture main_menu
+press Down
+frames 20
+press Down
+frames 20
+press Return
+frames 120
+capture options
+press Escape
+frames 90
+press Down
+frames 20
+press Return
+frames 120
+assert YUMP_Cursor.visible == 1
+capture load_menu
+press Escape
+frames 90
+press Escape
+frames 30
+press Return
+frames 90
+capture exit_confirm

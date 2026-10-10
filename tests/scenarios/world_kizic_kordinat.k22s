@@ -1,0 +1,83 @@
+# requires: saves
+# The kizic coordinate puzzle (BUL_Kordinat.wdl), Demir, from original kayit10.sav (kizic2): item 52 is already carried
+# (NS_Nesneler[12]), v_kapikriz_ok/basla and BULKordinatOK are 0. kizic2 -> Kizic (36) as in world_save1_point.
+realtime off
+load-save 10
+wait until LY_AktifLevelID == 37 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+wait until oyun_ilk_basladi == 0 timeout 600
+assert BULKordinatOK == 0 && v_kapikriz_ok == 0 && v_kapikriz_basla == 0
+walk-to -260 25 12 timeout 900
+walk-to -420 25 12 timeout 1200
+walk-to -455 -48 12 timeout 1200
+turn-to -500 -48 6
+press-until D LY_AktifLevelID == 36 timeout 600
+wait until $level == "kizic.wmb" && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
+# The spiral stairs end at the kapi_kriz_ctrl door (three scan points at z 328, k_kizkapi_Tarama, Ornek_Yasin.wdl:2519);
+# the nearest hull cell is 45 quants from them, inside the 60-quant scan of NS_Kullan (Nesneler.wdl temp.z 60).
+find door kapi_kriz_ctrl
+walk-to @door 50 path run timeout 6000
+turn-to @door 6
+# Use item 52 through M -> Nesneler -> slot -> Kullan (as world_cam1_padlock): NS_AktifNesneNo 52 -> v_kapikriz_basla 1.
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+press-until Down EM_CursorSiNeDo == 1 timeout 120
+press Return
+wait until EM_Bolge == 3 timeout 300
+assert NS_Nesneler[12] == 52
+press-until Right EM_CursorNesne+EM_NesneKafa >= 12 timeout 600
+assert EM_CursorNesne+EM_NesneKafa == 12
+press Return
+wait until EM_Bolge == 7 && EM_CursorKuBiGo == 0 timeout 300
+press Return
+wait until v_kapikriz_basla == 1 timeout 300
+# video_kapikriz_d (cinematic.wdl:13054): Video_Cam cutscene, then v_kapikriz_ok 1 and the stair blocker removed.
+wait until Video_Cam.visible == 1 && oyuncu_pasif == 1 timeout 600
+frames 120
+capture kizic_door_cutscene
+wait until v_kapikriz_ok == 1 timeout 3000
+wait until oyuncu_pasif == 0 && camera.visible == 1 && EnvaterAcilabilirmi == 1 timeout 1200
+# Up the last flight along its south side: the middle of the stairs around (-215,-558,396) stops the hull.
+route 16 -300 -578 -200 -578 run timeout 400
+# NS_Bulmaca (Nesneler.wdl:605) BulmacaNo 5 (skill2), ilgiliNesneNo 0: a D scan (PL_KapiTara, 50 quants, 60 degree cone)
+# sets Bul_AcPointer = BUL_FP[5] = BULKordinatAc. The tower model v_kule_cr stands between the stairs and the point.
+find puzzle NS_Bulmaca
+assert @puzzle.skill1 == 0 && @puzzle.skill2 == 5
+walk-to @puzzle 70 path run timeout 3000
+turn-to @puzzle 6
+walk-to @puzzle 45 timeout 400
+press-until D KB_Acik == 1 timeout 300
+assert BUL_Aktif == 1 && KB_HamleSayisi == 0 && KB_Cursor == 0
+frames 30
+capture kizic_kordinat_open
+# Moves add KB_DurumGecis (Sol -3,-2; Yukari 0,2; Asagi 2,-4; Sag 5,1) to KB_Durum; the target KB_Hedef is (-2,-9):
+# 3x Sol (-9,-6), Asagi (-7,-10), Sag (-2,-9). Enter (KEY_ENTER) adds the move under the cursor, Right moves the cursor
+# (KB_TusKontrol/KB_Kernel, BUL_Kordinat.wdl:91-229).
+press Return
+wait until KB_HamleSayisi == 1 && KB_Tus == 0 timeout 300
+press Return
+wait until KB_HamleSayisi == 2 && KB_Tus == 0 timeout 300
+press Return
+wait until KB_HamleSayisi == 3 && KB_Tus == 0 timeout 300
+assert KB_Durum[0] == -9 && KB_Durum[1] == -6
+press Right
+wait until KB_Cursor == 1 && KB_Tus == 0 timeout 120
+press Right
+wait until KB_Cursor == 2 && KB_Tus == 0 timeout 120
+press Return
+wait until KB_HamleSayisi == 4 && KB_Tus == 0 timeout 300
+assert KB_Durum[0] == -7 && KB_Durum[1] == -10
+press Right
+wait until KB_Cursor == 3 && KB_Tus == 0 timeout 120
+capture kizic_kordinat_moves
+press Return
+# KBF_Cozuldu: BULKordinatOK on, then the video_criptoal cutscene (v_criptoal_start) and NS_NesneAl(25).
+wait until BULKordinatOK == 1 timeout 300
+assert KB_HamleSayisi == 5 && KB_Durum[0] == -2 && KB_Durum[1] == -9
+store n0 NS_NesneSayisi
+wait until v_criptoal_start == 1 && Video_Cam.visible == 1 timeout 600
+frames 120
+capture kizic_kordinat_cutscene
+wait until v_criptoal_start == 0 && oyuncu_pasif == 0 && EnvaterAcilabilirmi == 1 timeout 3000
+assert BULKordinatOK == 1 && KB_Acik == 0 && BUL_Aktif == 0
+assert NS_NesneSayisi == @n0 + 1
+capture kizic_kordinat_solved

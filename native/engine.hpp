@@ -4,6 +4,7 @@
 #include "render.hpp"
 #include "media.hpp"
 #include "physics.hpp"
+#include "controller.hpp"
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -21,7 +22,7 @@ struct EntityLightCache {
  bool floorValid=false;NativeShadowState shadow{};
  const Model* model=nullptr;std::uint32_t flags=0;
 };
-struct EntityData {const Model* model=nullptr;std::unique_ptr<Model> ownedModel;std::string file;std::vector<ObjectId> skinObjects;std::size_t path=0,node=0;bool hasPath=false,scannable=true,physicsGeometry=true;double animation=0;std::uint32_t frame0=0,frame1=0,type=2;float frameBlend=0;ObjectId parent=0;Vec3 boundsOffset{};EntityLightCache light;std::uint8_t visibleLod=0;bool lightResident=false;};
+struct EntityData {const Model* model=nullptr;std::unique_ptr<Model> ownedModel;std::string file;std::vector<ObjectId> skinObjects;std::size_t path=0,node=0;bool hasPath=false,scannable=true,physicsGeometry=true;double animation=0;std::uint32_t frame0=0,frame1=0,type=2;float frameBlend=0;ObjectId parent=0;Vec3 boundsOffset{};EntityLightCache light;std::uint8_t visibleLod=0;bool lightResident=false;std::uint64_t legacyPushEpoch=0;};
 struct MeshOverride {std::vector<Vec3> mesh,meshNormals,sourceMesh,sourceMeshNormals;std::uint64_t revision=0;ObjectId meshId=0;Vec3 min,max;};
 class Engine;
 Vec3 worldModelVertex(const Engine&,ObjectId,const EntityData&,std::size_t renderIndex);
@@ -44,6 +45,8 @@ public:
  std::optional<Value> world_builtin(Runtime&,ProcessContext&,std::string_view,std::span<const Argument>);
  Value key_state(int)const;
  void tick(Runtime&,const Input&);
+ // Native convenience: skips the startup logos / New Game intro / full-screen movies on a confirm or cancel press; returns the input tick() should see.
+ const Input& skip_intro(Runtime&,const Input&);
  // A7: after successful draw; headless callers use their explicit logical CPU-frame boundary.
  void finish_frame(Runtime&);
  const RenderFrame& frame()const{return frame_;}
@@ -83,11 +86,13 @@ public:
  std::vector<ParticleData> activeParticles;
  std::unordered_map<const Model*,std::unordered_map<std::size_t,MeshOverride>> meshOverrides;std::uint32_t nextMeshId=1;
  std::unordered_map<const Image*,ObjectId> skinBitmapObjects;
- std::string pendingLevel;bool pendingLevelLoad=false;
+ std::string pendingLevel,currentLevel;bool pendingLevelLoad=false; // currentLevel: last LEVEL_LOAD file (diagnostics/scenarios).
  std::vector<CollisionNode> collisionNodes;std::vector<std::uint32_t> collisionOrder;ObjectId collisionYou=0,collisionActor=0;
  std::unordered_map<std::uint32_t,FileData> files;std::uint32_t nextFile=1;
- std::filesystem::path saveRoot;std::mt19937 random{0};
+ // fixedRandom (scenario mode): randomize() keeps the seeded stream instead of drawing from std::random_device.
+ std::filesystem::path saveRoot;std::mt19937 random{0};bool fixedRandom=false;
  Input input;bool quit=false;std::uint32_t movie=0;double gamma=1;Vec3 colorAdjustment{1,1,1};
+ Input skipInput;bool skipHold=false,movieLoop=false; // skip_intro: input replacement, "wait until everything is released"; movieLoop: full-screen movie is media_loop (menu background)
  ColorAdjustment nativeAdjustment;
  std::unordered_map<std::uint32_t,ObjectId> movieTargets;
  std::unordered_map<ObjectId,std::shared_ptr<const Image>> bitmapImages;
@@ -97,12 +102,20 @@ public:
  bool iniInitialized=false,pluginNative=false,pluginGamma=false;
  int windowStyle=0;std::vector<std::uint8_t> discordInput;bool discordReady=false;std::uint64_t discordRetryAt=0;
  std::string discordDetails,discordState;bool discordActivitySent=false;
+ ControllerConfig controller;float rumble=0; // rumble: strength requested this tick (0 none).
+ // Optional community-patch 1.8.5 first-person camera (cam.wdl fps_camera_control), engine-side for original scripts.
+ enum class CameraMode {Original,FirstPerson};CameraMode cameraMode=CameraMode::Original;
+ bool first_person_active()const{return firstPersonActive_;}
 private:
  friend class Physics;
  friend std::optional<Value> worldModelBuiltin(Engine&,Runtime&,ProcessContext&,std::string_view,std::span<const Argument>);
- void initialize_globals();void make_frame(bool mouseOutput=true);void update_input(Runtime&);void update_ui(Runtime&);
+ void initialize_globals();void make_frame(bool mouseOutput=true);void update_input(Runtime&);void update_ui(Runtime&);void update_first_person();
  bool display_admitted();void prepare_display();float display_aspect(float authored)const;
+ bool firstPersonActive_=false;double firstPersonTilt_=0;std::array<double,7> firstPersonWritten_{},firstPersonScript_{};
+ std::array<float,2> mouseForcePrior_{}; // A6 006bb5e4/006bb5e0: last frame's scaled mickeys (x, -y).
+ static constexpr std::size_t DisplayTier=2; // GA_Cozunurluk slot owned by native display: 1024x768, the >1 art tier.
  bool nativeDisplay_=false;int displayWidth_=0,displayHeight_=0;
+ std::uint8_t authoredResolution_=0; // User's GA_Cozunurluk (options.k22 byte 0); native tier stays in memory only.
  ObjectId displayResolution_=0,displayScale_=0,displayScale2_=0,displayFont_=0;
  enum class DisplayRole { Ordinary,MapPixel,Grid,Fill,IntroTitle,EyeRight,EyeLeft,Text,LoadList,LoadCursor,Credit,CreditFrame,InventoryLabel,Document,Bar,Boss,BossEnergy,Pause,Menu,Gameplay };
  struct DisplayObject {ObjectId id;DisplayRole role;int index=0;float menuY=0;bool menuPrepared=false;ObjectId bitmap=0;Vec2 bitmapSize{};float bossScaleX=0;};
@@ -158,9 +171,13 @@ private:
  void sort_query_contacts(std::vector<QueryContact>&);
  std::deque<std::vector<QueryContact>> queryContacts_;
  QueryGeometry& prepare_query_geometry(ObjectId,const EntityData&,bool captureBake=false);
- Hit collide_legacy(Vec3,Vec3,std::uint32_t,ObjectId,const ProcessContext*);
+ Hit collide_legacy(Vec3,Vec3,std::uint32_t,ObjectId,const ProcessContext*,bool movement=false);
  void prepare_legacy_hit(Hit&,Vec3,Vec3,std::uint32_t,ObjectId);
  void publish_movement_hit(const Hit&,Vec3 displacement);
+ Hit move_a6_legacy(Runtime&,ProcessContext&,ObjectId,Vec3&,Vec3,std::uint32_t);
+ Hit move_a6_modern(Runtime&,ProcessContext&,ObjectId,Vec3&,Vec3,std::uint32_t);
+ Hit move_a7_modern(Runtime&,ProcessContext&,ObjectId,Vec3&,Vec3,std::uint32_t);
+ std::uint64_t legacyMoveEpoch_=0;
  bool loadingPlacedEntities_=false;
  // Per-source-module B/G/R, scalar, ambient, style and flags; not per-entity/public trace state.
  std::array<int,7> a6LegacyTextureTemps_{},a7LegacyTextureTemps_{};
@@ -174,6 +191,7 @@ private:
  std::unordered_map<ObjectId,const FontAtlas*> systemFonts_;
  std::array<Slot*,128> keyboard_{},keyboardCallbacks_{};
  std::array<std::array<Slot*,12>,2> joystick_{},joystickCallbacks_{};
+ std::bitset<32> controllerHeld_;Vec3 modernForce_{};DamageRumble damageRumble_;std::string saveScript_;bool saveScriptKnown_=false;
  std::array<Slot*,3> mouse_{},mouseCallbacks_{};
  std::optional<std::size_t> pressedButton_,hoveredButton_;std::size_t focusedButton_=0;
  Vec2 mouseHit_{};

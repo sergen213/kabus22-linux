@@ -17,7 +17,19 @@ namespace k22 {
 enum class WindowMode { Windowed, Fullscreen, Borderless };
 enum class RendererBackend { OpenGL, Vulkan };
 struct WindowMetrics { int width{}, height{}, drawableWidth{}, drawableHeight{}; float scaleX{1}, scaleY{1}; };
-struct RenderOptions { int width{1280}, height{720}, samples{4}; float anisotropy{8}; bool vsync{true}; WindowMode mode{WindowMode::Windowed}; std::string title{"Kabus 22"}; RendererBackend backend{RendererBackend::OpenGL}; bool rayTracing{true}; };
+class TexturePackSet;
+enum class ShadowMode : std::uint8_t { Original, ShadowMap, RayTraced };
+// Wave-2 optional effects; all default off, so a default-constructed value is the original path.
+struct GraphicsFeatures {
+    ShadowMode shadows{ShadowMode::Original};
+    bool gi{}, roughReflections{}, denoise{}, bloom{}, ssao{}, fxaa{}, taa{}, fog{};
+    bool operator==(const GraphicsFeatures&) const = default;
+};
+struct RenderOptions { int width{1280}, height{720}, samples{4}; float anisotropy{8}; bool vsync{true}; WindowMode mode{WindowMode::Windowed}; std::string title{"Kabus 22"}; RendererBackend backend{RendererBackend::OpenGL}; bool rayTracing{true};
+    bool pbr{}, forceAnisotropy{}, hidden{}; // PBR/HDR path; anisotropy regardless of script D3D gate; hidden probe window.
+    std::shared_ptr<const TexturePackSet> packs; // Null keeps original textures exactly.
+    GraphicsFeatures features; // Admitted for the selected backend by render_policy::admit_features.
+};
 struct Input {
     std::bitset<SDL_NUM_SCANCODES> keys, pressed, released;
     std::bitset<8> mouseButtons, mousePressed, mouseReleased;
@@ -36,7 +48,8 @@ enum class EffectKind { None, NormalMix, NormalSunMix };
 struct ScriptMaterialState {
     std::uint32_t sourceId{}, flags{};
     Color ambient{}, diffuse{}, specular{}, emissive{};
-    float power{}, alpha{100}, albedo{100};
+    float power{}, alpha{100};
+    std::int32_t albedoRaw{102400};
     std::array<std::uint32_t,8> skillBits{};
     EffectKind effect{EffectKind::None};
     std::uint64_t effectGeneration{};
@@ -175,6 +188,7 @@ struct RenderFrame {
     bool skyBlend{true}; // Native SKY_BLEND default15 is tested as nonzero.
     double mipmapping{3}, anisotropy{}; // Native modes and nonzero enable gate; enabled anisotropy uses RenderOptions quality.
     bool bonusProfile{}, hardwareLighting{true}, renderEntities{true}, planarCapable{true};
+    bool nativeFixedLightBank{true}; // A7 fixed128 vs linked/direct127 SUN albedo contract.
     bool shadowSortVertical{true};
     std::int32_t lightResRaw{}, tripleBufferRaw{}, shadowStencilRaw{};
     Vec2 shadowSun{};
@@ -202,6 +216,7 @@ public:
     void set_title(std::string_view title);
     void set_position(int x, int y);
     void set_mouse_mode(bool visible, bool relative = false);
+    void rumble(float strength, std::uint32_t milliseconds); // Opened game controller only; unsupported pads ignore it.
     void request_quit();
     void release_scene();
     void purge_model(const Model* model);
@@ -212,6 +227,9 @@ public:
     static Vec3 project(Vec3 position, const Camera& camera, WindowMetrics metrics);
     static std::optional<PortalSurface> portal_surface(const RenderFrame& frame, const Camera& camera, WindowMetrics metrics);
     static void boundary_check();
+    // Actual hidden-window backend initialization; returns {available, detail}. Never throws for missing display/device.
+    static std::pair<bool,std::string> probe(RendererBackend backend, bool rayTracing);
+    std::string description() const; // Selected device/driver for logs and probing.
     const FontAtlas& font_atlas(std::string_view familyOrPath, int pixels, bool bold = false, bool italic = false);
     static Vec2 text_extent(const FontAtlas& font, std::string_view text);
     void capture(std::string_view path) const; // Final postprocessed frame as binary PPM; requires a completed draw at the current drawable size.

@@ -1,0 +1,15 @@
+# requires: saves
+# continues: world_save1_point
+# Original quit path: main menu Escape selects EXIT (AnaMenu.wdl:86-92), Return opens CikisMenu, Return on YES writes the
+# total play time to ftz.k22 (CikisMenu.wdl:97-113: days, hours, minutes of total_ticks/960 + toplam_oyun_sure) and exits.
+realtime off
+wait until ParlaklikMenuAcik == 1 || AMP_OyunYukle.visible == 1 timeout 7200
+store minutes toplam_oyun_sure
+print toplam_oyun_sure
+# Two minutes of play time (total_ticks counts 16 per second).
+frames 7300
+press-until Escape AM_Cursor == 4 timeout 120
+press Return
+wait until CM_Cursor == 0 timeout 120
+press Return
+expect-exit timeout 600

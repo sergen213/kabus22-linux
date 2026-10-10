@@ -1,0 +1,30 @@
+# Reference comparison with the original: New Game -> difficulty -> intro panels -> intro movie -> Start4 entry movie ->
+# first controllable Start4 view. LevelYonetim.wdl plays vest.k22 then veyo.k22 (video_ismi_str16/17); Escape skips each,
+# as in the original scripts.
+realtime on
+#wine: wait-log 1st
+wait until AMP_YeniOyun.visible == 1 && AM_Cursor == 0 timeout 3600
+#wine: sleep 26
+frames 60
+press Return
+frames 90
+assert YMP_Normal.visible == 1
+capture difficulty
+#wine: record newgame 150
+press Return
+frames 900
+capture intro_panels
+press Escape
+wait until $level == "start4.wmb" timeout 3600
+#wine: wait-log start4.wmb 600
+#wine: wait-log Physics 120
+frames 300
+capture movie_vest
+press Escape
+frames 300
+capture movie_veyo
+press Escape
+wait until LY_AktifLevelID == 1 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 3600
+#wine: sleep 15
+frames 180
+capture start4_control

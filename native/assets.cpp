@@ -240,6 +240,12 @@ uint8_t Assets::native_lightmap_mono(uint16_t word) const {
 bool Assets::contains(std::string_view name) const {
     auto normalized=safe_name(name);return loose_.contains(normalized)||entries_.contains(normalized);
 }
+std::vector<std::string> Assets::names() const {
+    std::vector<std::string> result;result.reserve(loose_.size()+entries_.size());
+    for(const auto&[name,path]:loose_)result.push_back(name);
+    for(const auto&[name,entry]:entries_)if(!loose_.contains(name))result.push_back(name);
+    std::sort(result.begin(),result.end());return result;
+}
 std::filesystem::path Assets::resolve(std::string_view name) const {
     auto normalized=safe_name(name);auto it=loose_.find(normalized);
     if(it==loose_.end())malformed("missing loose resource: "+std::string(name));return it->second;
@@ -263,10 +269,8 @@ void Assets::mount(std::string_view resource) {
         position+=packed;
     }
     for(auto&[name,entry]:added)for(size_t at=name.find('/');at!=std::string::npos;at=name.find('/',at+1))if(added.contains(name.substr(0,at)))malformed("WRS file/directory conflict");
-    for(auto&[name,entry]:added) {
-        if(bonusProfile_)entries_.try_emplace(name,std::move(entry));
-        else entries_.insert_or_assign(name,std::move(entry));
-    }
+    // A6 0041fd20 / A7 10024860 append members; 00420120 / 10024f60 return the first match.
+    for(auto&[name,entry]:added)entries_.try_emplace(name,std::move(entry));
     mounted_.insert(std::move(mountKey));
 }
 std::vector<uint8_t> Assets::decompress(std::span<const uint8_t> bytes,size_t expected) {
@@ -326,6 +330,7 @@ std::shared_ptr<const Image> Assets::image_ptr(std::string_view name) {
     // 10012470 retains returned alpha100 but excludes runtime80000; these
     // file-created descriptors therefore do not invoke the uploader's skip bit.
     decoded.nativeTextureAlpha=bonusProfile_ && decoded.nativeTextureAlpha;
+    decoded.a6AlphaFormat=!bonusProfile_&&normalized.ends_with(".tga")&&decoded.sourceDepth==32;
     if(normalized.ends_with(".dds"))decoded.nativeStorageBytes=0;
     else if(normalized.ends_with(".bmp")||normalized.ends_with(".pcx")) {
         if(decoded.sourceDepth==8)decoded.nativeStorageBytes=1;
@@ -490,17 +495,6 @@ World Assets::decode_world(std::span<const uint8_t> bytes, std::string_view name
                 float(value&255)/255,float(value>>24)/255};
     };
     auto gray=[](float value) -> Color { return {value,value,value,1}; };
-    auto old_flags=[](uint32_t value) {
-        uint32_t flags=0;
-        constexpr std::array<std::array<uint32_t,2>,15> mapping{{
-            {1,1u<<8},{2,1u<<9},{4,1u<<10},{16,1u<<12},{128,1u<<15},
-            {256,1u<<16},{512,1u<<17},{1024,1u<<18},{4096,1u<<20},
-            {8192,1u<<21},{16384,1u<<22},{32768,1u<<23},{131072,1u<<25},
-            {2097152,1u<<27},{262144,1u<<26}
-        }};
-        for(auto pair:mapping) if(value&pair[0]) flags|=pair[1];
-        return flags;
-    };
     if(!sections[15].empty()) {
         Cursor objects{sections[15]}; auto entries=offsets(objects);
         auto sorted=entries; std::sort(sorted.begin(),sorted.end());
@@ -565,7 +559,8 @@ World Assets::decode_world(std::span<const uint8_t> bytes, std::string_view name
                     }
                     if(record.size()>=padded) c.skip(type==3?3:1);
                     for(size_t skill=0;skill<(type==3?8:20);++skill) entity.skills[skill]=c.f32();
-                    entity.rawFlags=c.u32();entity.flags=type==3?old_flags(entity.rawFlags):entity.rawFlags;
+                    // A6 00459eb0 copies both record types' flags verbatim (case 3 dword 0x20, case 7 whole record).
+                    entity.flags=c.u32();
                     entity.ambient=gray(c.f32()/100);
                     if(type==7) {
                         entity.albedo=c.f32()/100;entity.pathIndex=c.u32();entity.attachedEntityIndex=c.u32();
@@ -573,7 +568,7 @@ World Assets::decode_world(std::span<const uint8_t> bytes, std::string_view name
                     } else entity.albedo=0.5f;
                 } else if(type==4) {
                     entity.position=c.vec3();entity.soundVolume=c.f32();c.skip(8);
-                    entity.soundRange=float(c.u32());entity.flags=c.u32();entity.rawFlags=entity.flags;entity.file=c.str(33);
+                    entity.soundRange=float(c.u32());entity.flags=c.u32();entity.file=c.str(33);
                 } else if(type==8) {
                     entity.regionMin=c.vec3();entity.regionMax=c.vec3();c.skip(8);entity.name=c.str(32);
                 } else malformed("unsupported WMB6 object type");
@@ -1550,6 +1545,7 @@ Model Assets::decode_model(std::span<const uint8_t> bytes, std::string_view sour
         model.min=model.max=model.sourceVertices.front().position;
         auto bounds=[&](Vec3 p) {model.min.x=std::min(model.min.x,p.x);model.min.y=std::min(model.min.y,p.y);model.min.z=std::min(model.min.z,p.z);model.max.x=std::max(model.max.x,p.x);model.max.y=std::max(model.max.y,p.y);model.max.z=std::max(model.max.z,p.z);};
         for(const auto& vertex:model.sourceVertices)bounds(vertex.position);
+        model.resourceMin=model.min;model.resourceMax=model.max; // sourceVertices hold frame 0 (see the frame decode above).
         for(const auto& frame:model.frames)for(const auto& p:frame.sourcePositions)bounds(p);
     }
     return model;

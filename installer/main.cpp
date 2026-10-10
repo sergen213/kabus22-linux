@@ -16,6 +16,7 @@
 #include <thread>
 #include <vector>
 
+#include <nlohmann/json.hpp>
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/error.h>
@@ -25,14 +26,14 @@ extern "C" {
 namespace {
 namespace fs = std::filesystem;
 using namespace k22::setup;
-constexpr const char* Version = "kabus22 native installer 1.0";
+constexpr const char* Version = "kabus22 native installer " K22_VERSION;
 std::atomic<bool> interrupted{false};
 static_assert(std::atomic<bool>::is_always_lock_free);
 void interrupt(int) { interrupted.store(true, std::memory_order_relaxed); }
 
 struct Options {
     Request request;
-    bool unattended = false, help = false, version = false, check = false;
+    bool unattended = false, help = false, version = false, check = false, verify = false, repair = false, json = false;
 };
 Options arguments(int argc, char** argv) {
     Options options;
@@ -42,11 +43,17 @@ Options arguments(int argc, char** argv) {
         if (flag == "--version") { options.version = true; continue; }
         if (flag == "--self-check") { options.check = true; continue; }
         if (flag == "--unattended") { options.unattended = true; continue; }
+        if (flag == "--verify") { options.verify = true; continue; }
+        if (flag == "--repair") { options.repair = true; continue; }
+        if (flag == "--json") { options.json = true; continue; }
         fs::path* target = nullptr;
-        if (flag == "--iso") target = &options.request.sourceIso;
+        if (flag == "--source") target = &options.request.source;
+        else if (flag == "--iso") target = &options.request.sourceIso;
         else if (flag == "--setup") target = &options.request.sourceSetup;
         else if (flag == "--install-dir") target = &options.request.installRoot;
         else if (flag == "--engine") target = &options.request.enginePayload;
+        else if (flag == "--launcher") target = &options.request.launcherPayload;
+        else if (flag == "--updater") target = &options.request.updaterPayload;
         else if (flag == "--extractor") target = &options.request.extractor;
         else if (flag == "--patch") target = &options.request.optionalPatch;
         else throw std::runtime_error("Unknown option: " + flag);
@@ -54,10 +61,16 @@ Options arguments(int argc, char** argv) {
         if (!target->empty()) throw std::runtime_error("Duplicate option: " + flag);
         *target = fs::absolute(argv[i]).lexically_normal();
     }
-    if (!options.request.sourceIso.empty() && !options.request.sourceSetup.empty())
-        throw std::runtime_error("Choose --iso or the developer --setup route, not both.");
-    if (options.unattended && options.request.sourceIso.empty() && options.request.sourceSetup.empty())
-        throw std::runtime_error("--unattended requires --iso GAME.iso or --setup setup.exe.");
+    const auto& request = options.request;
+    const int sources = int(!request.source.empty()) + int(!request.sourceIso.empty()) + int(!request.sourceSetup.empty());
+    if (sources > 1) throw std::runtime_error("Choose one of --source, --iso or the developer --setup route.");
+    if (options.verify && options.repair) throw std::runtime_error("Choose --verify or --repair, not both.");
+    if ((options.verify || options.repair) && !request.optionalPatch.empty())
+        throw std::runtime_error("--verify/--repair cannot be combined with --patch.");
+    if (options.verify && sources) throw std::runtime_error("--verify checks the installation only; it takes no source.");
+    if (options.json && !options.verify) throw std::runtime_error("--json is only available with --verify.");
+    if ((options.unattended || options.repair) && !sources)
+        throw std::runtime_error("--unattended and --repair require --source GAME.iso|setup.exe|WINDOWS_GAME_FOLDER.");
     return options;
 }
 void argumentCheck() {
@@ -69,11 +82,22 @@ void argumentCheck() {
     const auto result = parse({"kabus22-setup", "--iso", "media with spaces.iso", "--unattended"});
     if (!result.unattended || result.request.sourceIso.filename() != "media with spaces.iso")
         throw std::runtime_error("CLI path parsing regression");
+    const auto repair = parse({"kabus22-setup", "--repair", "--install-dir", "root", "--source", "Kabus 22"});
+    const auto verify = parse({"kabus22-setup", "--verify", "--json"});
+    if (!repair.repair || repair.request.source.filename() != "Kabus 22" || !verify.verify || !verify.json)
+        throw std::runtime_error("Verify/repair CLI parsing regression");
+    const auto launcher = parse({"kabus22-setup", "--launcher", "settings with spaces"});
+    if (launcher.request.launcherPayload.filename() != "settings with spaces")
+        throw std::runtime_error("Launcher payload parsing regression");
     for (const auto& invalid : std::vector<std::vector<std::string>>{
             {"kabus22-setup", "--iso"}, {"kabus22-setup", "--unattended"},
             {"kabus22-setup", "--iso", "one.iso", "--setup", "setup.exe"},
             {"kabus22-setup", "--iso", "one.iso", "--iso", "two.iso"},
-            {"kabus22-setup", "--unknown"}}) {
+            {"kabus22-setup", "--launcher"}, {"kabus22-setup", "--launcher", "one", "--launcher", "two"},
+            {"kabus22-setup", "--unknown"}, {"kabus22-setup", "--source", "a", "--iso", "b"},
+            {"kabus22-setup", "--verify", "--repair", "--source", "a"}, {"kabus22-setup", "--repair"},
+            {"kabus22-setup", "--verify", "--source", "a"}, {"kabus22-setup", "--json"},
+            {"kabus22-setup", "--unattended", "--verify", "--source", "a"}}) {
         bool rejected = false;
         try { (void)parse(invalid); } catch (const std::runtime_error&) { rejected = true; }
         if (!rejected) throw std::runtime_error("CLI invalid argument regression");
@@ -87,7 +111,17 @@ void defaults(Request& request) {
     // Only executable siblings are implicit payloads; never search PATH or the working directory.
     const auto bundle = fs::read_symlink("/proc/self/exe").parent_path();
     if (request.enginePayload.empty()) request.enginePayload = bundle / "kabus22";
+    if (request.launcherPayload.empty()) request.launcherPayload = bundle / "kabus22-launcher";
+    if (request.updaterPayload.empty()) request.updaterPayload = bundle / "kabus22-updater";
     if (request.extractor.empty()) request.extractor = bundle / "innoextract";
+}
+// Machine-readable progress for the launcher: "progress <0-100> <message>", only on change.
+Progress printer() {
+    return [last = std::string(), percent = -1](const std::string& stage, std::uint64_t done, std::uint64_t total) mutable {
+        const int now = total ? static_cast<int>(std::min(done, total) * 100 / total) : std::max(percent, 0);
+        if (now != percent || stage != last) { std::cout << "progress " << now << ' ' << stage << std::endl; percent = now; last = stage; }
+        return !interrupted.load(std::memory_order_relaxed);
+    };
 }
 
 struct Pixels {
@@ -291,8 +325,8 @@ class Installer {
             const fs::path source = gtk_entry_get_text(GTK_ENTRY(source_));
             if (source.empty()) throw std::runtime_error("Select your original ISO image first.");
             Request input = request_;
-            if (loose_) input.sourceSetup = fs::absolute(source).lexically_normal();
-            else input.sourceIso = fs::absolute(source).lexically_normal();
+            input.source = fs::absolute(source).lexically_normal();
+            input.sourceIso.clear(); input.sourceSetup.clear();
             input.installRoot = gtk_entry_get_text(GTK_ENTRY(destination_));
             if (input.installRoot.empty()) throw std::runtime_error("Choose an installation directory.");
             input.installRoot = fs::absolute(input.installRoot).lexically_normal();
@@ -320,8 +354,7 @@ class Installer {
                 try {
                     if (preview) {
                         PreviewScratch scratch;
-                        const auto source = loose_ ? input.sourceSetup : input.sourceIso;
-                        const auto artwork = previewArtwork(source, input.extractor, scratch.root / "media", progress);
+                        const auto artwork = previewArtwork(input.source, input.extractor, scratch.root / "media", progress);
                         if (cancelled_.load() || interrupted.load()) throw Cancelled();
                         auto pixels = nativeArtwork(artwork);
                         if (cancelled_.load() || interrupted.load()) throw Cancelled();
@@ -333,7 +366,7 @@ class Installer {
                         std::lock_guard lock(mutex_);
                         result_ = std::move(result);
                         succeeded_ = true;
-                        stage_ = "Installation complete. Native game and desktop shortcuts are ready.";
+                        stage_ = "Installation complete. Settings launcher, native game and desktop shortcuts are ready.";
                     }
                 } catch (const Cancelled& error) {
                     std::lock_guard lock(mutex_);
@@ -430,8 +463,9 @@ public:
         gtk_grid_set_row_spacing(GTK_GRID(fields_), 10);
         gtk_grid_set_column_spacing(GTK_GRID(fields_), 10);
         gtk_box_pack_start(GTK_BOX(content), fields_, FALSE, FALSE, 0);
-        source_ = field(fields_, 0, loose_ ? "_Original setup (developer):" : "_ISO image:",
-            loose_ ? request_.sourceSetup : request_.sourceIso, "Select the complete original Kabus22 ISO image. The media is never executed.",
+        source_ = field(fields_, 0, !request_.source.empty() ? "_Game media:" : loose_ ? "_Original setup (developer):" : "_ISO image:",
+            !request_.source.empty() ? request_.source : loose_ ? request_.sourceSetup : request_.sourceIso,
+            "Select the complete original Kabus22 ISO image, original setup.exe, or an installed Windows game folder. Nothing is executed.",
             G_CALLBACK(+[](GtkButton*, gpointer data) { auto* self = static_cast<Installer*>(data); self->choose(self->source_, GTK_FILE_CHOOSER_ACTION_OPEN, true); }));
         destination_ = field(fields_, 1, "_Install directory:", request_.installRoot,
             "A new directory is required. Browse selects a parent and adds kabus22; edit the path to choose another name.",
@@ -462,9 +496,9 @@ public:
         preview_ = button(actions, "Read _artwork", G_CALLBACK(+[](GtkButton*, gpointer data) { static_cast<Installer*>(data)->begin(true); }));
         install_ = button(actions, "_Install", G_CALLBACK(+[](GtkButton*, gpointer data) { static_cast<Installer*>(data)->begin(false); }));
         cancel_ = button(actions, "_Cancel", G_CALLBACK(+[](GtkButton*, gpointer data) { static_cast<Installer*>(data)->cancel(); }));
-        launch_ = button(actions, "_Launch game", G_CALLBACK(+[](GtkButton*, gpointer data) {
+        launch_ = button(actions, "_Open settings", G_CALLBACK(+[](GtkButton*, gpointer data) {
             auto* self = static_cast<Installer*>(data);
-            try { const int pid = launch(self->result_); labelText(self->status_, "Native game launched (PID " + std::to_string(pid) + ")."); }
+            try { const int pid = launch(self->result_); labelText(self->status_, "Settings launcher opened (PID " + std::to_string(pid) + ")."); }
             catch (const std::exception& error) { self->report(error.what()); }
         }));
         close_ = button(actions, "Cl_ose", G_CALLBACK(+[](GtkButton*, gpointer data) { static_cast<Installer*>(data)->close(); }));
@@ -497,14 +531,19 @@ int main(int argc, char** argv) {
     try {
         auto options = arguments(argc, argv);
         if (options.help) {
-            std::cout << Version << "\nUsage: kabus22-setup [--iso GAME.iso] [--install-dir NEW_DIRECTORY]\n"
-                "                     [--patch PATCH_DIRECTORY] [--engine NATIVE_ELF]\n"
-                "                     [--extractor INNOEXTRACT] [--unattended]\n"
-                "Developer media: --setup ORIGINAL_setup.exe (with original sibling setup-1.bin), instead of --iso.\n"
+            std::cout << Version << "\nUsage: kabus22-setup [--source GAME.iso|setup.exe|WINDOWS_GAME_FOLDER] [--install-dir NEW_DIRECTORY]\n"
+                "                     [--patch PATCH_DIRECTORY] [--engine NATIVE_ELF] [--launcher SETTINGS_ELF]\n"
+                "                     [--updater UPDATER_ELF] [--extractor INNOEXTRACT] [--unattended]\n"
+                "       kabus22-setup --verify [--install-dir ROOT] [--json]\n"
+                "       kabus22-setup --repair [--install-dir ROOT] --source GAME.iso|setup.exe|WINDOWS_GAME_FOLDER [--unattended]\n"
+                "--source detects an ISO image, original setup.exe with sibling setup-1.bin, or an installed\n"
+                "Windows Kabus22 folder (K22.wrs + K22.exe; only game data is imported). --iso/--setup still work.\n"
                 "Original-campaign widescreen is included in the native engine; no patch folder is required.\n"
                 "--patch optionally installs separately obtained Kabus22Patch extras; none are bundled or auto-discovered.\n"
                 "--unattended installs without a window; SIGINT/SIGTERM cancel safely.\n"
-                "--engine and --extractor override trusted bundled siblings for development.\n"
+                "--verify compares installed files with the recorded inventory (exit 3 on mismatch).\n"
+                "--repair restores missing/modified game files from the source, then verifies (exit 3 if any remain).\n"
+                "--engine, --launcher, --updater and --extractor override trusted bundled siblings for development.\n"
                 "--self-check runs CLI/core security regression checks without installing.\n";
             return 0;
         }
@@ -513,13 +552,24 @@ int main(int argc, char** argv) {
         defaults(options.request);
         std::signal(SIGINT, interrupt);
         std::signal(SIGTERM, interrupt);
+        if (options.verify || options.repair) {
+            auto& request = options.request;
+            const auto source = !request.source.empty() ? request.source : !request.sourceIso.empty() ? request.sourceIso : request.sourceSetup;
+            const auto result = options.verify ? verify(request.installRoot, options.json ? Progress{} : printer())
+                                               : repair(request.installRoot, source, request.extractor, printer());
+            if (options.json) {
+                std::cout << nlohmann::json{{"ok", result.ok()}, {"checked", result.checked},
+                    {"missing", result.missing}, {"modified", result.modified}}.dump() << '\n';
+            } else {
+                for (const auto& path : result.missing) std::cerr << "missing: " << path << '\n';
+                for (const auto& path : result.modified) std::cerr << "modified: " << path << '\n';
+                std::cout << (result.ok() ? "Installation verified: " : "Installation has mismatches: ") << result.checked << " files checked, "
+                          << result.missing.size() << " missing, " << result.modified.size() << " modified\n";
+            }
+            return result.ok() ? 0 : 3;
+        }
         if (options.unattended) {
-            const auto result = install(options.request, [](const std::string& stage, std::uint64_t done, std::uint64_t total) {
-                std::cerr << stage;
-                if (total) std::cerr << " (" << done << '/' << total << ')';
-                std::cerr << '\n';
-                return !interrupted.load(std::memory_order_relaxed);
-            });
+            const auto result = install(options.request, printer());
             std::cout << "Native installation complete: " << result.root << "\nShortcut: " << result.shortcut << '\n';
             return 0;
         }

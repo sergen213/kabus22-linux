@@ -19,7 +19,9 @@
     X(vkCmdBindVertexBuffers) \
     X(vkCmdBlitImage) \
     X(vkCmdClearAttachments) \
+    X(vkCmdClearDepthStencilImage) \
     X(vkCmdCopyBuffer) \
+    X(vkCmdCopyImage) \
     X(vkCmdCopyBufferToImage) \
     X(vkCmdCopyImageToBuffer) \
     X(vkCmdDispatch) \

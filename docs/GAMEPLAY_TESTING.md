@@ -1,0 +1,343 @@
+# Gameplay Testing
+
+Purpose: run the original campaign scripts under scripted input with real game data, check WDL state, and keep an honest ledger of what has and has not been exercised.
+
+Related: [Gameplay systems](GAMEPLAY_SYSTEMS.md) · [Camera system](CAMERA_SYSTEM.md) · [Script system](reverse-engineering/SCRIPT_SYSTEM.md)
+
+## Harness
+
+`kabus22 --data GAME_ROOT --scenario FILE [--scenario-out DIR] [--headless | renderer options]` (`native/scenario.cpp`).
+
+- Scenario runs use a fixed 1/60 s step. `realtime on` (the default) paces frames to the wall clock so movies and sounds keep their wall-clock timing. `realtime off` runs as fast as possible. A `realtime` line before the first step also covers script bootstrap.
+- **Determinism.** Headless `realtime off` runs are reproducible: the same file, game data and saves give the same step frames on every run. Rendered runs use a real audio device that consumes voices in wall time, so they are not guaranteed to match. In the one comparison made, a rendered `world_kizic_kordinat` run matched the headless one (4130 frames).
+  - `random()` comes from `Engine::random` (`std::mt19937`). In a scenario it is seeded once before the scripts start with `seed N` (default 0). The original scripts call `randomize()` before most random draws (AI, effects, music). That call reseeds from `std::random_device` in ordinary play; in scenario mode it keeps the seeded stream (`Engine::fixedRandom`).
+  - Under `realtime off`, `Media` runs on a manual clock that advances 1/60 s per frame (`Media::advance_clock`). This covers headless voice ends (`snd_playing`, which 75 original scripts poll) and movie time (`media_playing`). `realtime on` resumes the wall clock from that point (`Media::real_clock`). Scenarios that use it (movie timing, intro) are only as reproducible as the wall clock.
+  - Remaining wall-clock reads: `SYS_*` (localtime, used for save dates), the level-load progress hook's 10 s throttle (`engine.cpp`, fires only on loads longer than 10 s), Discord IPC retry timing, and a device-backed mixer in rendered runs.
+  - Ordinary play is unchanged: no seed, `randomize()` from the OS, and the media wall clock with zero offset.
+  - Regression check: `media_boundaries` (`check_media`) asserts that a headless voice ends by manual-clock time only.
+- The scenario owns keyboard, mouse and joystick input for each frame. It derives pressed/released edges from held state, so the original `key_pressed`, `KEY_*` and `JOY_*` reads see ordinary input. With `pad live` the renderer's real game controller and joystick input pass through instead (live pad tests, [Controller](#controller-live-virtual-pad)).
+- Each step prints `scenario: line N PASS|FAIL|SKIP|INFO frame=F …`. The final line is `scenario: FILE PASS|FAIL passed= failed= skipped= not_run= frames=`. The exit code is 0 only when no step failed and every step ran.
+- A failed `wait`, `press-until`, `walk-to`, `turn-to` or `find` aborts the run. A failed `assert` is recorded and the run continues.
+- `capture` writes `DIR/NAME.ppm` through `Renderer::capture`. Headless runs report it as SKIP.
+
+| Command | Meaning |
+|---|---|
+| `frames N` | advance N frames |
+| `down KEY` / `up KEY` / `press KEY [HOLD=3]` | SDL scancode names, `_` for space (`Return`, `Escape`, `Up`, `Left_Ctrl`, `M`) |
+| `press-until KEY COND [timeout N]` | check COND; if false, hold 3 frames and release 3 frames; repeat |
+| `mouse X Y`, `mouse-down B`, `mouse-up B` | absolute pointer and buttons 1-7 |
+| `joy N button B down\|up`, `joy N axis A V` | joystick 0/1, buttons 0-31, axes 0-5 in -1..1 |
+| `wait until COND [timeout N]` | default timeout 600 frames |
+| `assert COND`, `print EXPR`, `store NAME EXPR` | checks and logging; `@NAME` reads a stored value |
+| `set GLOBAL\|GLOBAL[i] EXPR` | writes a WDL VAR (or VAR array element) as a number, like a script assignment; used by the level sweep for `LY_AktifLevelID`/`LY_HedefLevel` |
+| `find NAME ACTION` | nearest live entity whose ACTION1 is ACTION, stored as `@NAME` |
+| `list ACTION`, `list near R` | log entities running ACTION, or every live entity within R of the player with its file, PASSABLE/POLYGON/NARROW/FAT flags, box, angles, render flags, ALPHA, AMBIENT and FLOOR_DIST (finds action-less blockers, decal/light state) |
+| `walk-to @NAME\|X Y RADIUS [path] [run] [timeout N]` | greedy steering with the default arrow bindings, plus a blind sidestep when stuck. `path` first plans a route (below) and re-plans when stuck |
+| `route RADIUS X1 Y1 X2 Y2 … [run] [timeout N]` | walk-to through fixed waypoints, re-anchoring on the nearest one when knocked off |
+| `turn-to @NAME\|X Y [DEG=8]` | turn in place |
+| `load-save N` | drives the original main menu → `YukleMenu` with ordinary keys and loads `kayitN.sav` (menu slot `N+1`) |
+| `capture NAME`, `realtime on\|off` | |
+| `seed N` | `random()` seed for the whole run (default 0), applied before the scripts start; position in the file does not matter |
+| `pad live` | whole file: real controller/joystick input passes through (rendered runs with a pad) |
+| `expect-exit [timeout N]` | last step: passes when the original scripts end the process (for example `CikisMenu.wdl` Exit) |
+
+`# continues: OTHER` in a scenario makes `run.cmake` reuse OTHER's private XDG tree without a fresh save import, so a sequence of files models restarts of one installation. `# mode: bonus` runs the file against `--mode bonus --data "<game>/Kabus 22 Mode"`.
+
+**`path` planning** (`native/scenario.cpp plan()`, test-only, read-only engine queries): 8-neighbour A* over 24-unit cells. A cell's height is the floor under it (point `Engine::collide` trace) plus the player's own lift; an edge needs a climb or drop of at most 32 and a clear sweep of the player's own hull (`collide` with USE_BOX + IGNORE_PASSABLE, the flags `ent_move` uses) raised 16 units, which stands in for the scripted step-up of `dmr_yercekimi`. Cells are keyed by XY and a 48-unit height band, so stacked floors (kizic spiral stairs) are separate nodes; an entity goal must also be reached within 96 units of height. Each plan logs its waypoints (`planned N waypoints … via (x,y) …`). A failure reports the nearest reachable cell and the cell count. Ceiling: entities are taken as they stand when planning, and the 60000-cell cap bounds very open maps.
+
+`$movieframe` is `media_playing` of the full-screen movie (1-based decoded frame) and `$wall` is wall-clock seconds; together they measure movie timing.
+
+Expressions use `GLOBAL`, `GLOBAL[i]`, `GLOBAL.field`, `GLOBAL[i].field` (pointer words in VAR arrays work), `@stored`, `@stored.field`, the pseudo-field `.alive`, and the terms `$level` (last `level_load` file), `$frame`, `$movie` (a full-screen `media_play` is playing), `$count(ACTION)`, `$dist(@e)`, `$facing(@e)` (signed degrees, positive means turn left) and `$levelminz`/`$levelmaxz` (the loaded WMB's geometry bounds). `+`/`-` combine terms; `== != < <= > >=` compare; `&&` binds tighter than `||` (no parentheses, no `*`). Skill DEFINE aliases such as `Enerji` are not visible; use `skill1`.
+
+**`load-save` justification:** it presses the original keys through `AnaMenu` cursor 1 and the `YukleMenu` cursor (`YUM_Cursor+YUM_Kafa`). The original `Yukleme_Kontrol` then runs `YD_OyunuYukle("kayitN.sav")` and sets `LY_HedefLevel` (`YukleMenu.wdl:318-343`). No engine shortcut is involved.
+
+**Original saves:** `kabus22 --import-saves "<Lutris>/…/Kabus 22"` copies them into a private `XDG_DATA_HOME`. The originals stay read-only.
+
+**CTest:** configure with `-DK22_GAME_DATA=<game dir>` and optionally `-DK22_ORIGINAL_SAVES=<Windows game dir>`. This registers `gameplay_scenarios` (`tests/scenarios/run.cmake`), which runs every `tests/scenarios/*.k22s` headless in a fresh private XDG tree. Files marked `# requires: saves` are skipped when no save directory is given. With both options it also registers `level_sweep` (below, about 5 minutes), and with `-DK22_REFERENCE_DIR=<reference set>` also `reference_comparison` (rendered, needs `DISPLAY`; [below](#reference-comparison-original-under-wine)).
+
+## Level sweep (every campaign level)
+
+`tests/levels/levels.tsv` lists all 101 `LVSL_Leveller` IDs (`LevelYonetim.wdl LVSL_Olustur`; 63 and 96 are NULL; 33 and 34 reuse `Kriz.WMB`, so 99 distinct WMBs). `tests/levels/sweep.cmake` (CTest `level_sweep`) generates one scenario per row and runs it in its own copy of an imported save tree, one process at a time:
+
+1. `load-save S` with an original save of the row's character. The character is one whose player action (`Oyuncu_Demir`, `Oyuncu_Ebru`, `oyuncu_koruyucu`) the WMB places; a WMB without it has no player (Tnel8/Tnel9/Tttg2/Ttn3/yereson/hapisane_dark are Ebru-only, Ev3 Demir-only, Seytan_k Inzar-only).
+2. Two door transitions through the original path. `LY_Tarama` (an `LY_Kapi` scan) only sets `LY_HedefLevel=my.LevelID`; the starter `LY_YuklemeTakip` then runs `LevelYukle(N)`: `LVPL_Acikmi[N](old)`, `LVPL_Cikis[old](N)`, fade, `level_load`, the entity actions, `LVPL_Giris[N](old)`, fade-in and control. The sweep sets `LY_AktifLevelID` to the entry level of a neighbour M and `LY_HedefLevel` to M, then, from M, `LY_HedefLevel` to N. N's `Acikmi`/`Giris` therefore see M's real state (`harita_*`, placement branch `_EskiLevel==M`); a single hop from the save's level made the `Acikmi` of Ttn3 and hapisane_dark index `harita_verileri_6/10` with another map's cursor (an out-of-range read that real play cannot produce). The `from` column avoids the movie pairs of `LevelYukle` (30→17 Demir, 2→25, 62→65, 93→70).
+3. Wait for control (`oyuncu_pasif`/`koruyucu_pasif` 0 and the fade gone), unless the original entry keeps control (`LevelYonetim.wdl:1035-1037`, the `no_control` column). Then 600 frames: Up held for 120, `player.z > $levelminz - 100` every 100 frames, `capture level-N`.
+
+Engine exceptions, script errors, unresolved assets/actions (`unknown WMB entity action`, asset loads) and non-finite numbers (`Value::from_double` rejects them) end the process, so they fail the row. Headless all 101 levels: 4 min 44 s. Rendered with `-DARGS=--renderer;opengl;--window-mode;windowed;--resolution;1280x720` (vsync-paced): 23 min. Evidence: `reverse/wave2/LevelSweep/` (`level-sweep-opengl-contact.jpg` all 101, `level-sweep-opengl-vs-vulkan-rt.jpg` 12 levels, `summary-*.tsv`).
+
+Results (headless frames; "Control: no (scripted)" means the original entry cutscene keeps the player passive):
+
+| ID | WMB | Character | Save | From | Loads (headless) | Frames | Control | Errors | Capture |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | start4.wmb | Demir | kayit1 | 2 | yes | 1908 | yes | none | OpenGL + Vulkan RT |
+| 2 | sd.wmb | Demir | kayit1 | 1 | yes | 1908 | yes | none | OpenGL |
+| 3 | start5.wmb | Demir | kayit1 | 1 | yes | 1908 | yes | none | OpenGL |
+| 4 | level4.wmb | Demir | kayit1 | 2 | yes | 1908 | yes | none | OpenGL |
+| 5 | start3.wmb | Demir | kayit1 | 3 | yes | 1908 | yes | none | OpenGL |
+| 6 | nstart7.wmb | Demir | kayit1 | 4 | yes | 1908 | yes | none | OpenGL |
+| 7 | cam1.wmb | Demir | kayit1 | 4 | yes | 1908 | yes | none | OpenGL + Vulkan RT |
+| 8 | yuy.wmb | Demir | kayit1 | 5 | yes | 1908 | yes | none | OpenGL |
+| 9 | mekke.wmb | Demir | kayit1 | 6 | yes | 1908 | yes | none | OpenGL |
+| 10 | start7.wmb | Demir | kayit1 | 7 | yes | 2165 | yes | none | OpenGL |
+| 11 | mezarlik.wmb | Demir | kayit1 | 7 | yes | 1908 | yes | none | OpenGL |
+| 12 | start1.wmb | Demir | kayit8 | 8 | yes | 1866 | yes | none | OpenGL |
+| 13 | kk.wmb | Ebru | kayit7 | 8 | yes | 1872 | yes | none | OpenGL |
+| 14 | start2.wmb | Demir | kayit1 | 9 | yes | 1908 | yes | none | OpenGL |
+| 15 | untitled44.wmb | Demir | kayit1 | 10 | yes | 2357 | yes | none | OpenGL |
+| 16 | iceri1.wmb | Demir | kayit8 | 12 | yes | 1866 | yes | none | OpenGL |
+| 17 | fiinis.wmb | Ebru | kayit7 | 30 | yes | 1872 | yes | none | OpenGL + Vulkan RT |
+| 18 | start6.wmb | Demir | kayit0 | 14 | yes | 1914 | yes | none | OpenGL |
+| 19 | startwc.wmb | Demir | kayit0 | 18 | yes | 1914 | yes | none | OpenGL |
+| 20 | level7.wmb | Demir | kayit0 | 18 | yes | 1914 | yes | none | OpenGL |
+| 21 | start10.wmb | Demir | kayit0 | 18 | yes | 1914 | yes | none | OpenGL |
+| 22 | level5.wmb | Demir | kayit0 | 20 | yes | 1914 | yes | none | OpenGL |
+| 23 | kazankol.wmb | Demir | kayit0 | 21 | yes | 1914 | yes | none | OpenGL |
+| 24 | camtuvalet.wmb | Demir | kayit1 | 7 | yes | 1908 | yes | none | OpenGL |
+| 25 | iceri2.wmb | Demir | kayit8 | 16 | yes | 1866 | yes | none | OpenGL |
+| 26 | binaici.wmb | Ebru | kayit6 | 13 | yes | 1878 | yes | none | OpenGL |
+| 27 | ev.wmb | Ebru | kayit6 | 28 | yes | 1878 | yes | none | OpenGL + Vulkan RT |
+| 28 | ev2.wmb | Ebru | kayit6 | 26 | yes | 1878 | yes | none | OpenGL |
+| 29 | arasokak.wmb | Ebru | kayit7 | 13 | yes | 1872 | yes | none | OpenGL |
+| 30 | aralevel.wmb | Ebru | kayit7 | 17 | yes | 1872 | yes | none | OpenGL |
+| 31 | kriz.wmb | Demir | kayit9 | 32 | yes | 1860 | yes | none | OpenGL + Vulkan RT |
+| 32 | kizicyolwmp.wmb | Demir | kayit9 | 31 | yes | 1860 | yes | none | OpenGL |
+| 33 | kriz.wmb | Demir | kayit9 | 32 | yes | 1860 | yes | none | OpenGL |
+| 34 | kriz.wmb | Demir | kayit9 | 32 | yes | 1860 | yes | none | OpenGL |
+| 35 | kizic3.wmb | Demir | kayit10 | 32 | yes | 1854 | yes | none | OpenGL |
+| 36 | kizic.wmb | Demir | kayit10 | 35 | yes | 1854 | yes | none | OpenGL + Vulkan RT |
+| 37 | kizic2.wmb | Demir | kayit10 | 36 | yes | 1854 | yes | none | OpenGL |
+| 38 | krizkuyu.wmb | Demir | kayit10 | 39 | yes | 2009 | no (scripted) | none | OpenGL |
+| 39 | tnel24.wmb | Inzar | kayit16 | 40 | yes | 1821 | yes | none | OpenGL |
+| 40 | tnel12.wmb | Inzar | kayit16 | 39 | yes | 1821 | yes | none | OpenGL |
+| 41 | tnel66.wmb | Inzar | kayit16 | 40 | yes | 1821 | yes | none | OpenGL + Vulkan RT |
+| 42 | tnel13.wmb | Inzar | kayit18 | 41 | yes | 1807 | yes | none | OpenGL |
+| 43 | tnel10.wmb | Inzar | kayit16 | 41 | yes | 1821 | yes | none | OpenGL |
+| 44 | tnel15.wmb | Inzar | kayit16 | 41 | yes | 1821 | yes | none | OpenGL |
+| 45 | tnel19.wmb | Inzar | kayit16 | 43 | yes | 1821 | yes | none | OpenGL |
+| 46 | tnel16.wmb | Inzar | kayit16 | 43 | yes | 1820 | yes | none | OpenGL |
+| 47 | tnel14.wmb | Inzar | kayit16 | 46 | yes | 1820 | yes | none | OpenGL |
+| 48 | tnel7.wmb | Inzar | kayit16 | 46 | yes | 1820 | yes | none | OpenGL |
+| 49 | tnel21.wmb | Inzar | kayit16 | 44 | yes | 1821 | yes | none | OpenGL |
+| 50 | tnel17.wmb | Inzar | kayit16 | 44 | yes | 1820 | yes | none | OpenGL |
+| 51 | tnel6.wmb | Inzar | kayit16 | 50 | yes | 1820 | yes | none | OpenGL |
+| 52 | tnel11.wmb | Inzar | kayit16 | 51 | yes | 1820 | yes | none | OpenGL |
+| 53 | tnel18.wmb | Inzar | kayit16 | 52 | yes | 1820 | yes | none | OpenGL |
+| 54 | tnel5.wmb | Inzar | kayit18 | 42 | yes | 1807 | yes | none | OpenGL |
+| 55 | tnel22.wmb | Inzar | kayit18 | 54 | yes | 1807 | yes | none | OpenGL |
+| 56 | tnel20.wmb | Inzar | kayit18 | 54 | yes | 1808 | yes | none | OpenGL |
+| 57 | tnel23.wmb | Inzar | kayit16 | 48 | yes | 1821 | yes | none | OpenGL |
+| 58 | tnel25.wmb | Inzar | kayit16 | 52 | yes | 1820 | yes | none | OpenGL |
+| 59 | tnel26.wmb | Inzar | kayit16 | 60 | yes | 1820 | yes | none | OpenGL |
+| 60 | tnel27.wmb | Ebru | kayit19 | 59 | yes | 1800 | yes | none | OpenGL |
+| 61 | tnel28.wmb | Inzar | kayit16 | 58 | yes | 1820 | yes | none | OpenGL |
+| 62 | seytan_k.wmb | Inzar | kayit18 | 42 | yes | 1770 | no (scripted) | none | OpenGL + Vulkan RT |
+| 64 | seytan_e.wmb | Demir | kayit11 | 42 | yes | 1848 | yes | none | OpenGL |
+| 65 | ebrudus.wmb | Ebru | kayit19 | 60 | yes | 1992 | yes | none | OpenGL + Vulkan RT |
+| 66 | tnel8.wmb | Ebru | kayit20 | 64 | yes | 1794 | yes | none | OpenGL |
+| 67 | tnel9.wmb | Ebru | kayit20 | 66 | yes | 1794 | yes | none | OpenGL |
+| 68 | tttg2.wmb | Ebru | kayit20 | 67 | yes | 1986 | yes | none | OpenGL |
+| 69 | ttn3.wmb | Ebru | kayit20 | 68 | yes | 1986 | yes | none | OpenGL |
+| 70 | saraygir.wmb | Demir | kayit21 | 71 | yes | 1788 | yes | none | OpenGL |
+| 71 | saraygiralt.wmb | Demir | kayit21 | 70 | yes | 1788 | yes | none | OpenGL |
+| 72 | masso_lg.wmb | Demir | kayit22 | 71 | yes | 1782 | yes | none | OpenGL + Vulkan RT |
+| 73 | massotaltkat.wmb | Demir | kayit22 | 72 | yes | 1782 | yes | none | OpenGL |
+| 74 | kolidorsag.wmb | Demir | kayit22 | 72 | yes | 1782 | yes | none | OpenGL |
+| 75 | ayinyeri.wmb | Demir | kayit22 | 74 | yes | 1782 | yes | none | OpenGL |
+| 76 | kutuphane.wmb | Demir | kayit22 | 74 | yes | 1782 | yes | none | OpenGL |
+| 77 | yemekodasi.wmb | Demir | kayit22 | 74 | yes | 1782 | yes | none | OpenGL |
+| 78 | kanodasi.wmb | Demir | kayit22 | 73 | yes | 1782 | yes | none | OpenGL |
+| 79 | saatodasi.wmb | Demir | kayit22 | 77 | yes | 1782 | yes | none | OpenGL |
+| 80 | dumur.wmb | Demir | kayit22 | 79 | yes | 1782 | yes | none | OpenGL |
+| 81 | kolidorsol.wmb | Demir | kayit22 | 72 | yes | 1782 | yes | none | OpenGL |
+| 82 | dumurek1.wmb | Demir | kayit22 | 80 | yes | 1782 | yes | none | OpenGL |
+| 83 | bedkorgel.wmb | Demir | kayit22 | 80 | yes | 1782 | yes | none | OpenGL |
+| 84 | buyukes.wmb | Demir | kayit26 | 83 | yes | 1950 | yes | none | OpenGL + Vulkan RT |
+| 85 | massotsoloda.wmb | Demir | kayit22 | 72 | yes | 1782 | yes | none | OpenGL |
+| 86 | massotsolodad1.wmb | Demir | kayit22 | 85 | yes | 1782 | yes | none | OpenGL |
+| 87 | massotsolodad2.wmb | Demir | kayit22 | 86 | yes | 1782 | yes | none | OpenGL |
+| 88 | massotsolodad3.wmb | Demir | kayit22 | 85 | yes | 1782 | yes | none | OpenGL |
+| 89 | massotmerdiven.wmb | Demir | kayit22 | 81 | yes | 1782 | yes | none | OpenGL |
+| 90 | massotsagoda.wmb | Demir | kayit22 | 72 | yes | 1782 | yes | none | OpenGL |
+| 91 | solustoda.wmb | Demir | kayit22 | 81 | yes | 1782 | yes | none | OpenGL |
+| 92 | solustodad1.wmb | Demir | kayit22 | 91 | yes | 1782 | yes | none | OpenGL |
+| 93 | hapisane.wmb | Demir | kayit21 | 70 | yes | 1788 | yes | none | OpenGL + Vulkan RT |
+| 94 | hapisaned1.wmb | Demir | kayit21 | 93 | yes | 1788 | yes | none | OpenGL |
+| 95 | hapisaned2.wmb | Demir | kayit21 | 93 | yes | 1788 | yes | none | OpenGL |
+| 97 | hapisaned4.wmb | Demir | kayit21 | 93 | yes | 1788 | yes | none | OpenGL |
+| 98 | kotukoru_d.wmb | Demir | kayit26 | 84 | yes | 1950 | yes | none | OpenGL |
+| 99 | ev3.wmb | Demir | kayit8 | 28 | yes | 1866 | yes | none | OpenGL |
+| 100 | bosskoli.wmb | Demir | kayit26 | 98 | yes | 1758 | yes | none | OpenGL |
+| 101 | boss.wmb | Demir | kayit26 | 100 | yes | 1721 | no (scripted) | none | OpenGL |
+| 102 | yereson.wmb | Ebru | kayit20 | 70 | yes | 1794 | yes | none | OpenGL |
+| 103 | hapisane_dark.wmb | Ebru | kayit20 | 70 | yes | 1757 | yes | none | OpenGL |
+
+Low movement in the table's runs (Mekke, Tnel16/21/6/11/26) is enemies engaging the player at the door (OpenGL captures show dumas and babayaros in melee), not a collision stop.
+
+## Original save inventory (user's Windows set, all Normal difficulty)
+
+Byte layout from `Yeni_Oyun_Deger.wdl:1587-1598`: version, `LY_AktifLevelID`, `Aktif_Player`, `Aktif_Silah`, music, mana, Demir/Inzar/Ebru health. Level names come from `LevelYonetim.wdl LVSL_Olustur`. "Loads" means native headless `load-save N` reached `level_yuklendi_ok` with the expected level, player and weapon, and kept running for 600 frames. The entity census is in `reverse/wave2/GameplayQA/save-entity-inventory.txt`.
+
+| kayitN | Menu label | WMB | Character | HP | Loads |
+|---|---|---|---|---|---|
+| 0 | Demir - Ofis | level5 | Demir | 64 | yes |
+| 1-5 | Demir - Cami | cam1 | Demir | 85/76 | yes |
+| 6 | Ebru - Ev | ev | Ebru | 100 | yes (after fix 1) |
+| 7 | Ebru - Sahil | fiinis | Ebru | 74 | yes (after fix 1) |
+| 8 | Demir - Hastane | iceri2 | Demir | 100 | yes |
+| 9 | Demir - Kız Kulesi İskele | kriz | Demir | 59 | yes |
+| 10 | Demir - Kız Kulesi Kafe | kizic2 | Demir | 76 | yes |
+| 11-14 | Demir - Tüneller | tnel66 | Demir | 76…57 | yes |
+| 15 | İnzar - Gaile Yolu | tnel24 | Inzar | 200 | yes |
+| 16-17 | İnzar - Tüneller | tnel66 | Inzar | 200/183 | yes |
+| 18 | İnzar - Artal'ın Yolu | tnel13 | Inzar | 138 | yes |
+| 19 | Ebru - Kanalizasyon | ebrudus | Ebru | 68 | yes (after fix 1) |
+| 20 | Ebru - Tüneller | tnel66 | Ebru | 68 | yes (after fix 1) |
+| 21 | Demir - Hapishane | saraygir | Demir | 68 | yes |
+| 22-24 | Demir - Tapınak | masso_lg | Demir | 79/74/67 | yes |
+| 25 | İnzar - Lain'in Nefreti | kotukoru_d (boss `kotukoru_ai`) | Inzar | 200 | yes |
+| 26 | Demir - Lavanis Kuyusu | buyukes | Demir | 84 | yes |
+
+All 27 indexed slots load: 16 distinct worlds, all three characters.
+
+## Controller (live virtual pad)
+
+No physical gamepad was available, so the controller path was tested with a virtual one. `tools/virtual-gamepad/vpad.py` (python-evdev, write access to `/dev/uinput`) creates a uinput device with the xpad driver's Xbox 360 identity: USB `045e:028e` version `0x0114`, `BTN_A…BTN_THUMBR`, sticks `ABS_X/Y/RX/RY` ±32767, triggers `ABS_Z/RZ` 0–255, d-pad `ABS_HAT0X/Y`, and `EV_FF`/`FF_RUMBLE`. It acknowledges every force-feedback upload/erase/play the game sends and logs strength and duration (`--ff-log`). It runs a timed script (`down`/`up`/`press BTN [MS]`, `axis AXIS VALUE [MS]`, `sleep MS`, `unplug`/`plug`, and `wait TEXT`, which blocks until the game's stdout log gains a line containing TEXT). The device is destroyed on exit, error and SIGINT/SIGTERM/SIGHUP.
+
+**Recognition.** `vpad.py --probe` (SDL 2.32.74, sdl2-compat): `joystick 0 'Xbox 360 Controller' SDL_IsGameController=1 mapping 'Xbox 360 Controller'`; a 200 ms `SDL_GameControllerRumble(0x8000,0x4000)` arrives as `ff upload rumble strong=32768 weak=16384` + play. The host's `Keychron C2 Pro 8K System Control` is a second joystick (not a game controller), so `num_joysticks` is 2 with the pad. Raw SDL joystick button order of the pad (probe): A 0, B 1, X 2, Y 3, LB 4, RB 5, Back 6, Start 7, Guide 8, LS 9, RS 10, so original `JOY_n` = raw button n−1. The engine logs `kabus22: game controller 'Xbox 360 Controller' opened (rumble)` at startup and on hotplug, and `kabus22: game controller removed`.
+
+**Procedure.** `tools/virtual-gamepad/run-live.sh KABUS22 GAME_ROOT WINDOWS_SAVE_DIR OUT_DIR CASE [CONTROLLER_INI]` runs one rendered case (OpenGL, 1280×720 windowed, `DISPLAY=:0`) in a fresh private XDG tree with the saves imported, `live/CASE.k22s` in the engine and `live/CASE.vpad` in `vpad.py` at the same time. Without an ini there is no `controller.ini` (original mode). Each `store pad_*` line in the scenario is the marker the pad script waits for; the scenario then measures the effect over fixed frames. The runner sets `SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=1`: SDL drops pad events while its window is unfocused, and on this desktop in use the new game window often did not get focus. Before the hint, two runs lost the first pad input after the load, and `xdotool getactivewindow` did not report the game window for most of one run (`[INFERENCE]` cause: focus).
+
+Results (RX 7900 XTX, OpenGL, 2026-10-09; every run PASS on the final tree; logs, `ff.log` and PNG captures in `reverse/wave2/ControllerLive/`):
+
+| Case | controller.ini | Checked |
+|---|---|---|
+| `modern` | `modern.ini` (mode=modern, deadzone 0.15, sensitivity 1, vibration 1) | Load `kayit1.sav` (Cami). LY −3000 (0.09, inside the radial deadzone) for 120 frames: x/y unchanged. LY full forward: moves within 3 frames, 48.2 units in 60 frames. Walking + LX 16384 (0.41 after the deadzone): pan −64.45° in 60 frames. Standing + LX 24000 (0.69): −202.1° in 60 frames (fix 16), the same as full LX. LT holds aim (`JOY_1`): raised in 15 frames; RT (`JOY_2`) fires, `S_Kursun_Sayisi[3]` 80 → 79. Start (`JOY_4`) opens the inventory (`EM_Acik` 1) and closes it; Back (`JOY_5`) opens the map (`h_menu_aktifmi` 1) and closes it. Hotplug: `unplug` → `num_joysticks` 2 → 1 and "controller removed"; `plug` → 2, reopened, full forward walks again within 3 frames. No FF events (no damage) |
+| `modern` | `modern-s2.ini` (sensitivity 2) | Same run: walking turn −129.08° in 60 frames, ratio 2.003 to sensitivity 1; everything else as above |
+| `remap` | `remap.ini` (`righttrigger=0`, `x=2`) | After a short walk, LT aims; RT now gives `JOY_2` 0 / `Key_Ates` 0 and the ammo is unchanged over 90 frames; X gives `JOY_2` 1 (`JOY_9`, its default, 0) and fires |
+| `rumble` | `modern.ini` (vibration 1) | Load `kayit9.sav` (Kriz), stand still: `atilgan_ai` hits drop Enerji 59 → 52.6; `ff.log`: three uploads on consecutive frames, strong=weak 23638/24340/23638 (0.36–0.37 = 0.35 + damage/100), each played, then strength 0 after 250 ms, stop and erase |
+| `rumble` | `vibration-off.ini` (vibration 0) | Same damage, no FF event |
+| `rumble` | none (original) | Same damage, no FF event |
+| `original` | none | D-pad up (Up arrow) walks. Left stick half forward (LY −13000): `JOY_Ileri` 0.699, no movement; full forward: `JOY_Ileri` 1, walks within 3 frames (A6 `joy_force` scaling, fix 24; `GenelAyarlar.wdl:75`, `oyuncu2.wdl:781`). A = `JOY_1` aims; B = `JOY_2` fires (`key_enter`/`key_esc` 0, fix 17); `STM_Acik` stays 0. Y = `JOY_4` opens/closes the inventory, LB = `JOY_5` the map. No FF event (2026-10-10 rerun on `DISPLAY=:8`, PASS 27/27) |
+
+**Not live-tested:** physical pads and real rumble motors; PlayStation, Switch and other layouts (they rely on SDL's mapping database/heuristics; only the xpad identity was emulated); Bluetooth/wireless reconnects; two pads at once (a second device only fills raw slot 1, `JOY2_*`); the right stick, guide/paddle buttons and a remapped d-pad; pad navigation of the main/load menus (modern-mode `YukleMenu` joystick navigation is unit-tested only); Vulkan renderers with a pad; play with the default focus behaviour (runs used the background-events hint).
+
+## Ledger
+
+OpenGL on the RX 7900 XTX at 1280×720 windowed (`DISPLAY=:0`), plus headless. Vulkan raster (`--renderer vulkan --ray-tracing off`) and RT (`--renderer vulkan`) runs: `inzar_duma_fight` and `combat_demir_duma_gun` (`reverse/wave2/CombatFinish/vulkan-raster-rt-duma-captures.png`, same image content as OpenGL), and `world_cam1_padlock`, `bonus_new_game`, `world_save1_point` (all PASS on both; `reverse/wave2/WorldFinish/*-vulkan-*.png`, raster and RT captures show the same scenes, HUD, subtitles and cutscene framing). Images are in `reverse/wave2/GameplayQA/` unless noted.
+
+Stability (fix 13): two consecutive full CTest runs passed all 10 tests and all 23 scenarios. Every scenario had identical step frames in both runs except `new_game_start4` and `world_cam1_padlock`, whose `realtime on` movie sections are paced by the wall clock (a 1–2 frame shift). Details: `reverse/wave2/ScenarioStability/ctest-determinism.txt`.
+
+| Scenario | Character | Level | Result | Evidence |
+|---|---|---|---|---|
+| `menu_startup` | — | level0 menu | PASS (headless) | splash → main menu, cursor wrap |
+| `intro_skip` | Demir | level0 → Start4 | PASS (headless, 808 frames). Native convenience `Engine::skip_intro` (not in the original): Return during the startup logos (`K22.wdl Menu_AcilisEkrani`) reaches the main menu within 6 frames (unskipped: ~750) and the press does not reach the menu; Space ends the New Game intro panels (`YeniOyunBaslat`) and Return each Start4 movie (`vest.k22`, `veyo.k22`), where the original scripts only test `key_esc`. The looping main-menu background (`media_loop kn_arg.k22`) is excluded, so menu Return/Escape behave as before (`menu_startup`, `world_save3_exit` PASS) | — |
+| `new_game_start4` | Demir | Start4 | PASS (OpenGL, real time, audio device). New Game/Normal, subtitled intro (Escape skip), Start4 entry movie with subtitles and return to control, HP 100, pistol 14 rounds, walk | `newgame-intro-subtitled.png`, `newgame-start4-movie-then-control.png` |
+| `demir_level5_camera` | Demir | Level5 | PASS. Original load menu; walking through `level5_camkontrol` zones changes `lv5_camtip` 2→1→0 and the camera pose | `demir-level5-camera-change.png` |
+| `ebru_ev_load` | Ebru | Ev | PASS after fix 1 | `ebru-ev-loaded.png` |
+| `inzar_tnel24_load` | Inzar | Tnel24 | PASS (load, character action, mana 230) | — |
+| `kriz_enemy_ai` | Demir | Kriz | PASS. 5 `atilgan_ai` enemies; within 10 s the nearest closed from 860 to 690 units and player HP fell from 59 to 50 | `demir-kriz-enemies.png` |
+| `combat_demir_weapons` | Demir | Tnel66 | PASS. Weapons 1-7 chosen through the original inventory; pistol, shotgun, machine gun, Akrep and heavy gun fire (loaded count falls) and reload from the reserve (`S_Kursun_Sayisi`+`Kursun_Sayisi` conserved); grenade thrown, mine placed; S+Q kick | — |
+| `combat_ebru_magnum` | Ebru | Ebrudus | PASS. Magnum (8) via inventory, two shots, reload, kick | — |
+| `combat_kriz_aa_gun` | Demir | Kriz | PASS. Route to the AA gun, mount (D), aim and fire at `atilgan_ai`; at least one kill (`atilgan_sayisi`) | — |
+| `combat_kriz_game_over` | Demir | Kriz → level0 | PASS (headless and OpenGL). Standing still, `atilgan_ai` strikes drain Enerji (`player.skill1`) to 0, `d_olum_loop` sets `game_over_start`, fade → `gameover_panel` → `level0.wmb` main menu → load the same slot again (HP 59 restored) | `reverse/wave2/CombatFinish/kriz_game_over_*.png` |
+| `combat_demir_duma_gun` | Demir | Tnel66 → Tnel10 | PASS after fixes 6-7 (headless, OpenGL, Vulkan raster, Vulkan RT). The spawn point is random, so it closes in with `walk-to @n 300 path` first. Machine gun on the last `duma_yaratik`: hit reaction (skill21 `Yrt_Yaralan_M`), 43 → 9 rounds, `duma_Ol`, removed, `aktif_oldurme_sayisi` +1, `cadde_yara_adet[23]` 1 → 0 | `reverse/wave2/CombatFinish/demir-duma-*.png` |
+| `inzar_duma_fight` | Inzar | Tnel66 → Tnel10 | PASS after fixes 6-7 (headless, OpenGL, Vulkan raster, Vulkan RT). Spawn points are random, so it walks (`path`) toward the nearest duma first. A duma activates, runs in and hits Inzar (200 → 197.9), sword rounds re-aim every 300 frames (knock-backs), hits (reaction state 21), death (state 9), removal, counters, mana gain | `reverse/wave2/CombatFinish/inzar-duma-*.png` |
+| `inzar_spells` | Inzar | Tnel24 | PASS. Sword slash; spells 4, 6, 2 chosen through `KoruyucuMenu` and cast with Q; mana falls by `buyu_gereksinimi` | — |
+| `inzar_lain_boss` | Inzar | Kotukoru_d → Buyukes | PASS (headless; deterministic since fix 13). The intro movie is skipped. Lain closes in and hits. Sword combos, with D energy channelling (up to 600 frames) between rounds, drain Lain to 0. Then the death camera plays, `lain_sona_erdi` is set, and play moves to Buyukes as Demir. Lain's attack choices are `randomize()`+`random()` (`kotu_koruyucu.wdl:1373` and others). With the default seed 0 the fight ends at 19669 frames, the same in every run (two standalone runs and two full CTests). Seeds 1–4 also pass (17210, 21647, 21987, 22368 frames). A round in which Lain stays out of reach ends after 420 frames and the next round re-aims | `reverse/wave2/ScenarioStability/ctest-determinism.txt` |
+| 27-save sweep | all | 16 worlds | PASS after fix 1 (ad-hoc loop, same commands as `load-save`) | inventory table |
+| `world_start4_corpse_path` | Demir | Start4 | PASS after fix 2 (OpenGL with captures, and headless). Held Up from the spawn walks straight south between the corpses to y 367 | `reverse/wave2/GameplayWorld/start4-corpse-path-open.png` |
+| `world_save1_point` | Demir | kizic2 → Kizic → kizic2 | PASS after fixes 3 and 4 (headless). Load `kayit10.sav`; walk the LY_Kapi to Kizic (36) and back (37), two walked level transitions; walk onto the save icon; `save_tga` writes `kayit27.sav` and `kysd.sav` (`Aktif_SaveNo` 27→28, `aktif_kayit_sayisi` 8→9). The written `kayit27.sav` is byte-identical to the original Windows `kayit10.sav` except byte 1573 (the save counter, 8→9). The `kysd.sav` entry carries today's date (`09.10.26`) after fix 5 | `kizic2-save-spot.png` |
+| `world_save2_reload` | Demir | kizic2 | PASS. After a restart, `kysd.sav` gives `Aktif_SaveNo`/`SLG_KayitSayisi` 28; loading slot 27 through `YukleMenu` restores level 37, weapon 7, HP 76, pistol 14 rounds, counter 9, Normal; spawn at the save spot; no re-save | — |
+| `world_save3_exit` | — | menu | PASS. Main-menu Escape → EXIT → YES writes `ftz.k22` (0/0/10) and the process exits (`expect-exit`) | — |
+| `world_save4_restart` | — | menu | PASS. Restart reads `ftz.k22`: `toplam_oyun_sure` 8 → 10 minutes; `kysd.sav` still 28 | — |
+| `world_cam1_padlock` | Demir | cam1 → camtuvalet | PASS (headless, Vulkan raster, Vulkan RT). Load `kayit1.sav`. **Pickup**: energy item 5 behind the mosque (`NS_NesneSayisi` 10→11). **Locked door**: `LY_KilitliKapi` skill1 32 → "The door is locked.", `kapi_acikmi[32]`/`[49]`=2. **Movie**: walking in fires `video_camitaci_f` → `veca.k22` (Indeo5, 1007 frames at 25 fps, 40.28 s; MP3 decodes to 40.28 s). Measured in real time: decoded frame 283 at 11.285 s (expected 282/25 = 11.28), frame 963 at +27.205 s after 283 (expected 27.20), end at 40.279 s (40.28); subtitles visible inside `sub_cam_fx` windows (283-375, 375-427 with new text), hidden in the 599-604 gap, visible at 963; document 2 granted. **Padlocked door**: `kilit_camiwc_ctrl` "It is padlocked." (error 27, `kapi_acikmi[17]`=2) → item 12 through M → Nesneler → slot 6 → Kullan → `v_asmacami_basla` → in-engine `Video_Cam` cutscene (`camera` hidden, HUD off, `oyuncu_pasif` 1) → `v_asmacami_ok`=1, control back → the same D opens the door to camtuvalet (24) → second pickup (item 21, "A gate key.") | `reverse/wave2/WorldFinish/cam1-vulkan-raster-top-rt-bottom.png` |
+| `bonus_new_game` | Bonus gun | basla.wmb | PASS (headless, OpenGL, Vulkan raster, Vulkan RT). Mouse click left of the New Game rect (300,675) does nothing; inside (346,675) starts `Amenu_yenioyun_fx`; "Press any key" (`tek_loading_islem`) → Return; weapon menu click (260,70) → weapon 2 (minigun), `oyun_baslama_ok`. 1030 frames of play: D slides the gun along the rail (y 240 → 70), A back, mouse turns it (pan 0 → −8.6), held left mouse fires (`silahdaki_mermi_adeti[2]` 950 → 814) | `reverse/wave2/WorldFinish/bonus-opengl.png`, `bonus-vulkan-raster-top-rt-bottom.png` |
+| `inzar_lain_boss` (autosave) | Inzar → Demir | Buyukes | PASS (headless, in both full CTest runs after fix 13; 19669 frames). After the Lain fight, `buyukes_koruses` ends its Video_Cam scene with `OSN_OtoSave_izin`=1, and `otosave_fish` skill1 14 writes `kayit27.sav`/`kysd.sav` (`OSN_OtoSave_dizi[14]` 0→1, `Aktif_SaveNo` 27→28). Before fix 13, one CTest run stalled with Lain still alive after the last sword round (line 330 at frame 23299, `reverse/wave2/WorldFinish/ctest-inzar_lain_boss-stall.log`) | — |
+| `world_otosave_reload` | Demir | Buyukes | PASS (headless, in both full CTest runs, on the `inzar_lain_boss` tree). Restart of the same installation. The autosave slot 27 loads through `YukleMenu` into Buyukes as Demir with `lain_sona_erdi` 2 and `OSN_OtoSave_dizi[13]`/`[14]`=1, and it does not save again in 600 frames | — |
+| `world_kizic_kordinat` | Demir | kizic2 → Kizic | PASS (headless in both full CTests, 4130 frames each time; OpenGL with captures, also 4130 frames). Load `kayit10.sav`, which already carries item 52 (`NS_Nesneler[12]`) with `v_kapikriz_ok`/`BULKordinatOK` 0. Walk LY_Kapi 36 into Kizic and climb the spiral stairs (`path`) to the `kapi_kriz_ctrl` gate (z 328). Use item 52 through M → Nesneler → slot 12 → Kullan: `k_kizkapi_Tarama` sets `v_kapikriz_basla` 1, then the `video_kapikriz_d` Video_Cam cutscene, then `v_kapikriz_ok` 1. Climb the last flight (south side) to the z 496 floor; a D scan at the `NS_Bulmaca` point (BulmacaNo 5, (−232,−241,502)) opens `BULKordinatAc`. Enter ×3 (Sol), Right ×2, Enter (Asagi), Right, Enter (Sag): `KB_Durum` (−9,−6) → (−7,−10) → (−2,−9) = `KB_Hedef`, `BULKordinatOK` 1. Then `video_criptoal` plays and item 25 is granted (`NS_NesneSayisi` +1); control returns | `reverse/wave2/ScenarioStability/kizic_*.jpg` |
+| `world_item_combine` | Demir | cam1 | PASS (headless 1406 frames; OpenGL with captures). Load `kayit4.sav` (`NS_Nesneler[10]`=14, `[11]`=13; other saves with pairs: `kayit0` 1+2, `kayit10` 22+23). M → Nesneler → item → Birlestir → second item. A non-matching pair (6 and 5) leaves everything unchanged (`EM_Bolge` stays 5). 14+13 → 15 (`NS_Birlesim`, `Nesneler.wdl:402`) in slot 11, slot 10 cleared, then `EM_OrganizeNesneler` closes the gap: `NS_Nesneler[10]`=15, `NS_NesneSayisi` 12 → 11, kept after closing the inventory. The halves of the locket become the whole locket | `reverse/wave2/LevelSweep/item-combine-opengl.jpg` |
+| level sweep (`level_sweep`) | all | all 101 levels | PASS (headless all 101; OpenGL captures all 101; Vulkan RT captures 12) after fix 14. See Level sweep | `reverse/wave2/LevelSweep/` |
+
+### Bugs fixed
+
+1. **Ebru saves crashed** with `oyuncu2_ebru.wdl:70: model vertex index outside original source vertices`. `Silah_Ekle2` calls `vec_for_vertex(…, my, 169)` on `ebru_silah.mdl`, which has 6 vertices. Ghidra `004040d0 → 00449dc0`, mode 0 (`reverse/wave2/GameplayQA/K22.exe.00449dc0.c`), shows that A6 computes `(raw>>10)-1` and clamps it to `[0, vertices-1]` instead of failing. **CONFIRMED**. The fix applies this clamp to the native `vec_for_vertex` in the A6 profile (`engine.cpp worldModelBuiltin`). Regression checks: `check_engine` `vertex_index_consumers()` (asset-free) and `ebru_ev_load`.
+2. **Start4 corpses blocked the spawn path** because native used the raw MDL box as the entity's collision box. K22.exe `00435730` (ASM in `reverse/wave2/GameplayWorld/K22.exe.00435730.asm.txt`; called from `00430920` at birth, placement `004315d0`, and resource/SCALE changes) computes the A6 box differently. It SCALEs the MDL/sprite/HMP resource box, but not WMB. When neither NARROW nor FAT is set, it sets FAT if the XY size exceeds 6×`HULL_NARROWMAX.y`, and NARROW if the size is at least `HULL_NARROWMAX.y` (`ENABLE_POLYCOLLISION`≥2 sets both). Unless both flags are set, MDL and sprite XY boxes become a square from the averaged min/max corners, with any excess beyond ±16 halved, and WMB boxes become a cube. The legacy `ent_move` candidate path (`00452f90`/`004523f0`) uses that public box, as native already did. **CONFIRMED** from ASM. `ol_ask4` goes from x −1339..−1263 to −1330..−1277, so Demir's script box (min_x −11) passes at x −1346. Fix: `engine.cpp wBounds` (A6 only), used at `create_entity`, WMB placement and `ent_morph`. Regression: `check_engine --input-saves` `entity_bounds_consumers()` and `world_start4_corpse_path`. Ceiling: native does not recompute on later per-frame SCALE changes (`00432cb0`); marked `ponytail:`.
+3. **Placed entities sat too low**: WMB stores the resource bottom. K22.exe `004315d0` (ASM `004316be–004316e8`) sets the placed Z to Z − SCALE_Z·resource `min_z`. Native skipped this, so every centred model and sprite was sunk by half its height. As a result, every `save_tga` icon (k22_save.tga, 512×512 at scale 0.33–0.40) ended up about 130 quants below its authored save spot and could never trigger. With the fix, kizic2's icon is 48 quants from `LV_Kizic2_G00` and `save_tga` fires. **CONFIRMED** (ASM; also consistent across Level5, cam1, kizic2 and tnel66, whose original saves were written at these icons). Fix: `engine.cpp load_level` (A6 only). Regression: `world_save1_point`.
+4. *(harness)* `expect-exit`, plus multi-process `# continues:` sequences.
+5. **`sys_year/month/day/...` were never updated** (always 0), so the save-list labels showed `00.00.`. K22.exe `00414650` copies `localtime` into all eight `SYS_*` values on every main-loop pass, with DOW Monday=1..Sunday=7 and DOY 1-based. Fix: `Engine::tick`. Evidence: `kysd.sav` label `09.10.26`.
+
+6. **`vec_to_screen` always returned false for `camera`**, so every `duma_yaratik` stayed in its `if (vec_to_screen(loc_temp.x,camera)){break;}` wait loop (`duma_yara.wdl` action) and never fought. Native gated the result on the view VISIBLE flag and read the raw flag bits with fixed-point `integer()` (0xC000 → 48). K22.exe `00404020` → `0044ee20` (exported to `reverse/wave2/CombatFinish/`) tests only depth and the clamped view rectangle (`0044df20`) and never reads VISIBLE. **CONFIRMED**. Fix: the gate is removed (`engine.cpp` `vec_to_screen`). Regression: `check_engine` `screen_projection_consumers()` (visible, invisible, behind) and `inzar_duma_fight`.
+7. **MDL collision box used every animation frame.** The A6 MDL loader bounds each frame block separately (`00457d10`, `00457d70`) and `00458500` copies the FIRST frame's box into the resource (+0x38..+0x4c), which `00435730` and placement `004315d0` read. Native took the union of all frames: a duma got min_z −109 instead of −40, and `klasik_yercekimi` lifted it 69 quants into the air. **CONFIRMED**. Fix: `Model::resourceMin/resourceMax` (frame 0, `assets.cpp decode_model`) feed A6 `wBounds` and the placement Z for MDLs; `Model::min/max` (rendering) unchanged. Regression: `check_engine --input-saves` `entity_bounds_consumers()` (frame-0 box; later frames ignored) and both duma scenarios.
+8. *(previous combat pass)* **Legacy `trace` always rewrites YOU** (`004546f0` stores the hit entity or NULL to 006441dc even with IGNORE_YOU). Regression: `check_engine` A6 trace consumers.
+9. *(previous combat pass)* **`vec_*` on `my.skillN`** addresses skillN..N+2, not XYZ (`0043e390` entSkill/vecSkill). Regression: `check_engine` `skill_vector_consumers()` (Lain's `Kotukoru_DurusAcim`).
+10. *(previous combat pass)* **IF/WHILE condition is the result accumulator** (`00410a80` case 5): a function that falls off its end returns the last condition. Regression: `wdl_regression` (`wdl_semantics`).
+11. *(scenario)* `combat_kriz_game_over` asserted `oyn_yaralanma <= 0`. Death is decided on Enerji (`oyuncu2.wdl:778ff` `if(my.enerji<=0){goto(d_olum_loop);}`); `oyn_yaralanma` is only the copy made by `d_yaralan_go` and may still hold the last positive value (headless run) or ≤ 0 (OpenGL run). The scenario now asserts `player.skill1 <= 0`.
+12. *(harness, world pass)* `path` planning keyed only by XY could not use stacked floors, and its floor-level hull sweep stopped at every stair riser (kizic: 120 reachable cells, top z −136). Now: XY + 48-unit height band keys, entity goals checked in height, sweep raised 16 (kizic: the stairs to z 335 are planned and walked). Added `list near R`, `# mode: bonus` in `run.cmake`, and nearest-cell diagnostics. No engine defect was found in this pass: every new scenario passed on the unchanged engine.
+13. *(harness, stability pass)* **Scenario runs were not reproducible.** The original scripts call `randomize()` before almost every `random()` draw (Lain's `kotu_koruyucu.wdl` attack choices, duma/klasik AI, effects, music), and native `randomize` reseeded from `std::random_device`. Headless `Media` also timed voices and movies by the wall clock while `realtime off` frames ran faster than real time. So `inzar_lain_boss` finished in 18151–24468 frames across runs, and once it stalled (Lain alive after the last round, `reverse/wave2/WorldFinish/ctest-inzar_lain_boss-stall.log`). Now scenario mode seeds `random()` once (`seed N`, default 0), and `randomize` keeps that stream. Under `realtime off`, media time steps 1/60 s per frame (see Harness). Ordinary play is unchanged. Regression: `media_boundaries` (manual media clock) and repeated `gameplay_scenarios` runs with identical step frames.
+14. **Seytan_k (62) could not load**: `kabus22: Invalid decoded image dimensions`. Its WMB places the sprite strip `s_alev+61.tga` (61 frames, 18300×75), wider than the decoder bound (16384) and than a GPU texture. K22.exe `00459a90` (`reverse/decompiled/runtime/sky-normalize/K22.exe.00459a90.c`) parses `+N`, requires `width % N == 0` and creates N separate frame textures of width/N (`004599e0` per frame, source offset `frameWidth*i*bpp`). **CONFIRMED**. Fix: the decode bound is the renderer's 32768; `load_entity_asset` lays a strip wider than 16384 out as a grid of frame cells (uvScale 1/cols, 1/rows); the GL, Vulkan raster and RT shaders address frame f at cell (f mod cols, f div cols), which is the old offset for one-row strips. Regression: `check_engine --input-saves` `sprite_strip_consumers()` (18000-px strip → 2×2 grid; 12-px strip unchanged) and `level_sweep` row 62.
+15. *(harness, level pass)* `set GLOBAL[i] EXPR`, `$levelminz`/`$levelmaxz`, `tests/levels/` and CTest `level_sweep`. The first sweep's other failures were wrong rows, not engine defects: Tnel8/Tnel9/Tttg2/Ttn3/yereson/hapisane_dark place only `Oyuncu_Ebru` and Ev3 only `Oyuncu_Demir`, so the wrong character had no player (`Ornek_Yasin.wdl:3043 tttg2_araload` reads `player.x` while `player` is NULL); the character column now follows the WMB's player actions.
+16. **Modern controller: partial stick turn did nothing while standing.** `apply_modern_controller` passed the analog turn (0–1) as `JOY_Sag/Sol`, but the original in-place turn and the movement loop start only on `Key_Sol/Key_Sag==1` (`oyuncu2.wdl:781/1560/1593`); only the walking branch (`:820`) scales by the value. Live: standing with LX 0.5 at sensitivity 1 and 2 gave 0° in 60 frames; only full deflection turned. Fix (`native/controller.cpp`): with no forward/back input, turning is digital past half deflection (after deadzone and sensitivity), like forward; while walking it stays analog. Regression: `check_engine --input-saves` (standing 0.49 → none, 0.59 → full; walking analog) and the live `modern` case (standing 0.69 → −202°/60 frames).
+17. **Original controller mode: pad B did not fire.** Native aliased the pad's A/B to Enter/Esc in both modes (`engine.cpp core_gamepad_key`), but in original mode A and B are raw `JOY_1`/`JOY_2`, the shipped aim/fire (`GA_JTuslar`). Holding A to aim also held Enter, which reloads while aiming (`oyuncu2.wdl:2529`), so B never fired (live: `key_enter` 1, `Key_Ates` 1, ammo unchanged), and B also pressed Esc. Fix: A/B → Enter/Esc only in modern mode (defaults map them to the unused buttons 7/8); the d-pad stays the arrow keys in both modes. The launcher's controller note says so. Regression: `check_engine` key-state contracts and the live `original` case.
+18. *(reference harness, Wine)* **cam1 and kriz diverged because of the Wine driver, not the engine.** A loose-free debug copy of `oyuncu2.wdl` (a starter that `diag()`s TIME, player XYZ/pan/skill1 and keys every frame, packed into a size-identical private `K22.wrs`: A6 refuses a WRS of another size, content changes pass) ran on both sides. Per tick of TIME, run speed (~9.9 quants), turn rate (12.6°) and leg durations are equal (original 72 fps, TIME 0.223; native 60 fps, 0.268); with the original's pan forced natively, cam1's glide legs end within 0.6 quants. Causes: (a) every key hold reached the original ~1 frame long (calibration: N/60 s holds sampled N·1.2+0.75..1 frames; release-side X/Wine latency), so `press Right 5` turned 19.6° instead of 16.8°; (b) `wait-log <level>.wmb` fires when A6 starts loading, seconds before the level runs. Fixes in `tools/wine-reference/wineref.py`: one xdotool process per hold minus one 72 fps frame, `press` timed like the native press, `wait-log` searches after the previous match, and every case waits for `Physics` (load done). cam1 now turns in 5-frame multiples (1/12 s = 6 original frames): both sides end at (−548/−549, 1272), pan −100.9/−101.1, and show "The door is locked.". kriz: each atilgan wing contact costs 4·TIME·(OyunZorluk+1) on both sides; the first attack's tick, knock-back pan (107°) and damage matched an original run, but the original's attack time varies with `random()` (43–114 ticks across runs). Native energy "to 0 after firing" was the player's own mine (save `Aktif_Silah` 7 = Mayin; `bomba_tara` < 60 quants) set off by a knock-back. No native engine change.
+19. **WMB entity flags (legacy type-3 records) were remapped.** `assets.cpp` passed WMB6 object type 3 flags through an invented `old_flags` table (raw 0x200 PASSABLE → UNLIT, 0x1 FLAG1 → INVISIBLE, 0x40000 SHADOW → POLYGON, …). A6 `00459eb0` case 3 copies the flags dword verbatim into the same record slot that case 7 fills (REA `ev_c3ef2a5d908f692fd0cae3cc99d605d5de96250669fd90df4c9dbe098f269146`). Original evidence: a private debug `Yeni_Oyun_Deger.wdl` (starter that `diag()`s every entity's file, XYZ, angles, UNLIT/BRIGHT/LIGHT/INVISIBLE/PASSABLE/SHADOW, AMBIENT, ALBEDO, FLOOR_DIST and default MATERIAL) packed into a size-identical private `K22.wrs`, run on level5 under Wine: for all action-less entities the verbatim flags match the original (75/75 of the 125 compared; `old_flags` matched 4). **CONFIRMED**. Effect: level5 props (desks, chairs, keyboards, posters) were UNLIT, non-passable and some invisible. The wooden chair in front of the whiteboard that only the original showed is `FFR9.MDL` at (206.8,−191.9,−67.5) (screen position projected from the original's logged camera): its record flags 0x40201 (FLAG1|PASSABLE|SHADOW, the original logs PASSABLE 1, SHADOW 1, INVISIBLE 0) became 0x4020100 (INVISIBLE|UNLIT|POLYGON, native spawn dump). It and the three `FFR10.MDL` posters are now drawn. Regression: `check_assets` entity fixture asserts raw flags 1 stay 1 for both record types.
+20. **Entities without MATERIAL used a non-original lighting path.** A6 `00430920`/`0044f970` → `0042fa20` binds a persistent default MATERIAL when ENTITY.MATERIAL (+0x228) is NULL: METAL → `mat_metal`, UNLIT → `mat_unlit`, else by resource HMP → `mat_terrain`, sprite → `mat_sprite`, MDL → `mat_model` (WMB entities none). The built-ins come from `00415ad0` (`mat_model`: ambient 200, diffuse 255, albedo 50; `mat_unlit`: emissive 128 only; …). Ordinary hardware MDL draws (`0044ad00` → `00442770` → `0043ee40`) then use D3D fixed-function lighting with that material, `D3DRS_AMBIENT` = entity+view AMBIENT plus the sampled floor light, the albedo-scaled sun and MODULATE2X. Native drew material-less entities with a fixed 127/255 ambient and full sun, so the floor-light sample was ignored (level5: Demir sample 101 was too dark, lockers sample 25 too bright). **CONFIRMED** (static; pixel effect measured below). Fix: `engine.cpp` registers the built-ins (campaign only) and assigns the default in the frame build; the existing source-ported explicit-material path (GL, Vulkan raster and RT share it) now lights them. Regression: `check_engine` (drawn MDL keeps `mat_model`; a cleared MATERIAL is rebound). SSIM vs original (gamma 30), before → after: level5 loaded 0.825 → 0.833, walk2 0.874 → 0.887, kriz loaded 0.579 → 0.767, kriz fire 0.650 → 0.752, ev 0.679 → 0.736, tnel24 0.681 → 0.683, Start4 0.758 → 0.751 (montages in private `reverse/wine-reference/parity-lighting/`).
+21. **The A6 sun lit models from below.** With fix 20 every campaign MDL takes the explicit-material path, whose directional light is a D3D-style travel direction (`-d` is the toward-light vector in all GL/Vulkan/RT shaders). `make_frame` stored the unit SUN_ANGLE vector itself, so the sun shone upward: in level5 Demir's shirt (upward/camera-facing) measured 58.6 against the original's 79.4 (mean R, gamma 30), while his legs matched (40.6 vs 39.5). A6 `00437800` (REA `ev_846e2c5191b7564d3510cabfd506edaaf61e7a845f4e7feed4e0d5b335d7011f`) builds `006c8d6c = 006c8e64 − unit(SUN_ANGLE)` from `004395c0(pan,tilt)`; `006c8e64` is a zero vector that no instruction writes (Ghidra reference scan), and `00438470` (`ev_8a6906e9bfc103e74ea4173983d3ce983c8868749c5219d9098b6862e0ea454d`) copies it into the directional `D3DLIGHT9.Direction` (A6 x,y,z → D3D x,z,y) with diffuse = specular = SUN_LIGHT/1024·0.02; `00437630` (`ev_beccbe88c3bb9efce9f4f43faaaa3a84b2816f130477a40f89ba8f13968cacbf`) scales it by clamp((MATERIAL.ALBEDO·2>>10 − 100 + floor sample)/255) and `0043ee40` (`ev_5d63209d2b1901349bd2510d51f5e9f8768d82982c2ae4cf1c28120704aa447f`) sets stage 0 MODULATE2X. **CONFIRMED** (static + Wine measurement). Fix: the campaign sun slot stores −unit(SUN_ANGLE) (`engine.cpp make_frame`; Bonus/A7 sign not recovered, unchanged). Shared by GL, Vulkan raster and RT through the frame light list. After: shirt 79.1 vs 79.4, legs 39.5 vs 39.5, lockers 12.0 vs 12.0, board 14.0 vs 13.9, left lockers 20.2 vs 20.3; whole-frame SSIM of `level5_loaded` 0.825 (before fixes 19–20) → 0.833 → 0.862. Regression: `check_engine` sun-slot assertion (SUN_ANGLE pan 0, tilt 60 → direction (−0.5, 0, −0.866) in the campaign).
+22. **32-bit TGA sprites without TRANSPARENT drew opaque.** The Start4 chain-link fence behind the player (`telbasla.tga`, three `sabit_tga` sprites; 32-bit RLE TGA with an 8-bit alpha channel) hid both vans: native only discarded texels with alpha < 0.01, so the mip-filtered fence became a grey sheet with dark dots, while the original shows thin wires with the vans behind (Wine capture `start4_control`). A6 `0040e2b0` sets BMAP flag 0x100 for 32-bit TGA, and the VIEW-sprite state `00440e90` (REA `ev_1b8eee2c77a2273c206b248c343beb864f008f3919c1b269952a36f5d1abf9da`) enables SRCALPHA/INVSRCALPHA blending for a 0x100 bitmap without TRANSPARENT. **CONFIRMED** for VIEW sprites (static) and for world sprites by the Wine capture. Which D3D state the world-sprite draw `00443350` (`ev_750567c7cd6d8bbb028586e1452e35c0bc8a1742bce5e591276d801fbff94177`) uses for such a bitmap is **UNKNOWN** statically (it blends only for FLARE, TRANSPARENT or view opacity < 255 and disables the alpha test for 0x100 textures). Fix: `engine.cpp make_frame` marks campaign sprites with an `a6AlphaFormat` bitmap translucent at opacity 1, shared by GL, Vulkan raster and RT. Regression: `check_engine` (32-bit sprite translucent at alpha 1, 24-bit not). Start4 van mean 25.0 → 45.8 (original 47.1); `start4_control` SSIM (HUD masked) 0.7783 → 0.7901.
+23. **BRIGHT alone drew additively.** Level `ev`'s wall lamp (`lalam.mdl`, record flags 0x200200 = PASSABLE|BRIGHT) lost its dark cap and base natively because `blended()`/the Vulkan raster queue treat `additive` as translucent. In the original, models (`0043ee40`, `ev_5d63209d2b1901349bd2510d51f5e9f8768d82982c2ae4cf1c28120704aa447f`) and world sprites (`00443350`) enable blending only for FLARE (0x8000), TRANSPARENT (0x400) or a view opacity below 255; the additive destination (D3DBLEND_ONE in `0043b040`, `ev_a15798587dc8a6593d2d8ce469e9207eef08099053dc52ab8fd261312a16085d`) is only reachable inside that blended state, otherwise ALPHABLENDENABLE is 0. **CONFIRMED** (static + Wine capture: the lamp is opaque). Fix: in the campaign `make_frame` clears `additive` unless the entity is TRANSPARENT or FLARE (Bonus unchanged). Regression: `check_engine` (BRIGHT alone opaque, BRIGHT+TRANSPARENT additive).
+24. **Original controller mode: the analog stick never walked.** Native `joy_force` was the stick ×100, so `Joy_Takip`'s `JOY_Ileri = joy_force.y/2` was 50 and never 1, and `Key_Ileri==1` (`oyuncu2.wdl:781`) never held. A6 `00422000` (REA `ev_f91758961be5402cfccd9f4a5eff19d358738d56a3a07a9dd4273842401e3008`; keyword table `JOY_FORCE` → `0x665d98`) computes `JOY_RAW`/`JOY_ROT` as −255…255 and `JOY_FORCE.x/y` = trunc(dz32(raw)·`JOY_SENSE`·0.02f), with y negated, clamped to ±2·`JOY_SENSE` and z never written. A full stick therefore gives 2, and `JOY_Ileri` = 1 walks. **CONFIRMED** (static). Fix: `engine.cpp update_input` ports this scaling (modern mode unchanged). Regression: `check_engine --input-saves` (exact values, saturation, `JOY_SENSE` 0.5) and the live `original` case: half stick gives `JOY_Ileri` 0.699 and no move, full stick walks in 3 frames.
+
+### Observations (not changed)
+
+- cam1 yellow leaf decals: the `gazel1.tga` floor sprites (32-bit TGA, FLARE|OVERLAY, tilt 90, no MATERIAL) that earlier builds drew bright yellow vanished with fix 20 (default `mat_sprite`), not fixes 22–23. Variant builds that reverted 22/23 still hide them; reverting the sprite material brings them back. The Wine `cam1_loaded` shows no leaves at those spots. On the `k22_save.tga` circle, current native is within about 1 level of the original's mean RGB (25.1/24.8/20.2 against 25.3/25.1/20.4; without the material, R 27.4). The HUD heart is solid red in the original too. Not a regression; `check_engine` pins the decal case (blended, FLARE/OVERLAY kept, `mat_sprite` bound). `list near` now also logs TILT/ROLL, render flags, ALPHA, AMBIENT and FLOOR_DIST.
+- Start4 corpse blocking: resolved by fix 2 (original A6 box shaping, not a script or path change).
+- After `load-save`, `save_tga` in the loaded level does not save, because `loc_saveok=oyun_ilk_basladi` is 1 right after a load (`YukleMenu.wdl:367`). It works after any later level transition (`oyun_ilk_basladi` goes 1→2→0, `LevelYonetim.wdl:1034`, `Envantermenu.wdl:311-323`). The `my.z`/`player.x` comparison at `:377` is an original typo; with fix 3 the 3D distance stays under 60 at the authored save spots.
+- Start4 is not a dead end at (−481,49): `list near` shows the doorway closed by the static `kapko.MDL` (no action, not PASSABLE, NARROW box −500..−468 × −13..19). The topal soldier (`video_topal_t`, trigger `player.y<-323`) stands beside the LY_Kapi to Start3 (−486,−463), so it is met on the way back from Start3 (the replay-ledger route), not through this doorway.
+- Kizic (36) spiral stairs: with the step-up sweep the planner climbs from the kizic2 landing (z −188) to the `kapi_kriz_ctrl` door at z 328 and the player walks it (z 335). The gate above stays shut until item 52 is used (`world_kizic_kordinat`). On the last flight (z 339 → 496), the player's hull stops mid-stairs at about (−215,−558,396) when walking up the middle at y −567, but passes along the south side (y −578). Whether the original A6 stops there too was not checked. No blocking entity is within 400 units (`list near`), so the stop comes from level geometry or the step-up.
+- `kilit_kriz_ctrl` in kizicYOL (32) is a second padlocked door opened with item 12 (`v_asmakriz_*`, same pattern as cam1). Kriz (`kayit9.sav`) → item 52 pickup (−527,809) → LY_Kapi 32 → kizicYOL was walked under the harness (HP 59 → about 52 from `atilgan_ai`), but the run is not deterministic (enemy knock-backs) and was not turned into a scenario.
+- Many `LV_*_Acikmi` functions read `harita_verileri_N[...]` with the map cursor left by the previous level's `Giris` (for example `LV_Ttn3.wdl:38`). Entered straight from an unrelated save level, Ttn3 and hapisane_dark indexed past the array (74 of 28/49) and native stopped with `array index … out of bounds`; A6 does no WDL bounds check. Through a real neighbour (the sweep's two hops) the index is in range, so play does not reach it; native's bounds error was left unchanged.
+- Combat blood bursts (massotsagoda, solustoda, bosskoli): resolved by the legacy particle size fix. `solduma_blood` etc. are legacy `emit` particles (`my_size=300`, ×1.03 per tick, `blood22_` = `korublood.bmp`). Native drew `my_size` as 300 quants, so the bursts covered most of the screen as flat dark-red quads. A6 `00443950` draws emit() SIZE in screen pixels: `(32768/depth·SIZE)>>shift`, with `shift = 14 − trunc((W−1)/320 + .5)` (`0043fc10`). effect() SIZE is perspective quants (`CONTRACT.txt` §43). Native converts emit() SIZE in the frame build with the selected video mode's width (the 1024 tier under native display) and the camera ARC: 300 at 1024×768 and ARC 80 is about 7.9 quants. `korublood.bmp` is a 4×4 24-bit RGB bitmap with black corners and no alpha channel or colour key; FLARE brightness alpha draws it as a soft round splat. Before/after captures in OpenGL and Vulkan RT (level-sweep entries, 150–600 frames after control): `reverse/wave2/ParticleSize/`. Regression check: `check_engine --input-saves`.
+- Right after `load-save 1` (Cami), holding aim did not raise the weapon: with keyboard S held (headless) `Key_SilahKaldir` was 1 but `silah_kaldir == 1 && player.skill32 >= 100` was not reached in 600 frames (`player.skill41` 100, `frame` 359.9 → 426). After a short walk the same hold raises it in 15 frames (live pad runs). Not investigated; the live `remap` case walks first.
+
+### Not reached or not established
+
+These are honest gaps.
+
+- `atilgan_ai` despawn: it respawns until `atilgan_sayisi` reaches 15 (`atilgan_yara.wdl:620-633`); only single kills were exercised. Handheld firearms do not damage it. Firearm damage to `babayaro`/`zipleyen`/`klasik` enemies was not exercised (Tnel12's dumas sit behind the `video_tnel12kol_b1` blocker until its lever is pulled from the far side).
+- Other `BUL_*` puzzles: only the coordinate puzzle was run (`world_kizic_kordinat`). Every other `BUL*OK` is already 1 in the saves that reach those levels (`kayit26.sav`: Saat, Salter, Renkler, Tahta, Board, Kordinat all 1). The Buyukes ritual (`v_bicakal_*`, `v_kagityak_*`) is already complete in both `kayit26.sav` and the post-Lain autosave. The story flags exercised are item- or puzzle-driven: `v_asmacami_ok` (cam1), `v_camitaci_oldumu`, `v_kapikriz_ok` and `BULKordinatOK` (kizic), and `OSN_OtoSave_dizi[14]`.
+- A locked `LY_KilitliKapi` that later unlocks: no script ever unlocks one. `LY_KilitTarama` (`LevelYonetim.wdl:1131`) only reports "locked" and marks `kapi_acikmi`. The locked → key → unlocked sequence was exercised on `kilit_camiwc_ctrl` instead (`world_cam1_padlock`).
+- The Start4 `video_topal_t` movie was not measured (route above). The `video_camitaci_f` movie was measured instead.
+- Spray7 New Game route.
+- English subtitle strings: the run showed English subtitle text (for example "All I have left is a picture of her.") over `veca.k22`. Timing was checked against the frame windows of `sub_cam_fx`; the text itself was not compared with the original English data.
+- Bonus: score, enemy kills, Ebru's protection and game over were not asserted (`skor_oyunici_puan` stayed 0 over 1030 frames of fire at random spawns).
+
+## Reference comparison (original under Wine)
+
+`tests/reference/*.k22s` are ordinary scenarios that `tools/wine-reference/wineref.py run` also replays on the unmodified ISO `K22.exe` under Wine (same keys; `#wine:` lines give the original's timing, anchored on the A6 log's `1st frame` and `Level(<wmb>)` lines; method in [REVERSE_ENGINEERING](REVERSE_ENGINEERING.md#dynamic-analysis-original-under-wine)). Native side: `--display authored --renderer opengl`, `realtime on`, 1024×768, private XDG tree with the original saves imported.
+
+**CTest.** Configure with `-DK22_GAME_DATA`, `-DK22_ORIGINAL_SAVES` and `-DK22_REFERENCE_DIR=<reference set>` (here the private `reverse/wine-reference/set/`, Wine pass A of 2026-10-09, 28 PNGs + `steps.log`) to register `reference_comparison`: `compare.py --run` replays the seven cases natively (needs `DISPLAY`), applies the original's missing `RenkAyar.dll` gamma to the reference (`--ref-gamma 30`), and checks every image against `tests/reference/thresholds.tsv` (per-image minimum SSIM, optional crop, mask rectangles; the file header gives the justification). Side-by-sides (original | native | ×4 difference) go to `<build>/reference-comparison/pairs/`.
+
+**Noise.** Native in-game captures of consecutive runs differ by ≤ 0.001 SSIM. Original-side noise was measured with a second Wine pass (B) and the earlier run of each case. Menus and the difficulty screen loop the `kn_arg.k22` movie behind translucent panels and its phase follows the wall clock on both sides, so only the logo region is compared; movie frames are a gross check only.
+
+Results (2026-10-09, RX 7900 XTX, OpenGL; SSIM from `ffmpeg ssim`, RGB, with the thresholds file's crop/masks):
+
+| Case | Image | Native SSIM | Original noise (A–B / A–earlier) | Min | Finding |
+|---|---|---|---|---|---|
+| menus | `logo_fip`, `logo_sonisik` | 1.000 | 1.000 / 1.000 | 0.99 | identical, timing matches (ORIGINAL_BEHAVIOR §1) |
+| menus | `main_menu`, `options`, `load_menu`, `exit_confirm` (logo crop) | 0.47–0.58 (0.72–0.85 in another run) | 0.73–0.84 | 0.40–0.45 | layout, item text and save rows identical; difference is the movie phase |
+| level5 | `loaded` / `pause` (HUD, fan masked) | 0.884 / 0.938 | 0.995 / 0.98 | 0.85 / 0.90 | Demir, lockers, whiteboard within 1–2% mean; chair present; one `cino_yaratik` sits on a `randomize()`d waypoint (native only, at load) |
+| level5 | `inventory` / `map` | 0.907 / 0.966 | 1.000 / 1.000 | 0.87 / 0.93 | same layout; game view behind differs slightly |
+| level5 | `walk1` / `walk2` / `walk3` | 0.859 / 0.881 / 0.795 | 0.96 / 0.98 / 0.96 | 0.82 / 0.85 / 0.76 | same camera zones; walked distance differs a little with key timing |
+| kriz | `loaded` / `pause` / `aim` / `fire` | 0.596 / 0.701 / 0.745 / 0.744 | 0.99/0.66 · 0.99/0.62 · 0.97/0.65 · 0.97/0.85 | 0.56 / 0.67 / 0.71 / 0.71 | AI timing (`random()` waypoints) moves Demir to another pose/position; house, pier, lamps match |
+| kriz | `inventory` / `map` | 0.905 / 0.960 | 1.000 / 1.000 | 0.87 / 0.93 | same |
+| cam1 | `loaded` / `locked_door` | 0.775 / 0.555 | 0.97 / 0.73 | 0.74 / 0.52 | lighting and framing match; texture detail differs; locked-door frame is timing-noisy on the original too |
+| ev | `loaded` | 0.744 | 0.999 / 0.998 | 0.71 | lighting matches (Ebru); texture detail differs; BRIGHT lamp fixed (fix 23) |
+| tnel24 | `loaded` | 0.691 | 1.000 / 0.999 | 0.66 | lighting matches (Inzar); texture detail differs |
+| newgame | `difficulty` (logo crop) / `intro_panels` | 0.523 / 1.000 | 0.95 / 1.00 | 0.45 / 0.99 | movie phase / identical |
+| newgame | `movie_vest` / `movie_veyo` | 0.633 / 0.528 | – / 0.56–0.77 | 0.40 | a decoded movie frame at a wall-clock time; gross check |
+| newgame | `start4_control` (HUD masked) | 0.790 | – / 0.994 | 0.76 | Demir within 1.5%; fence/vans fixed (fix 22) |
+
+Before → after the lighting/flag fixes 19–23 (same reference, crops in 1024×768): level5 Demir 0.726 → 0.848, right lockers 0.565 → 0.903, whiteboard 0.740 → 0.902, whole `level5_loaded` 0.849 → 0.884; Start4 Demir 0.424 → 0.653, vans 0.494 → 0.619, whole 0.759 → 0.790; ev 0.681 → 0.744; tnel24 0.687 → 0.691. kriz is not comparable (its scenario timing changed between the two runs).
+
+Remaining gap: in static scenes (ev, tnel24, cam1) the whole-frame SSIM stays at 0.69–0.77 against original noise ≥ 0.97 although lighting, geometry and models match by inspection; the difference images are high-frequency texture detail (texture filtering/mip selection under wined3d versus native). Not investigated further ([KNOWN_ISSUES](KNOWN_ISSUES.md)).
+
+Evidence (private, not in Git): `reverse/wine-reference/parity-finish/` holds Wine pass B (`passB/`), the noise table (`orig-noise.txt`: set vs pass B vs earlier run), the native run log (`nat3.txt`), the before/after crop table and the Start4 fence / `ev` lamp / level5 chair side-by-sides.

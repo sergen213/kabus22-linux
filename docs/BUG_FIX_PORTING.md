@@ -1,0 +1,96 @@
+# Community patch fixes and their native status
+
+Inventory of every behavioural change in community patch v1.8.5 relative to the ISO edition, with cause, native status and test status. Sources: patch `readme.txt` (changelog: "General improvements", FPS camera for Demir/Ebru, reworked DLL extensions, Polish and Russian translations; commands F1/F5/F6/F7), ModDB file pages (1.8.3 2023-10-12, 1.8.5 2026-02-07/updated 2026-04-27 for "incorrect subtitle synchronization … new languages"), and script/binary diffs.
+
+Labels: **CONFIRMED** / **HIGH CONFIDENCE** / **HYPOTHESIS** / **UNKNOWN**. Related: [COMMUNITY_PATCH_ANALYSIS](COMMUNITY_PATCH_ANALYSIS.md) · [WIDESCREEN_IMPLEMENTATION](WIDESCREEN_IMPLEMENTATION.md) · [PATCH_BINARY_DIFF](PATCH_BINARY_DIFF.md) · [ACKNEX_A631](ACKNEX_A631.md) · [GAMEPLAY_SYSTEMS](GAMEPLAY_SYSTEMS.md) · [CAMERA_SYSTEM](CAMERA_SYSTEM.md).
+
+Diff references are private unified diffs `reverse/community/diffs/<member>.diff` (ISO `K22.wrs` vs patch `K22Widescreen.wrs`); line statistics in `reverse/community/reports/wrs-diff-original-vs-patch1.8.5.tsv`. Proprietary script text is not reproduced here.
+
+"Native runs patch scripts" means: when the user's game directory contains `K22Widescreen.wrs`, `native/main.cpp` selects `K22Widescreen.wdl` and the patch's own script logic executes on the native engine (DLL services emulated, [ACKNEX_A631](ACKNEX_A631.md) §4). For the ISO-only installation the native engine runs the original scripts, plus the native display model of [WIDESCREEN_IMPLEMENTATION](WIDESCREEN_IMPLEMENTATION.md) §2.
+
+## 1. Display and layout
+
+| # | Original problem | Patched behaviour | Diff | Cause | Native status | Test status |
+|---|---|---|---|---|---|---|
+| D1 | Only 640×480…1600×1200 presets (`video_switch` modes 6–10); executable cap 1920×1200 | any size ≥ 1280×720 from `K22.ini`/desktop, cap 3840×2400 | `K22Widescreen.wdl` `dbg_screen_reset(0)`; exe `.data 0x627ab8` | fixed 4:3 resolution table | handled: `--resolution`/borderless desktop, 1280×720…16384² (`Engine::configure_display`) | 15 runs, [WIDESCREEN_IMPLEMENTATION](WIDESCREEN_IMPLEMENTATION.md) §3 — CONFIRMED |
+| D2 | Graphics menu resolution item meaningless at custom sizes | resolution row removed; apply uses `video_set(screen_x, screen_y, …)` | `GrafikMenu.wdl.diff` | menu built for preset list | native shows the original row with the live size label (`GMP_CozunurlukA` text, `native/engine.cpp:2792`) | code read only — HIGH CONFIDENCE |
+| D3 | Menu background `kan_640`/`kan_1024` stretched by a fixed table | new `kan_1366.tga` scaled (W/1366, H/768) | `Kabusdismenu.wdl.diff` | 4:3 art | `Fill` role scales original art to the window; no patch art shipped. Because `GA_Cozunurluk` is pinned to 0 the **640-tier** `kan_640.tga` is chosen even at 4K (ISO also ships `kan_1024.tga`) | captures CONFIRMED; tier choice HIGH CONFIDENCE (`prepare_display` sets `GA_Cozunurluk`=0, original `Kabusdismenu.wdl:68-158`) |
+| D4 | Main-menu eye animation only at ≤ 800×600 | animation removed | `Kabusdismenu.wdl.diff` | 640-only frames | eyes kept, positioned on the 640×480 basis (`EyeLeft/EyeRight` roles) | captures: eyes sit in the sockets at all tested sizes — CONFIRMED |
+| D5 | Highlight frame start bounds hard-coded `CER_Baslat(0,0,1024,768)` | current resolution | `Kabusdismenu.wdl.diff` | 1024×768 assumption | `Cer_*` re-anchoring in `prepare_display`; main-menu frame asserted in `native/check_engine.cpp:1573-1575` | CONFIRMED (unit) |
+| D6 | Exit-confirmation frame bottom = absolute `480·sy − 16` | `CMP_Soru.pos_y + 480·sy`, `DM_AltPay = 0` | `CikisMenu.wdl.diff` | assumes the 480-line table | **missing**: native feeds H/720, frame renders as an empty box above the question | captured `reverse/community/aspect/exitmenu-2300-xvfb-*.png` — CONFIRMED defect, fix proposal in [COMMUNITY_PATCH_ANALYSIS](COMMUNITY_PATCH_ANALYSIS.md) §7.1 |
+| D7 | Credits text box height `290·sy` | fixed 290 | `CreditsMenu.wdl.diff` | text box scaled twice | handled (`Credit` role sets `size_y` 290) | code — CONFIRMED |
+| D8 | Subtitle Y = H − sy·30/36 | H − H/16 | `LevelYonetim`, `boss` diffs | scale-relative offset | handled (`VST_AltText` Y = H·15/16) | code — CONFIRMED |
+| D9 | Inventory/pause/document panels used the menu scale | 640×480 basis (W/640, H/480) | `Envantermenu`, `Smartmenu`, `EnvanterMenuImage` diffs | shared scale family | `Gameplay`/`Document`/`InventoryLabel` roles (gx, gy) | code — CONFIRMED; no gameplay capture here |
+| D10 | Cinematic bars scaled W/600, H/440 | W/640, H/480 | `cinematic.wdl.diff` | overscan factors | `Bar` role (gx, gy) — patch values | code — CONFIRMED |
+| D11 | Boss health bar on `GA_ScaleOranlari2` | W/640, H/480, centred, +218·gy | `kotu_koruyucu.wdl.diff` | 4:3 table | `Boss`/`BossEnergy` roles | code — CONFIRMED |
+| D12 | Level/map fade panels sized for a small bitmap | 640×480 `LY_Fade.bmp`, scaled W/640, H/480 | `LevelYonetim`, `BUL_Kordinat`, `cinematic` diffs | tiny fade bitmap × fixed scale | `Fill` role (`LYP_Fade`, `KBP_Fade`) | code — CONFIRMED |
+| D13 | Loading/intro panels on 4:3 table | W/1024·H/768 (loading), W/640·H/480 (intro titles) | `YeniMenu.wdl.diff` | 4:3 table | `loading_pn` fill, `IntroTitle` centred (gx, gy); 640-tier loading image selected (as D3) | code — CONFIRMED |
+| D14 | Weapon-preview view entity cut off at wide aspect | Y −70, Z −37.5 (−52 fullscreen; crate −30/−40) | `silah`, `cinematic` diffs | Vert- projection leaves less vertical room | handled with the same values (`native/engine.cpp:2723`) | code — CONFIRMED |
+| D15 | Blood-burst particles (`my_size=300`, growing ×1.04/tick) | size 0 → bursts no longer visible | `efect2` + 10 enemy diffs; `K22Widescreen.wdl:690` | A6 `00443950` draws emit() SIZE in screen pixels, `(32768/depth·SIZE)>>(14−trunc((W−1)/320+.5))`, so the bursts grow with resolution (`CONTRACT.txt` §43); the patch abandoned this resolution formula | intentionally **not** ported: original scripts keep 300. Native converts emit() SIZE with the A6 formula at the selected video mode (1024 tier under native display) | CONFIRMED (Ghidra; captures `reverse/wave2/ParticleSize/`; `check_engine --input-saves`) |
+| D16 | Text scale table | `GA_FontOranlari` = W/1280, H/720 | `K22Widescreen.wdl` | 4:3 table | handled (`displayFont_` = mx, my); bitmap `Font0` upscaled (patch also uses index 0) | CONFIRMED (code, `CONTRACT.txt` §41) |
+
+## 2. Gameplay, input and robustness
+
+| # | Original problem | Patched behaviour | Diff | Cause | Native status | Test status |
+|---|---|---|---|---|---|---|
+| G1 | Pause ("smart") menu: holding fire re-assigns the Enter action every frame while held | assigns once, then waits for release | `Smartmenu.wdl.diff` | assignment inside the wait loop | original script behaviour reproduced (faithful); patch fix runs only with patch scripts | not tested — HIGH CONFIDENCE (code) |
+| G2 | Smart-menu image index stride `GA_Dil*5` vs `*4` elsewhere | `DD_Dil*4` | `Smartmenu.wdl.diff` | typo | latent in the original: `GA_Dil` is never assigned (always 0), so no visible effect | CONFIRMED (no `GA_Dil=` writer in ISO scripts) |
+| G3 | Load menu keyboard-only | joystick buttons/axes mirror Enter/Esc/Up/Down | `YukleMenu.wdl.diff` | missing input | not ported; candidate for the controller mapping work | CONFIRMED (gap) |
+| G4 | Saves beside `K22.exe` | `_data\saves\` (`kayit*.sav`, `kysd.sav`; save-name buffer 20 → 40) | `YukleMenu`, `Yeni_Oyun_Deger` diffs | layout choice | native keeps saves in its private save root; `native/saves.cpp` imports both layouts (original beside the exe, patch `_data/saves`) | `native/check_engine.cpp:1792-1796` — CONFIRMED |
+| G5 | Engine refuses modified scripts/archives; executable self-check | three integrity checks bypassed | exe `.text` | DRM/protection | not applicable (native has no such checks) | CONFIRMED (code) |
+| G6 | 32-bit address space ("E1004 Not Enough Memory", author's ModDB reply) | `K22_4GB.exe` (LAA flag) | exe header | 2 GiB user space | not applicable (64-bit process) | CONFIRMED |
+| G7 | Graphics menu re-applies modes through `video_switch` index | `video_set` with current size | `GrafikMenu.wdl.diff` | preset index | native `video_switch` limited to modes 6–10 for original authored mode (`native/engine.cpp:1221`); native display mode keeps the chosen size | CONFIRMED (code) |
+| G8 | — (new) F1 debug overlay, F6 all weapons, F7 full health/mana | `k22_dbg.wdl` | new file | cheats/debug | run only with patch scripts | not tested — UNKNOWN at runtime |
+| G9 | — (new) Discord Rich Presence | `discord.wdl` + `kabus_dll.dll` | new | — | native IPC client | `native/check_engine.cpp` (service) — CONFIRMED |
+
+## 3. First-person ("FPS") camera for Demir and Ebru
+
+Implementation (patch `cam.wdl`, `GenelAyarlar.wdl`; all **CONFIRMED** from script text):
+
+- `STARTER fps_camera_control` runs every frame. Active only in a loaded level (`LY_AktifLevelID != 0`), when a player is controllable and `freeze_mode == 0`.
+- **F5** toggles global `fps_cam_enabled`. For Inzar (`Player_Koruyucu`) it shows a fixed English subtitle "FPS Camera feature only for the demir and ebru characters" and does not toggle; switching to Inzar forces it off.
+- On enable: `camera.arc = 70`; base distance/height values are set.
+- Per frame while enabled: the camera is placed `dist_total` quants behind the player along `player.pan` (`dist_planar = cos(tilt_3rd)·dist_total`) at height `yuksek` (25–35 quants): Demir idle 2/35, walking 1/30; Ebru idle 2/30, walking 0/25; aiming 3/25 with `tilt = −5`; running forward −8/25 (camera moves 8 quants *ahead* of the origin). Tilt is clamped per state (−45…40 idle, −30…40 walking, −25…40 running). Mouse X turns `player.pan` (8·`mouse_force.x`·`time`), mouse Y adds to `camera.tilt`; `validate_view()`; the existing bomb-shake offsets still apply.
+- Every legacy third-person/cutscene camera writer in `cam.wdl` is wrapped in `fps_cam_enabled == 0` guards (114 occurrences), so cutscene cameras keep working when it is off.
+- The player model is not hidden and no first-person weapon model is used, so it is a close over-the-shoulder/eye-height camera rather than a true FPS view. **HIGH CONFIDENCE.** The repository's `oyun_icin_fikirler/fps_mode_cam/` (`demir_fps.mdl`, prototype `cam_code.wdl`, `k22_cam.cfg` tuning numbers) is an unused prototype of the same idea. **CONFIRMED** (not referenced by B).
+- Turning the camera off does not restore the previous `camera.arc`; the next legacy writer that assigns ARC restores it. **HYPOTHESIS** (only some legacy paths assign ARC each frame).
+
+Native status: runs unchanged when patch scripts are present (pure WDL on native builtins: `key_f5`, `camera.*`, `clamp`, `cos/sin`, `mouse_force`, `validate_view`). Not available for an ISO-only installation; no native re-implementation exists (policy: no patch scripts shipped). Test status: **not exercised** in this analysis (no in-level input run). **UNKNOWN** at runtime.
+
+## 4. Multilingual resources
+
+| Aspect | Original ISO | Patch | Label |
+|---|---|---|---|
+| Selection | compile-time `IFDEF defdil_tr|en|de` (text) and `defses_tr|en` (voice/video) in `K22.wdl`; each mounts `yazi_<lang>.k22` / `ses_<lang>.k22` whose members use the **same names** (e.g. `*_tr.pcx`, `*_tr.ogg`) with language-specific content | run-time `DD_Dil` (0 TR, 1 EN, 2 DE, 3 ES, 4 RU, 5 PL), chosen in the re-enabled language menu (`DilMenu.wdl`) and stored as byte 32 of `options.k22` | CONFIRMED |
+| Text strings | `dil_ceviri_<lang>.wdl`, `sub_titles_<lang>.wdl` inside `K22.wrs` (string constants) | `_data\language\<lang>\subtitle\general.txt` (575 lines, one string per line), `item_name.txt` (52), `item_subtitle1/2.txt` (171 each) | CONFIRMED |
+| Loading | WDL compile | `dil_degistir.wdl`: `txt_load` of all six `general.txt` into `TEXT` objects with `delimit_str = ""` (one string per line), then `subtitle_variables[i] = Parse_EscapeChar(line)` for the active language; item files loaded into three inventory `TEXT` objects; missing files → `error(...)` and exit | CONFIRMED |
+| Escapes | literal script strings | `\n` etc. in files (≈ 600–700 `\n` tokens per `general.txt`), converted by the DLL because A6 `txt_load` does not | CONFIRMED |
+| Encoding | single-byte Windows code pages | single-byte, no BOM, CRLF: TR = CP1254, EN/DE/ES = CP1252-compatible, RU = **CP1251**, PL = **CP1250** (Polish `general.txt` itself uses only `ó` plus quotes; item files use more) | CONFIRMED (byte census, `reports/summary.json` `language`) |
+| Fonts | `Font0-3.pcx`, `DocFont0-3.bmp` in `yazi_<lang>.k22` | `_data\language\_resource\texture\{pcx,bmp}\` `n*` (Latin = original glyphs), `c*` (Cyrillic), `p*` (Polish). Atlases are 32×8 cells = 256 code points addressed by raw byte value (e.g. `nFont0` 352×144, 11×18 cells). `cFont0` differs from `nFont0` in 98 cells covering CP1251 letters `0xC0–0xFF` and specials; `pFont0` in 61 cells at CP1250 Polish positions (`0x8C/0x9C`, `0x8F/0x9F`, `0xA3/0xB3`, `0xA5/0xB9`, `0xAF/0xBF`, `0xC6/0xE6`, `0xCA/0xEA`, `0xD1/0xF1`, …); both redraw `$` | CONFIRMED (cell diff of decoded PCX) |
+| Font selection | per resolution index `GA_Cozunurluk` | `load_language_fonts()`: RU → `c*`, PL → `p*`, else `n*`; subtitles use `DocFont1`, panels/menus `Font0` | CONFIRMED |
+| Voices | 12 clips per audio language in `ses_<lang>.k22` | `_data\language\<lang>\sound\` 12 clips; EN = DE = ES byte-identical (English audio reused); TR/EN clips are the ISO clips; RU/PL new | CONFIRMED |
+| Textures with text | language archive members | `_data\language\<lang>\texture\{tga,pcx}` (31–34 TGA, 7–11 PCX); 142 of 260 images are byte-identical ISO members | CONFIRMED |
+| Cut-scenes | `vt*.k22` (TR) / `ve*.k22` (EN) chosen by `defses_*` | per-language `video\` folders (TR 22, EN/PL/RU 17; DE/ES none) re-encoded | CONFIRMED |
+
+Native status:
+
+- ISO-only: `--language tr|en|de`, `--audio-language tr|en` map to the original `defdil_*`/`defses_*` macros and archives (`native/main.cpp`), defaulting from `LC_ALL`/`LC_MESSAGES`/`LANG`. **CONFIRMED.**
+- Patch scripts: `Engine::configure_language` sets `DD_Dil` from `--language` (0/1/2 only) and maintains byte 32 of the private `options.k22`; the script's own options loader then restores the saved choice (0–5). Spanish/Russian/Polish are therefore available through the in-game menu but not via CLI ([COMMUNITY_PATCH_ANALYSIS](COMMUNITY_PATCH_ANALYSIS.md) §7.3). **CONFIRMED.**
+- Bitmap fonts are raw-byte indexed in native as in A6 (`CONTRACT.txt` §40: indexed PCX FONT keeps indices, active palette), so CP1251/CP1250 text renders with the patch atlases without transcoding; BMP fonts decode through the same bitmap path (`native/assets.cpp`, `.bmp`/`.pcx` branch). **HIGH CONFIDENCE**; Cyrillic/Polish rendering was not captured in this analysis — **UNKNOWN** at runtime.
+- `Parse_EscapeChar` and `txt_load` with empty delimiter are native services (`native/engine.cpp:1207`, `CONTRACT.txt` §14). **CONFIRMED.**
+
+## 5. Summary of native gaps
+
+| Gap | Status (EngineFixes/EngineFixes2, 2026-10-09) | Label |
+|---|---|---|
+| D6 exit-menu highlight frame | **fixed**: `prepare_display` restores the authored bottom `screen_size.y−16` (equal to `480·sy−DM_AltPay` in every original table) while `CMP_Soru` is shown; `check_engine --campaign-display` asserts it. Live captures at 1920×1080 and 2560×1080 windowed: `Cer_hY2` is 1064 (before: 704, inverted). Authored 1024×768 is byte-identical to a build without the fix (`reverse/wave2/EngineFixes2/exit-*.png`, [WIDESCREEN_IMPLEMENTATION](WIDESCREEN_IMPLEMENTATION.md) §3) | CONFIRMED (capture) |
+| D3/D13 640-tier art | **fixed**: native display owns `GA_Cozunurluk` slot 2 (original rule `GA_Cozunurluk>1` → 1024 tier: `kan_1024`, `gozsag/gozsol1024`, `load_tr`, `Girispnl_1024`, `PEML1024`, `KVIL`, `BEP1_*`); `GA_ScaleOranlari2` = W/1024,H/768 in gameplay; text keeps the tier-0 font set (font arrays slot 2 = slot 0). The tier is in memory only: `options.k22` byte 0 keeps the user's authored `GA_Cozunurluk`, so a later `--display authored` run starts at the user's resolution (unit test plus live native→authored byte compare) | CONFIRMED (unit + capture + live) |
+| D10 cinematic bars | the `Bar` role (W/640, H/480) had been dropped by accident while editing the boss roles, so the bars fell back to the script's W/600, H/440. Restored. This was the cause of the `--campaign-display all` failure `close: actual=3.19922 expected=3`, at `oy_syh_pan1.scale_x` in the presentation phase, not in projection. `all` now passes on real data | CONFIRMED |
+| G3 load menu controller navigation | **ported** for `controller.ini mode=modern` only: `JOY_Button[GA_JTuslar[1/2]]` and `JOY_Ileri/Geri` act as Enter/Esc/Up/Down while `YUMT_Liste` is shown (`Engine::key_state`) | CONFIRMED (unit `check_engine --input-saves`) |
+| CLI ES/RU/PL | **done**: `--language es|ru|pl` → `DD_Dil` 3–5 when `K22Widescreen.wrs` and `_data/language/<folder>/subtitle/general.txt` exist, else rejected; launcher lists only installed languages | CONFIRMED (launcher self-check); runtime glyph capture not taken |
+| Archive precedence | **fixed**: original `00420120` is cache → loose → PATH → archive *first match* (`0041fd20` appends); the earlier "archive-first" reading mistook the memory-buffer table `00695eb0` for the archive index `00665ea8`. Native now keeps loose-first, makes archives first-mounted-wins, mounts the start-up archive first, and loads the auto-selected campaign WDL archive-only (`0062119c`≠0) | CONFIRMED (`check_assets`) |
+| FPS camera (§3) | **ported engine-side** as `--camera first-person` (launcher Launch page, `launcher.ini camera=`): Demir/Ebru only, yields to freeze_mode/Inzar/Video_Cam and restores script camera fields; patch `validate_view` omitted (camera stays inside the player hull); mouse look uses the patch formula on the original `mouse_force`. **Live run done** on imported Windows saves: Level5 camera zones, unchanged collision traces, mouse turn, mouse fire/aim (ammo 26→17, same as keyboard), pause takeover, Inzar off, Ebru on ([CAMERA_SYSTEM](CAMERA_SYSTEM.md) §7.1). A live `Video_Cam` cutscene and a door transition were not reached | CONFIRMED (live + unit); Video_Cam live UNKNOWN |
+| `mouse_force` | **fixed**: it was raw SDL pixels with y down. It is now the original `K22.exe 00422000` value: trunc(mickey·MOUSE_SENSE·10/max(TIME_FRAME raw, 50) + previous frame's term), y up, clamped to ±2·MOUSE_SENSE, not updated when `MOUSE_MODE≥2`, `.z` never written. `acknex.dll 10027844` for Bonus has the same structure and constants. Consumers: Bonus `ucaksavar.wdl:644-645` turret aim and the first-person camera. ISO campaign scripts only mention it in a comment | CONFIRMED (ASM; unit `check_engine --input-saves`) |
+| Ogg ACM tag 0x676f (`otokapi_acil/zorlan.ogg`) | **fixed**: Vorbis ACM tags 0x674f–0x6751/0x676f–0x6771 unwrapped; both members failed before ("decoder unavailable") and decode after | CONFIRMED |
+| Cyrillic/Polish rendering | not run-verified | UNKNOWN |
+| Blood-burst sizes | **fixed**: legacy emit() SIZE is screen pixels (A6 `00443950`/`0043fc10`), not quants; OpenGL and Vulkan RT captures in massotsagoda, solustoda and bosskoli | CONFIRMED (Ghidra + capture + unit) |

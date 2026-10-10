@@ -1,0 +1,24 @@
+# requires: saves
+# continues: world_save1_point
+# Restart, then reload the slot world_save1_point wrote (kayit27.sav, menu entry 28) through the original YukleMenu.
+# GA_AyarlariYukle (GenelAyarlar.wdl:219) reads kysd.sav at startup; YD_OyunuYukle restores level, character, weapon and health.
+# The written kayit27.sav differs from the original kayit10.sav only in aktif_kayit_sayisi (docs/GAMEPLAY_TESTING.md).
+realtime off
+wait until ParlaklikMenuAcik == 1 || AMP_OyunYukle.visible == 1 timeout 7200
+assert Aktif_SaveNo == 28
+assert SLG_KayitSayisi == 28
+load-save 27
+wait until LY_AktifLevelID == 37 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+assert $level == "kizic2.wmb"
+assert Aktif_Player == 0
+assert Aktif_Silah == 7
+assert oyn_yaralanma == 76
+assert player.skill1 == 76
+assert S_Kursun_Sayisi[1] == 14
+assert aktif_kayit_sayisi == 9
+assert OyunZorluk == 0
+# Spawned at the save spot (LV_Kizic2_G00); the loaded level's own save icon must not save again (YukleMenu.wdl:367).
+assert player.x > -210 && player.x < -198 && player.y > -10 && player.y < 0
+frames 300
+assert Aktif_SaveNo == 28
+capture reloaded

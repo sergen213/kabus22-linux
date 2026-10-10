@@ -97,7 +97,10 @@ The assembled image records original and modified runtime checksums.
 Distribution-library licenses/package versions/CPU architecture are collected
 from the exact build environment package database. Authenticated corresponding
 Ubuntu source packages, dependency recipes, custom FFmpeg source/signature and
-the hash-checked ODE source/patch recipes are published in the source sidecar.
+the hash-checked ODE source/patch recipes (cmake/KabusODEContact.cmake
+GenerateContact replacement and cmake/KabusODELcp.cmake dSolveLCP state[]
+zero-initialization, each with original/modified source hashes, the modified
+file and its diff) are published in the source sidecar.
 Installed dependency notices/provenance include its receipt; keep that archive
 beside the image when distributing. This is not legal certification or a grant
 of the native project's license. Extracting the AppImage permits replacement

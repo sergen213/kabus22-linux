@@ -1,0 +1,87 @@
+name: Release
+# Tag vMAJOR.MINOR.PATCH[-pre] -> pinned AppImage assembly, signed update payload, DRAFT
+# GitHub release. Updaters ignore drafts: nothing is offered until the owner publishes
+# it after qualification. Never ships game assets (see docs/RELEASE_PROCESS.md).
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      WORK: ${{ runner.temp }}/baseline
+      DIST: ${{ runner.temp }}/dist
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag against project version
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          project=$(sed -n 's/^project(kabus22_native VERSION \([^ ]*\) .*/\1/p' CMakeLists.txt)
+          installer=$(sed -n 's/^project(kabus22_setup VERSION \([^ ]*\) .*/\1/p' installer/CMakeLists.txt)
+          core=${version%%[-+]*}
+          test "$core" = "$project" && test "$core" = "$installer" || { echo "Tag $version does not match CMake $project/$installer"; exit 1; }
+          case $version in *-*) echo "CHANNEL=experimental" >> "$GITHUB_ENV"; echo "PRERELEASE=--prerelease" >> "$GITHUB_ENV" ;;
+                           *) echo "CHANNEL=stable" >> "$GITHUB_ENV"; echo "PRERELEASE=" >> "$GITHUB_ENV" ;; esac
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends curl gnupg squashfs-tools python3-cryptography
+      - name: Verify signing secret matches embedded public key
+        env:
+          KABUS22_UPDATE_SIGNING_KEY: ${{ secrets.KABUS22_UPDATE_SIGNING_KEY }}
+        run: |
+          embedded=$(sed -n 's/^set(K22_UPDATE_PUBLIC_KEY "\([^"]*\)".*/\1/p' installer/CMakeLists.txt)
+          actual=$(python3 tools/release/sign_manifest.py --public-key)
+          test -n "$embedded" && test "$embedded" = "$actual" || { echo "Signing key does not match K22_UPDATE_PUBLIC_KEY"; exit 1; }
+      - name: Acquire pinned innoextract helper and AppImage runtime
+        run: |
+          mkdir -p build-appimage/cache packaging/helper-innoextract/bin/amd64
+          curl --fail --location --proto '=https' --proto-redir '=https' \
+            https://constexpr.org/innoextract/files/innoextract-1.9-linux.tar.xz \
+            -o build-appimage/cache/innoextract-1.9-linux.tar.xz
+          printf '%s\n' '008efe5011476ccc4aae17c3e22038b5a1bc5c7aad2b9d4d869537bf3874d21f  build-appimage/cache/innoextract-1.9-linux.tar.xz' | sha256sum --check
+          mkdir -m 700 build-appimage/cache/innoextract-keyring
+          gpg --homedir "$PWD/build-appimage/cache/innoextract-keyring" --batch \
+            --import packaging/helper-innoextract/upstream/dscharrer.asc
+          gpg --homedir "$PWD/build-appimage/cache/innoextract-keyring" --batch \
+            --verify packaging/helper-innoextract/upstream/innoextract-1.9-linux.tar.xz.sig \
+            build-appimage/cache/innoextract-1.9-linux.tar.xz
+          tar --extract --xz --file build-appimage/cache/innoextract-1.9-linux.tar.xz \
+            --directory packaging/helper-innoextract/bin/amd64 --strip-components=3 \
+            innoextract-1.9-linux/bin/amd64/innoextract
+          printf '%s\n' '7a8ad941deeb0de8d1f804830f339fd17e27cfbce473615d79d1d65c106884e9  packaging/helper-innoextract/bin/amd64/innoextract' | sha256sum --check
+          chmod +x packaging/helper-innoextract/bin/amd64/innoextract
+          curl --fail --location --proto '=https' --proto-redir '=https' \
+            https://github.com/VHSgunzo/uruntime/releases/download/v0.8.1/uruntime-appimage-squashfs-lite-x86_64 \
+            -o build-appimage/cache/uruntime-appimage-squashfs-lite-x86_64
+          printf '%s\n' '32c6024a14ff375749ee3bed3330c1586a6dd2bfeddbbd7ceacc053aec2b27a3  build-appimage/cache/uruntime-appimage-squashfs-lite-x86_64' | sha256sum --check
+      - name: Build pinned toolchain image (Dockerfile on stdin, no build context)
+        run: docker build --platform linux/amd64 -t kabus22-ubuntu24-toolchain - < tools/Dockerfile.ubuntu24
+      - name: Build and assemble AppImage
+        run: sh tools/build_kabus_baseline.sh "$WORK" kabus22-ubuntu24-toolchain
+      - name: Build signed update payload from the assembled AppImage
+        env:
+          KABUS22_UPDATE_SIGNING_KEY: ${{ secrets.KABUS22_UPDATE_SIGNING_KEY }}
+        run: |
+          image="$WORK/Kabus22-Linux-Installer-x86_64.AppImage"
+          offset=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["appimage"]["squashfs_offset"])' "$image.json")
+          unsquashfs -no-progress -o "$offset" -d "$RUNNER_TEMP/appdir" "$image"
+          python3 tools/release/make_update_manifest.py --appdir "$RUNNER_TEMP/appdir" \
+            --version "$VERSION" --channel "$CHANNEL" --output-dir "$DIST"
+          python3 tools/release/sign_manifest.py "$DIST/kabus22-update.json"
+          cp "$image" "$image.json" "$image.sources.tar.gz" "$DIST/"
+          git archive --format=tar.gz --prefix="kabus22-linux-$VERSION/" -o "$DIST/native-source.tar.gz" "$GITHUB_REF_NAME"
+          (cd "$DIST" && sha256sum -- * > SHA256SUMS)
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag $PRERELEASE \
+            --title "Kabus22 Linux $VERSION" --notes "Draft: qualify, then publish. Channel: $CHANNEL." "$DIST"/*

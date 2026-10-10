@@ -25,6 +25,7 @@ public:
  const std::vector<std::string>& diagnostics()const; const ParseMetrics& metrics()const;
  const CompilerSettings& compiler_settings()const;
  std::size_t processes()const;
+ bool running(FunctionId)const; // a live suspended process of this function is queued
 private: struct Impl;std::unique_ptr<Impl> impl_;
 };
 }

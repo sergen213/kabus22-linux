@@ -1,0 +1,171 @@
+# requires: saves
+# Kız Kulesi (slot 10 = kayit9.sav): Demir runs round the café to the anti-aircraft gun, mounts it with D
+# (dinamik_modeller.wdl ucakfish_Tarama → ucak_savar), and fires at the diving atilgan_ai enemies.
+# Each new D press scans a 25° cone and slews onto the nearest target (ucakyakin_bul/ucakyakina_don); bullets
+# (ucakkursun_gonder) take 20 health per hit, and an atilgan at 0 health plays its death fall and bumps
+# atilgan_sayisi (atilgan_yara.wdl:566-635). The divers approach from the gun's right (world pan ≈ -80),
+# so every cycle re-aims there, lifts the barrel and fires. Enemy knock-backs are random: waypoints avoid the café benches.
+realtime off
+load-save 9
+wait until LY_AktifLevelID == 31 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+assert $count(atilgan_ai) == 5
+assert atilgan_sayisi == 0
+route 40 130 -915 60 -915 60 -650 60 -430 400 -440 750 -420 750 -320 755 100 620 140 560 480 run timeout 7200
+find fish ucak_fish
+walk-to @fish 45 timeout 600
+press-until D ucaksavar_aktif == 1 timeout 300
+wait until ucak_kaldir == 1 timeout 300
+frames 30
+capture kriz_aa_mounted
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+print atilgan_sayisi
+capture kriz_aa_firing1
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+print atilgan_sayisi
+capture kriz_aa_firing2
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+turn-to 743 -424 4 timeout 300
+press-until Up ucaksavar_ent.tilt >= 14 && ucaksavar_ent.tilt < 90 timeout 300
+press D 45
+frames 15
+print atilgan_sayisi
+capture kriz_aa_firing3
+assert atilgan_sayisi >= 1
+assert ucaksavar_aktif == 1

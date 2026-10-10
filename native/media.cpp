@@ -19,6 +19,7 @@ extern "C" {
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -80,8 +81,12 @@ std::span<const uint8_t> media_payload(std::span<const uint8_t> bytes) {
         if (std::memcmp(bytes.data() + at, "fmt ", 4) == 0) {
             if (seen_format || size < 16) malformed = true;
             seen_format = true;
-            // Even a malformed chunk must not read its tag outside the extent.
-            if (size >= 2 && end - start >= 2) ogg_format |= little(start, 2) == 0x674f;
+            // Even a malformed chunk must not read its tag outside the extent. Vorbis ACM tags
+            // 0x674f-0x6751/0x676f-0x6771 (modes 1-3, 1+-3+): Kaynak.k22 uses 0x674f and 0x676f.
+            if (size >= 2 && end - start >= 2) {
+                const auto tag = little(start, 2);
+                ogg_format |= (tag >= 0x674f && tag <= 0x6751) || (tag >= 0x676f && tag <= 0x6771);
+            }
         }
         if (size > end - start) { malformed = true; break; }
         if (std::memcmp(bytes.data() + at, "data", 4) == 0) {
@@ -235,7 +240,8 @@ public:
 
 bool pixels(AVFrame* frame, Image& image, std::unique_ptr<SwsContext, SwsFree>& scale,
             std::vector<uint8_t>* indices = nullptr, std::span<const uint8_t> palette = {}) {
-    if (frame->width <= 0 || frame->height <= 0 || frame->width > 16384 || frame->height > 16384)
+    // Same bound as the renderer's check_image; wide "+N" sprite strips (s_alev+61.tga, 18300 px) are re-laid out at load.
+    if (frame->width <= 0 || frame->height <= 0 || frame->width > 32768 || frame->height > 32768)
         throw std::runtime_error("Invalid decoded image dimensions");
     image.width = static_cast<uint32_t>(frame->width);
     image.height = static_cast<uint32_t>(frame->height);
@@ -512,6 +518,11 @@ struct Media::Impl {
     double listener_pan{};
     float sound_master{1}, movie_master{1};
     Clock::time_point silent_clock{Clock::now()};
+    // Scenario mode (advance_clock): media time steps with the engine frame, not the wall clock. The offset
+    // keeps time continuous across manual<->real switches; it stays zero outside scenarios.
+    std::optional<Clock::time_point> manual;
+    Clock::duration offset{};
+    Clock::time_point now() const { return manual ? *manual : Clock::now() + offset; }
 
     struct Lock {
         Impl& self;
@@ -551,7 +562,7 @@ struct Media::Impl {
                    self.sound_master, self.movie_master);
     }
     void silent_advance() {
-        auto now = Clock::now();
+        auto now = this->now();
         double elapsed = std::chrono::duration<double>(now - silent_clock).count();
         silent_clock = now;
         for (auto& voice : voices) advance(voice, elapsed * sample_rate);
@@ -614,6 +625,19 @@ struct Media::Impl {
 
 Media::Media(Assets& assets, bool open_audio) : impl_(std::make_unique<Impl>(assets, open_audio)) {}
 Media::~Media() = default;
+void Media::advance_clock(double seconds) {
+    if (!impl_->manual) {
+        if (!impl_->device) impl_->silent_advance();
+        impl_->manual = impl_->now();
+    }
+    *impl_->manual += std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(seconds));
+}
+void Media::real_clock() {
+    if (!impl_->manual) return;
+    if (!impl_->device) impl_->silent_advance();
+    impl_->offset = *impl_->manual - Clock::now();
+    impl_->manual.reset();
+}
 Media::Handle Media::sound_play(std::string_view name, double volume, double pan, double pitch, bool loop) {
     return impl_->start(impl_->sound(name), volume, pan, pitch, loop);
 }
@@ -698,7 +722,7 @@ Media::Handle Media::movie_play(std::string_view name, double volume, bool loop)
     auto* stored = movie.get();
     impl_->movies.emplace(handle, std::move(movie));
     try {
-        stored->start = Clock::now();
+        stored->start = impl_->now();
         if (stored->audio.frames())
             stored->audio_handle = impl_->start(stored->audio, volume, 0, 100, loop, false, {}, 1000, true);
         stored->active = true;
@@ -710,7 +734,7 @@ bool Media::movie_playing(Handle handle) const {
     if (found == impl_->movies.end() || !found->second->active) return false;
     const auto& movie = *found->second;
     if (movie.loop) return true;
-    double time = std::chrono::duration<double>(Clock::now() - movie.start).count();
+    double time = std::chrono::duration<double>(impl_->now() - movie.start).count();
     double end = std::max(movie.duration, movie.last_end);
     return !((movie.duration > 0 || movie.video_eof) && time >= end &&
              (!movie.audio_handle || !sound_playing(movie.audio_handle)));
@@ -744,7 +768,7 @@ void Media::update() {
     for (auto& [handle, owned] : impl_->movies) {
         auto& movie = *owned;
         if (!movie.active) continue;
-        double time = std::chrono::duration<double>(Clock::now() - movie.start).count();
+        double time = std::chrono::duration<double>(impl_->now() - movie.start).count();
         // For a soundtrack, use the mixer's consumed samples as the video master clock.
         if (movie.audio_handle) {
             Impl::Lock lock(*impl_);
@@ -789,7 +813,11 @@ void Media::update() {
 } // namespace k22
 
 #ifdef K22_MEDIA_SELF_CHECK
+#undef NDEBUG // Release self-check must still assert; <cassert> re-evaluates NDEBUG on each inclusion.
 #include <cassert>
+#include <fstream>
+#include <thread>
+#include <unistd.h>
 int main(int argc, char** argv) {
     auto little = [](std::vector<uint8_t>& bytes, size_t offset, uint32_t value, size_t width) {
         for (size_t i = 0; i < width; ++i) bytes.at(offset + i) = static_cast<uint8_t>(value >> (8 * i));
@@ -879,6 +907,29 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < 480; ++i) little(wav, 44 + i * 2, i < 240 ? 16384 : 49152, 2);
     auto sound = k22::audio(wav, "boundary.wav", true);
     assert(sound.frames() == 480 && sound.samples.front() > 0 && sound.samples.back() < 0);
+    {
+        // Scenario media clock: a headless voice ends by advance_clock time only, never by elapsed wall time.
+        const auto dir = std::filesystem::temp_directory_path() / ("k22-media-clock-" + std::to_string(::getpid()));
+        std::filesystem::create_directories(dir);
+        std::ofstream(dir / "clock.wav", std::ios::binary).write(reinterpret_cast<const char*>(wav.data()), std::streamsize(wav.size()));
+        {
+            k22::Assets store(dir);
+            k22::Media media(store, false);
+            media.advance_clock(0);
+            const auto voice = media.sound_play("clock.wav"); // 480 frames = 10 ms
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            assert(media.sound_playing(voice));
+            media.advance_clock(0.005);
+            assert(media.sound_playing(voice));
+            media.advance_clock(0.006);
+            assert(!media.sound_playing(voice));
+            const auto resumed = media.sound_play("clock.wav");
+            media.real_clock(); // wall time resumes from the manual point
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            assert(!media.sound_playing(resumed));
+        }
+        std::filesystem::remove_all(dir);
+    }
     // The original OggDS asset supplies the bitstream; only RIFF layout is varied.
     assert(argc <= 2);
     if (argc == 2) {
@@ -974,8 +1025,15 @@ int main(int argc, char** argv) {
             little(bad, 4, static_cast<uint32_t>(bad.size() - 8), 4);
             malformed(bad);
             bad = reordered;
-            little(bad, fmt_start + 8, 0x674e, 2);
-            assert(k22::media_payload(bad).size() == bad.size());
+            for (uint32_t tag : {0x674eu, 0x6752u, 0x676eu, 0x6772u}) {
+                little(bad, fmt_start + 8, tag, 2);
+                assert(k22::media_payload(bad).size() == bad.size());
+            }
+            // Kaynak.k22 otokapi_acil/zorlan.ogg carry Vorbis ACM mode 1+ (0x676f) around OggS.
+            for (uint32_t tag : {0x6750u, 0x6751u, 0x676fu, 0x6770u, 0x6771u}) {
+                little(bad, fmt_start + 8, tag, 2);
+                assert(k22::audio(bad, name, true).samples == decoded.samples);
+            }
             bad = reordered;
             bad[data_start + 8] = 'X';
             assert(k22::media_payload(bad).size() == bad.size());

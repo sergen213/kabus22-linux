@@ -1,8 +1,10 @@
 #include "vulkan_loader.hpp"
 #include "render_vulkan.hpp"
+#include "render_policy.hpp"
 #include <SDL_vulkan.h>
 #include <cmath>
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -48,7 +50,7 @@ void cleanup(VulkanBackend::State& s) {
     if(s.device) {
         vkDeviceWaitIdle(s.device);
         s.raster.reset(); s.rays.reset();
-        destroy_target(s,s.scene); destroy_target(s,s.alpha); destroy_target(s,s.portal); s.destroy(s.finalImage);
+        destroy_target(s,s.scene); destroy_target(s,s.alpha); destroy_target(s,s.portal); destroy_target(s,s.hdr); s.destroy(s.finalImage);
         for(auto& slot:s.slots) {
             garbage(s,slot);
             if(slot.fence) vkDestroyFence(s.device,slot.fence,nullptr);
@@ -68,6 +70,7 @@ bool extension(std::span<const VkExtensionProperties> extensions,const char* nam
 VkImageAspectFlags aspect(VkFormat format) {
     switch(format) {
         case VK_FORMAT_D24_UNORM_S8_UINT: case VK_FORMAT_D32_SFLOAT_S8_UINT:return VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT;
+        case VK_FORMAT_D32_SFLOAT:return VK_IMAGE_ASPECT_DEPTH_BIT;
         default:return VK_IMAGE_ASPECT_COLOR_BIT;
     }
 }
@@ -116,7 +119,7 @@ void create_swapchain(VulkanBackend::State& s,WindowMetrics metrics) {
     require(vkGetSwapchainImagesKHR(s.device,s.swapchain,&count,s.swapImages.data()),"Reading Vulkan swapchain images"); s.swapLayouts.assign(count,VK_IMAGE_LAYOUT_UNDEFINED); s.swapRendered.resize(count);
     VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO}; for(auto& handle:s.swapRendered) require(vkCreateSemaphore(s.device,&semaphore,nullptr,&handle),"Creating Vulkan present semaphore");
     if(s.extent.width!=size.width||s.extent.height!=size.height) {
-        destroy_target(s,s.scene); destroy_target(s,s.alpha); destroy_target(s,s.portal); s.destroy(s.finalImage);
+        destroy_target(s,s.scene); destroy_target(s,s.alpha); destroy_target(s,s.portal); destroy_target(s,s.hdr); s.destroy(s.finalImage);
         s.retainedColorValid=s.portalColorValid=s.finalValid=false;
     }
     s.extent=size; s.swapDirty=false;
@@ -181,6 +184,8 @@ VulkanBackend::State::State(SDL_Window* w,const RenderOptions& o):window(w),opti
         require(vkGetPhysicalDeviceImageFormatProperties(physical,depthFormat,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,0,&depthProperties),"Querying Vulkan depth/stencil format");
         auto supported=properties.limits.framebufferColorSampleCounts&properties.limits.framebufferDepthSampleCounts&properties.limits.framebufferStencilSampleCounts&colorProperties.sampleCounts&depthProperties.sampleCounts;
         for(auto sample:{VK_SAMPLE_COUNT_64_BIT,VK_SAMPLE_COUNT_32_BIT,VK_SAMPLE_COUNT_16_BIT,VK_SAMPLE_COUNT_8_BIT,VK_SAMPLE_COUNT_4_BIT,VK_SAMPLE_COUNT_2_BIT,VK_SAMPLE_COUNT_1_BIT}) if(static_cast<int>(sample)<=std::max(o.samples,1)&&(supported&sample)){samples=sample;break;}
+        if(static_cast<int>(samples)<o.samples) std::fprintf(stderr,"kabus22: graphics: MSAA %d unsupported, using %d\n",o.samples,static_cast<int>(samples));
+        if(o.anisotropy>properties.limits.maxSamplerAnisotropy) std::fprintf(stderr,"kabus22: graphics: anisotropy %g unsupported, using %g\n",double(o.anisotropy),double(properties.limits.maxSamplerAnisotropy));
         for(auto& slot:slots) {
             VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO}; pool.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; pool.queueFamilyIndex=queueFamily;
             require(vkCreateCommandPool(device,&pool,nullptr,&slot.pool),"Creating Vulkan frame pool");
@@ -238,14 +243,14 @@ void VulkanBackend::State::destroy(vk22::Buffer& b){if(b.mapped)vkUnmapMemory(de
 void VulkanBackend::State::destroy(vk22::Image& i){if(i.view)vkDestroyImageView(device,i.view,nullptr);if(i.handle)vkDestroyImage(device,i.handle,nullptr);if(i.memory)vkFreeMemory(device,i.memory,nullptr);i={};}
 void VulkanBackend::State::retire(vk22::Buffer& b){if(!b.handle)return;if(command){slots[slotIndex].garbageBuffers.push_back(b);b={};}else{drain();destroy(b);}}
 void VulkanBackend::State::retire(vk22::Image& i){if(!i.handle)return;if(command){slots[slotIndex].garbageImages.push_back(i);i={};}else{drain();destroy(i);}}
-vk22::Image VulkanBackend::State::image(std::uint32_t width,std::uint32_t height,VkFormat format,VkImageUsageFlags usage,std::uint32_t levels,std::uint32_t layers,VkSampleCountFlagBits sampleCount) {
+vk22::Image VulkanBackend::State::image(std::uint32_t width,std::uint32_t height,VkFormat format,VkImageUsageFlags usage,std::uint32_t levels,std::uint32_t layers,VkSampleCountFlagBits sampleCount,bool cube) {
     if(!width||!height||!levels||!layers)throw std::runtime_error("Invalid Vulkan image dimensions");
     vk22::Image i{};i.width=width;i.height=height;i.format=format;i.levels=levels;i.layers=layers;i.samples=sampleCount;
     try {
-        VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO}; info.imageType=VK_IMAGE_TYPE_2D;info.format=format;info.extent={width,height,1};info.mipLevels=levels;info.arrayLayers=layers;info.samples=sampleCount;info.tiling=VK_IMAGE_TILING_OPTIMAL;info.usage=usage;info.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
+        VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO}; info.flags=cube?VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT:0;info.imageType=VK_IMAGE_TYPE_2D;info.format=format;info.extent={width,height,1};info.mipLevels=levels;info.arrayLayers=layers;info.samples=sampleCount;info.tiling=VK_IMAGE_TILING_OPTIMAL;info.usage=usage;info.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
         require(vkCreateImage(device,&info,nullptr,&i.handle),"Creating Vulkan image"); VkMemoryRequirements requirements{};vkGetImageMemoryRequirements(device,i.handle,&requirements);
         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};allocation.allocationSize=requirements.size;allocation.memoryTypeIndex=memory_type(*this,requirements.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);require(vkAllocateMemory(device,&allocation,nullptr,&i.memory),"Allocating Vulkan image memory");require(vkBindImageMemory(device,i.handle,i.memory,0),"Binding Vulkan image memory");
-        VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};view.image=i.handle;view.viewType=layers>1?VK_IMAGE_VIEW_TYPE_2D_ARRAY:VK_IMAGE_VIEW_TYPE_2D;view.format=format;view.subresourceRange={aspect(format),0,levels,0,layers};require(vkCreateImageView(device,&view,nullptr,&i.view),"Creating Vulkan image view");return i;
+        VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};view.image=i.handle;view.viewType=cube?VK_IMAGE_VIEW_TYPE_CUBE:layers>1?VK_IMAGE_VIEW_TYPE_2D_ARRAY:VK_IMAGE_VIEW_TYPE_2D;view.format=format;view.subresourceRange={aspect(format),0,levels,0,layers};require(vkCreateImageView(device,&view,nullptr,&i.view),"Creating Vulkan image view");return i;
     }catch(...){destroy(i);throw;}
 }
 void VulkanBackend::State::transition(vk22::Image& i,VkImageLayout layout,VkPipelineStageFlags stage,VkAccessFlags access){if(!command)throw std::runtime_error("Vulkan image transition outside command recording");barrier(command,i.handle,aspect(i.format),i.levels,i.layers,i.layout,layout,stage,access);i.layout=layout;}
@@ -327,9 +332,11 @@ void VulkanBackend::State::ensure_targets(WindowMetrics metrics){
     if(metrics.drawableWidth<=0||metrics.drawableHeight<=0)return;
     if(swapDirty||!swapchain||extent.width!=static_cast<unsigned>(metrics.drawableWidth)||extent.height!=static_cast<unsigned>(metrics.drawableHeight))create_swapchain(*this,metrics);
     if(!extent.width||!extent.height||swapDirty)return;
-    if(!scene.color.handle){auto usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;scene.color=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,usage,1,1,samples);scene.depth=image(extent.width,extent.height,depthFormat,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,1,1,samples);if(samples!=VK_SAMPLE_COUNT_1_BIT)scene.resolve=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,usage);finalImage=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,usage);}
+    if(!scene.color.handle){const bool composite=render_policy::composite_enabled(options.pbr,options.features),depthEffects=options.features.ssao||options.features.fog||options.features.taa;auto usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;scene.color=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,usage,1,1,samples);scene.depth=image(extent.width,extent.height,depthFormat,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|(composite?VK_IMAGE_USAGE_TRANSFER_DST_BIT:0)|(depthEffects?VK_IMAGE_USAGE_TRANSFER_SRC_BIT:0),1,1,samples);if(samples!=VK_SAMPLE_COUNT_1_BIT)scene.resolve=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,usage);finalImage=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,usage);
+        if(composite){hdr.color=image(extent.width,extent.height,VK_FORMAT_R16G16B16A16_SFLOAT,usage,1,1,samples);hdr.depth=image(extent.width,extent.height,depthFormat,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT,1,1,samples);if(samples!=VK_SAMPLE_COUNT_1_BIT)hdr.resolve=image(extent.width,extent.height,VK_FORMAT_R16G16B16A16_SFLOAT,usage);}}
 }
-void VulkanBackend::State::ensure_auxiliary(vk22::Target& target){if(target.color.handle)return;target.color=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);target.depth=image(extent.width,extent.height,depthFormat,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);}
+// Composited (PBR/post) translucent views blend into the HDR target, so their auxiliary color must keep HDR range too.
+void VulkanBackend::State::ensure_auxiliary(vk22::Target& target){if(target.color.handle)return;target.color=image(extent.width,extent.height,render_policy::composite_enabled(options.pbr,options.features)&&&target==&alpha?VK_FORMAT_R16G16B16A16_SFLOAT:VK_FORMAT_R8G8B8A8_UNORM,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);target.depth=image(extent.width,extent.height,depthFormat,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);}
 void VulkanBackend::State::begin(WindowMetrics metrics,std::int32_t tripleBufferRaw,bool bonus){
     command=VK_NULL_HANDLE;
     if(metrics.drawableWidth<=0||metrics.drawableHeight<=0){finalValid=false;return;}
@@ -474,5 +481,6 @@ void VulkanBackend::purge_model(const Model* model) {
 }
 void VulkanBackend::purge_image(const Image* image){state_->drain();vk22::raster_purge_image(*state_->raster,image);vk22::rt_purge_image(*state_->rays,image);}
 int VulkanBackend::shader_version()const{return vk22::raster_shader_version(*state_->raster);}
+std::string VulkanBackend::description()const{const auto&p=state_->properties;return std::string(p.deviceName)+"; Vulkan "+std::to_string(VK_API_VERSION_MAJOR(p.apiVersion))+"."+std::to_string(VK_API_VERSION_MINOR(p.apiVersion))+"."+std::to_string(VK_API_VERSION_PATCH(p.apiVersion))+(state_->rayEnabled?"; KHR ray query":"");}
 PresentationState VulkanBackend::presentation_state()const{return {state_->limit,state_->pending,state_->submissions,state_->waits,state_->presentMode==VK_PRESENT_MODE_FIFO_KHR?1:0,static_cast<int>(state_->samples)};}
 }

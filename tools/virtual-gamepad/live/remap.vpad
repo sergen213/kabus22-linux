@@ -1,0 +1,13 @@
+wait store pad_walk
+axis LY -32767
+wait store pad_walk_stop
+axis LY 0
+wait store pad_aim
+axis LT 255
+wait store pad_old_fire
+axis RT 255 400
+wait store pad_new_fire
+press X 400
+wait store pad_done
+axis LT 0
+wait scenario: remap.k22s

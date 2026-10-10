@@ -1,0 +1,345 @@
+# requires: saves
+# Inzar vs Lain (kotukoru_ai) in Kotukoru_d, slot 26 = kayit25.sav. The intro movie is skipped with Escape (kotu_koruyucu.wdl:6466).
+# Lain closes in and hits (Kotukoru_Kontrol/Kos/FirstVur), Inzar's sword combos (koruyucu.wdl:3434, Key_SilahKaldir) drain its Enerji,
+# A round that stalls (Lain out of reach) ends after 420 frames and the next round re-aims.
+# Between rounds Inzar holds D (up to 600 frames, so a low-health Inzar recovers before the next round attacks) to channel energy back (koruyucu.wdl:1572, my.enerji+=6.25/3*time).
+# Kotukoru_Ol (kotu_koruyucu.wdl:6200) plays the death camera, sets lain_sona_erdi=1 and LY_HedefLevel=84 (Buyukes, Demir, buyukes_koruses :6509).
+# Lain's attack choices are randomize()+random() (kotu_koruyucu.wdl:1373 ...); the scenario's fixed random() seed (default 0,
+# "seed N" to change) makes the fight reproducible: seed 0 ends at frame 19669; seeds 1-4 also pass (docs/GAMEPLAY_TESTING.md fix 13).
+realtime off
+load-save 25
+wait until LY_AktifLevelID == 98 && level_yuklendi_ok == 1 && player != 0 timeout 7200
+assert $level == "kotukoru_d.wmb"
+assert Aktif_Player == 2
+assert lain_sona_erdi == 0
+find boss kotukoru_ai
+assert @boss.skill1 >= 1280
+wait until $movie timeout 1200
+frames 60
+capture inzar_lain_intro
+press Escape
+wait until koruyucu_pasif == 0 && $movie == 0 timeout 1200
+store hp0 koru_yaralanma
+wait until $dist(@boss) < 80 timeout 1800
+wait until koru_yaralanma < @hp0 timeout 1800
+capture inzar_lain_attacks
+store b0 @boss.skill1
+turn-to @boss 20 timeout 900
+press-until S @boss.skill1 < @b0 timeout 900
+assert kotukoru_yaralanma >= @boss.skill1
+capture inzar_lain_hit
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 1150 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 1100 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 1050 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 1000 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 950 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 900 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 850 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 800 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 750 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 700 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 650 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 600 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 550 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 500 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 450 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 400 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 350 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 300 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 250 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 200 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 150 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 100 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 < 50 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+turn-to @boss 20 timeout 900
+store g $frame
+press-until S @boss.skill1 <= 0 || koru_yaralanma < 110 || $frame > @g + 420 timeout 1800
+store f $frame
+down D
+wait until koru_yaralanma > 190 || $frame > @f + 600 || @boss.skill1 <= 0 timeout 700
+up D
+wait until @boss.skill21 == 9 || lain_sona_erdi >= 1 timeout 600
+frames 90
+capture inzar_lain_death
+wait until lain_sona_erdi == 1 timeout 3000
+wait until LY_AktifLevelID == 84 && level_yuklendi_ok == 1 && lain_sona_erdi == 2 timeout 3000
+assert Aktif_Player == 0
+assert $level == "buyukes.wmb"
+frames 120
+capture inzar_lain_buyukes
+# Buyukes otosave_fish (skill1 14, YukleMenu.wdl:417): buyukes_koruses (kotu_koruyucu.wdl:6507) ends its Video_Cam scene with
+# OSN_OtoSave_izin=1, so the autosave writes kayit27.sav and kysd.sav (Aktif_SaveNo 27 -> 28). world_otosave_reload loads it.
+wait until OSN_OtoSave_dizi[14] == 1 timeout 3600
+wait until Aktif_SaveNo == 28 timeout 1200
+assert OSN_OtoSave_izin == 0

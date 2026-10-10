@@ -38,20 +38,25 @@ struct Renderer::Impl {
                 SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER,1);SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,24);
             }
             const auto backendFlag=options.backend==RendererBackend::OpenGL?SDL_WINDOW_OPENGL:SDL_WINDOW_VULKAN;
-            window=SDL_CreateWindow(options.title.c_str(),SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,options.width,options.height,backendFlag|SDL_WINDOW_RESIZABLE|SDL_WINDOW_ALLOW_HIGHDPI);
+            window=SDL_CreateWindow(options.title.c_str(),SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,options.width,options.height,backendFlag|SDL_WINDOW_RESIZABLE|SDL_WINDOW_ALLOW_HIGHDPI|(options.hidden?SDL_WINDOW_HIDDEN:0));
             if(!window)throw std::runtime_error(SDL_GetError());
             if(options.backend==RendererBackend::OpenGL)gl=std::make_unique<GLBackend>(window,options);
             else vk=std::make_unique<VulkanBackend>(window,options);
             if(FT_Init_FreeType(&freetype))throw std::runtime_error("FreeType initialization failed");if(!FcInit())throw std::runtime_error("Fontconfig initialization failed");
             counter=SDL_GetPerformanceCounter();
             for(int device=0;device<SDL_NumJoysticks();++device)open_joystick(device);
-            for(int device=0;device<SDL_NumJoysticks();++device)if(SDL_IsGameController(device)){controller=SDL_GameControllerOpen(device);if(controller)break;}
+            for(int device=0;device<SDL_NumJoysticks()&&!controller;++device)open_controller(device);
         }catch(...){destroy();throw;}
     }
     void open_joystick(int device){
         SDL_JoystickID id=SDL_JoystickGetDeviceInstanceID(device);
         for(auto*joy:joysticks)if(joy&&SDL_JoystickInstanceID(joy)==id)return;
         for(auto&joy:joysticks)if(!joy){joy=SDL_JoystickOpen(device);if(!joy)throw std::runtime_error(SDL_GetError());return;}
+    }
+    void open_controller(int device){
+        if(controller||!SDL_IsGameController(device))return;
+        controller=SDL_GameControllerOpen(device);
+        if(controller)std::cerr<<"kabus22: game controller '"<<SDL_GameControllerName(controller)<<"' opened"<<(SDL_GameControllerHasRumble(controller)?" (rumble)":"")<<'\n';
     }
     void destroy(){
         vk.reset();gl.reset();
@@ -72,6 +77,7 @@ void Renderer::set_mode(int w,int h,WindowMode mode){if(w<1||h<1)throw std::runt
 void Renderer::set_title(std::string_view title){std::string s(title);SDL_SetWindowTitle(impl_->window,s.c_str());}
 void Renderer::set_position(int x,int y){SDL_SetWindowPosition(impl_->window,x,y);}
 void Renderer::set_mouse_mode(bool visible,bool relative){SDL_ShowCursor(visible?SDL_ENABLE:SDL_DISABLE);if(SDL_SetRelativeMouseMode(relative?SDL_TRUE:SDL_FALSE))throw std::runtime_error(SDL_GetError());}
+void Renderer::rumble(float strength,std::uint32_t milliseconds){if(impl_->controller){auto level=Uint16(std::clamp(strength,0.f,1.f)*65535);SDL_GameControllerRumble(impl_->controller,level,level,milliseconds);}}
 void Renderer::request_quit(){impl_->quit=true;}
 int Renderer::shader_version()const{return impl_->gl?impl_->gl->shader_version():impl_->vk->shader_version();}
 PresentationState Renderer::presentation_state()const{return impl_->gl?impl_->gl->presentation_state():impl_->vk->presentation_state();}
@@ -80,6 +86,12 @@ void Renderer::purge_image(const Image*image){if(impl_->gl)impl_->gl->purge_imag
 void Renderer::release_scene(){if(impl_->gl)impl_->gl->release_scene();else impl_->vk->release_scene();}
 void Renderer::draw(const RenderFrame&frame){auto m=metrics();if(impl_->gl)impl_->gl->draw(frame,m);else impl_->vk->draw(frame,m);}
 void Renderer::capture(std::string_view path)const{auto m=metrics();if(impl_->gl)impl_->gl->capture(path,m);else impl_->vk->capture(path,m);}
+std::string Renderer::description()const{return impl_->gl?impl_->gl->description():impl_->vk->description();}
+std::pair<bool,std::string> Renderer::probe(RendererBackend backend,bool rayTracing){
+    RenderOptions o;o.backend=backend;o.rayTracing=rayTracing;o.hidden=true;o.vsync=false;o.width=64;o.height=64;
+    try{Impl impl(o);return {true,impl.gl?impl.gl->description():impl.vk->description()};}
+    catch(const std::exception&e){return {false,e.what()};}
+}
 Vec3 Renderer::project(Vec3 position,const Camera&camera,WindowMetrics metrics){
     Rect viewport=camera.viewport;if(viewport.width<=0||viewport.height<=0)viewport={0,0,float(metrics.width),float(metrics.height)};
     if(viewport.width<=0||viewport.height<=0)throw std::runtime_error("Cannot project onto zero-sized game view");
@@ -171,9 +183,9 @@ void Renderer::poll(Input&in){
             break;
         }
         case SDL_CONTROLLERDEVICEADDED:
-            if(!i.controller&&SDL_IsGameController(event.cdevice.which))i.controller=SDL_GameControllerOpen(event.cdevice.which);break;
+            i.open_controller(event.cdevice.which);break;
         case SDL_CONTROLLERDEVICEREMOVED:
-            if(i.controller&&SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(i.controller))==event.cdevice.which){SDL_GameControllerClose(i.controller);i.controller=nullptr;in.controllerReleased|=in.controllerButtons;in.controllerButtons.reset();in.controllerAxes.fill(0);}
+            if(i.controller&&SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(i.controller))==event.cdevice.which){std::cerr<<"kabus22: game controller removed\n";SDL_GameControllerClose(i.controller);i.controller=nullptr;in.controllerReleased|=in.controllerButtons;in.controllerButtons.reset();in.controllerAxes.fill(0);}
             break;
         case SDL_CONTROLLERBUTTONDOWN:case SDL_CONTROLLERBUTTONUP:
             if(controller_event(event.cbutton.which)&&event.cbutton.button<SDL_CONTROLLER_BUTTON_MAX){bool down=event.type==SDL_CONTROLLERBUTTONDOWN;in.controllerButtons.set(event.cbutton.button,down);(down?in.controllerPressed:in.controllerReleased).set(event.cbutton.button);}break;
@@ -182,7 +194,7 @@ void Renderer::poll(Input&in){
         default:break;
         }
     }
-    if(devicesChanged)for(int device=0;device<SDL_NumJoysticks();++device){i.open_joystick(device);if(!i.controller&&SDL_IsGameController(device))i.controller=SDL_GameControllerOpen(device);}
+    if(devicesChanged)for(int device=0;device<SDL_NumJoysticks();++device){i.open_joystick(device);i.open_controller(device);}
     if(i.controller){
         for(int axis=0;axis<SDL_CONTROLLER_AXIS_MAX;++axis){int value=SDL_GameControllerGetAxis(i.controller,static_cast<SDL_GameControllerAxis>(axis));in.controllerAxes[axis]=value/(value<0?32768.0f:32767.0f);}
         for(int button=0;button<SDL_CONTROLLER_BUTTON_MAX;++button){bool down=SDL_GameControllerGetButton(i.controller,static_cast<SDL_GameControllerButton>(button));if(down!=in.controllerButtons[button]){(down?in.controllerPressed:in.controllerReleased).set(button);in.controllerButtons.set(button,down);}}

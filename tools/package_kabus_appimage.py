@@ -48,8 +48,15 @@ RELEASE_SHA = {
 FFMPEG_ROOT = Path("/opt/kabus22-ffmpeg")
 FFMPEG_SHA = "8684f4b00f94b85461884c3719382f1261f0d9eb3d59640a1f4ac0873616f968"
 ODE_SHA = "05c0a0ea84c58c213d05e220adbc6559c473227505d5668a51493eed21b6c2f8"
-ODE_CONTACT_SHA = "748b26ef299b6abeb0ddf23d910889673ecf18da01d34f6c94eedb69ccc72970"
-ODE_CONTACT_MODIFIED_SHA = "b4e81e712cd5c833e38d95287b4ce415bc8db32e20deacc2f9eae93b5c6ddd42"
+# Applied pinned-ODE modifications: source path -> (original, modified SHA-256, recipe, retained diff).
+ODE_MODIFICATIONS = {
+    "ode/src/collision_trimesh_box.cpp": ("748b26ef299b6abeb0ddf23d910889673ecf18da01d34f6c94eedb69ccc72970",
+                                          "b4e81e712cd5c833e38d95287b4ce415bc8db32e20deacc2f9eae93b5c6ddd42",
+                                          "cmake/KabusODEContact.cmake", "GenerateContact.patch"),
+    "ode/src/lcp.cpp": ("76b3771a02736a29fa552ec49a163953420eb98aa98d8a3cbe0da21f5ed9d03c",
+                        "3467227bf68f38e2ea72785006545a998672952994aca6158492018da9c5ddfa",
+                        "cmake/KabusODELcp.cmake", "LcpStateInit.patch"),
+}
 FFMPEG_VERSIONS = {"avformat": "60.16.100", "avcodec": "60.31.102", "avutil": "58.29.100",
                    "swscale": "7.5.100", "swresample": "4.12.100"}
 FFMPEG_LIBRARIES = {"lib" + name + ".so." + version.split(".")[0]: "lib" + name + ".so." + version
@@ -529,7 +536,9 @@ def identities(appdir: Path) -> dict:
     versions = {}
     for name, marker, flags in (
             ("kabus22", "kabus22 native engine ", ("--data",)),
-            ("kabus22-setup", "kabus22 native installer ", ("--iso", "--engine", "--extractor")),
+            ("kabus22-setup", "kabus22 native installer ", ("--iso", "--engine", "--launcher", "--extractor")),
+            ("kabus22-launcher", "kabus22 native launcher ", ("--install-dir", "--engine", "--renderer", "--frames", "--self-check")),
+            ("kabus22-updater", "kabus22 native updater ", ("--install-dir", "--check", "--apply", "--rollback", "--status")),
             ("innoextract", "innoextract 1.9", ("--output-dir",))):
         binary = appdir / "usr/bin" / name
         version = command(binary, "--version").strip()
@@ -537,55 +546,67 @@ def identities(appdir: Path) -> dict:
         if marker not in version.lower() or any(flag not in help_text for flag in flags):
             fail(f"Missing real executable identity/CLI contract: {name}")
         versions[name] = {"version_output": version, "help_output": help_text}
+    # One CMake project version: the updater/manifest rely on every native binary reporting it.
+    if len({versions[name]["version_output"].split()[-1] for name in ("kabus22", "kabus22-setup", "kabus22-launcher", "kabus22-updater")}) != 1:
+        fail("Native executables report different project versions")
     engine_symbols = command("readelf", "--dyn-syms", "--wide", appdir / "usr/bin/kabus22")
     if any(symbol not in engine_symbols for symbol in ("SDL_CreateWindow", "SDL_GL_CreateContext", "avformat_open_input")):
         fail("Engine lacks actual native window/OpenGL/media imports; refusing placeholder")
     installer_symbols = command("readelf", "--dyn-syms", "--wide", appdir / "usr/bin/kabus22-setup")
     if any(symbol not in installer_symbols for symbol in ("gtk_init_check", "archive_read_new")):
         fail("Installer lacks actual GTK/native archive imports; refusing placeholder")
+    launcher_symbols = command("readelf", "--dyn-syms", "--wide", appdir / "usr/bin/kabus22-launcher")
+    if any(symbol not in launcher_symbols for symbol in ("gtk_init_check", "g_spawn_async_with_pipes")):
+        fail("Launcher lacks actual GTK/explicit child-spawn imports; refusing placeholder")
+    updater_symbols = command("readelf", "--dyn-syms", "--wide", appdir / "usr/bin/kabus22-updater")
+    if any(symbol not in updater_symbols for symbol in ("curl_easy_perform", "EVP_DigestVerify", "archive_read_new")):
+        fail("Updater lacks actual HTTPS/Ed25519/archive imports; refusing placeholder")
+    if b"KABUS22_UPDATER_TEST_API" in (appdir / "usr/bin/kabus22-updater").read_bytes():
+        fail("Test-only HTTP updater build must never be packaged")
     return versions
 
 
 def ode_evidence(build_root: Path, source_root: Path) -> dict:
-    """Retain the official archive, applied recipe, actual modified source and diff."""
+    """Retain the official archive, applied recipes, actual modified sources and diffs."""
     target = source_root / "ode-0.16.6"
     files = {}
     for name in ("third_party/ode-0.16.6.tar.gz", "third_party/ode-LICENSE-BSD.TXT",
                  "third_party/ode-ou-LICENSE-BSD.TXT", "cmake/KabusODE.cmake",
-                 "cmake/KabusODEContact.cmake"):
+                 *sorted({recipe for _, _, recipe, _ in ODE_MODIFICATIONS.values()})):
         files[name] = snapshot(ROOT / name, target / name)
     archive_path = target / "third_party/ode-0.16.6.tar.gz"
     if files["third_party/ode-0.16.6.tar.gz"]["sha256"] != ODE_SHA:
         fail("ODE source archive differs from the pinned official 0.16.6")
-    name = "ode/src/collision_trimesh_box.cpp"
+    modifications = []
     with tarfile.open(archive_path, "r:gz") as archive:
-        members = [member for member in archive.getmembers() if member.name.endswith("/" + name)]
-        if len(members) != 1 or not members[0].isfile() or not 0 < members[0].size <= MAX_FILE:
-            fail("Missing/ambiguous official ODE contact source")
-        with archive.extractfile(members[0]) as stream:
-            original = stream.read()
-    if hashlib.sha256(original).hexdigest() != ODE_CONTACT_SHA:
-        fail("Official ODE contact source hash changed")
-    modified_path = target / "modified" / name
-    modified = snapshot(build_root / "_deps/kabus_ode-src" / name, modified_path)
-    if modified["sha256"] != ODE_CONTACT_MODIFIED_SHA:
-        fail("Built ODE source is not the applied GenerateContact replacement")
-    files["modified/" + name] = modified
-    recipe = (target / "cmake/KabusODEContact.cmake").read_text()
-    if ODE_CONTACT_SHA not in recipe or ODE_CONTACT_MODIFIED_SHA not in recipe:
-        fail("ODE contact recipe does not declare the retained source relationship")
-    diff_path = target / "GenerateContact.patch"
-    diff_path.write_text("".join(difflib.unified_diff(
-        original.decode("utf-8").splitlines(keepends=True),
-        modified_path.read_text().splitlines(keepends=True),
-        fromfile="a/" + name, tofile="b/" + name)))
-    regular(diff_path)
-    files[diff_path.name] = {"size": diff_path.stat().st_size, "sha256": digest(diff_path)}
-    return {"source_archive_sha256": ODE_SHA, "files": files,
-            "modification": {"path": name, "original_sha256": ODE_CONTACT_SHA,
-                             "modified_sha256": ODE_CONTACT_MODIFIED_SHA,
-                             "diff": diff_path.name, "recipe": "cmake/KabusODEContact.cmake"},
-            "scope": "BSD-selected ODE dependency source and applied contact modification; no license assigned to the native project."}
+        for name, (original_sha, modified_sha, recipe_name, diff_name) in ODE_MODIFICATIONS.items():
+            members = [member for member in archive.getmembers() if member.name.endswith("/" + name)]
+            if len(members) != 1 or not members[0].isfile() or not 0 < members[0].size <= MAX_FILE:
+                fail(f"Missing/ambiguous official ODE source: {name}")
+            with archive.extractfile(members[0]) as stream:
+                original = stream.read()
+            if hashlib.sha256(original).hexdigest() != original_sha:
+                fail(f"Official ODE source hash changed: {name}")
+            modified_path = target / "modified" / name
+            modified = snapshot(build_root / "_deps/kabus_ode-src" / name, modified_path)
+            if modified["sha256"] != modified_sha:
+                fail(f"Built ODE source is not the applied recipe result: {name}")
+            files["modified/" + name] = modified
+            recipe = (target / recipe_name).read_text()
+            if original_sha not in recipe or modified_sha not in recipe:
+                fail(f"ODE recipe does not declare the retained source relationship: {recipe_name}")
+            # Bytes keep upstream CRLF line endings, so the diff shows only the applied change.
+            diff_path = target / diff_name
+            diff_path.write_bytes("".join(difflib.unified_diff(
+                original.decode("utf-8").splitlines(keepends=True),
+                modified_path.read_bytes().decode("utf-8").splitlines(keepends=True),
+                fromfile="a/" + name, tofile="b/" + name)).encode("utf-8"))
+            regular(diff_path)
+            files[diff_name] = {"size": diff_path.stat().st_size, "sha256": digest(diff_path)}
+            modifications.append({"path": name, "original_sha256": original_sha, "modified_sha256": modified_sha,
+                                  "diff": diff_name, "recipe": recipe_name})
+    return {"source_archive_sha256": ODE_SHA, "files": files, "modifications": modifications,
+            "scope": "BSD-selected ODE dependency source and applied modifications; no license assigned to the native project."}
 
 
 def build(args) -> None:
@@ -617,7 +638,7 @@ def build(args) -> None:
         distro["build_caches"] = {}
         distro["assembly_recipe"] = snapshot(ROOT / "tools/package_kabus_appimage.py", source_root / "package_kabus_appimage.py")
         distro["baseline_driver"] = snapshot(ROOT / "tools/build_kabus_baseline.sh", source_root / "build_kabus_baseline.sh")
-        for name, binary in (("engine", args.engine), ("installer", args.installer)):
+        for name, binary in (("engine", args.engine), ("installer", args.installer), ("launcher", args.launcher), ("updater", args.updater)):
             build_cache = binary.absolute().parent / "CMakeCache.txt"
             text = build_cache.read_text()
             for language in (("C", "CXX") if name == "engine" else ("CXX",)):
@@ -631,7 +652,9 @@ def build(args) -> None:
         cache = loader_cache()
         inputs, metadata, packages, host_dependencies = {}, {}, {}, {}
         pending = []
-        for name, source in (("kabus22", args.engine), ("kabus22-setup", args.installer), ("innoextract", args.innoextract)):
+        for name, source in (("kabus22", args.engine), ("kabus22-setup", args.installer),
+                             ("kabus22-launcher", args.launcher), ("kabus22-updater", args.updater),
+                             ("innoextract", args.innoextract)):
             source = source.absolute()
             target = appdir / "usr/bin" / name
             record = snapshot(source, target, executable=True)
@@ -711,6 +734,8 @@ def build(args) -> None:
             record["package"] = package_notices(source, appdir, packages)
             inputs[str((schemas / source.name).relative_to(appdir))] = record
         command("glib-compile-schemas", "--strict", schemas)
+        # Header-only MIT nlohmann/json is compiled into kabus22-updater: retain its distro notice and source.
+        license_report["compiled_in"] = {"nlohmann_json": package_notices(Path("/usr/include/nlohmann/json.hpp"), appdir, packages)}
         source_packages = {**packages, "bootstrap:ca-certificates": distro["https_bootstrap"]}
         sources = source_evidence(source_packages, args.source_cache.absolute(), source_root / "packages", args.acquire_sources)
         if args.acquire_sources:
@@ -748,7 +773,8 @@ def build(args) -> None:
                   "ubuntu": distro, "corresponding_source": source_report,
                   "public_release_gate": "Publication requires project-owner authorization, matching corresponding sources/notices, LGPL replacement/relink access and separate runtime qualification. This packager assigns no native-project license and does not publish or certify legal compliance. Ubuntu GPL FFmpeg binaries are not permitted in this closure.",
                   "patchelf": {"path": str(patcher), "sha256": digest(patcher), "version": patch_version},
-                  "acceptance": "Assembly/integrity checks only. Parent must exercise actual AppImage GTK launch, original ISO installation, native game, shortcuts, cancellation and private saves; ELF identities cannot prove gameplay."}
+                  "installed_payload_policy": "versions/<v>/bin carries kabus22, kabus22-launcher, kabus22-updater (signed-update client; release build only, no test HTTP hooks), kabus22-setup and innoextract (the launcher's Installation page runs them), plus the bundled lib closure, GTK schemas and dependency notices. Desktop/post-install launch opens settings; renderer actions select a UI preference, not automatic play.",
+                  "acceptance": "Assembly/integrity checks only. Parent must exercise actual AppImage GTK launch, original ISO installation, standalone installed launcher and engine, shortcuts, cancellation and private saves; ELF identities cannot prove gameplay."}
         internal_report = appdir / "usr/share/licenses/kabus22/dependencies/packaging.json"
         internal_report.parent.mkdir(parents=True, exist_ok=True)
         internal_report.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
@@ -872,6 +898,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine", type=Path, help="Parent-verified real native kabus22 ELF")
     parser.add_argument("--installer", type=Path, help="Real native GTK kabus22-setup ELF")
+    parser.add_argument("--launcher", type=Path, help="Real standalone GTK kabus22-launcher ELF")
+    parser.add_argument("--updater", type=Path, help="Real release-build kabus22-updater ELF (never the -testhttp build)")
     parser.add_argument("--innoextract", type=Path, default=ROOT / "packaging/helper-innoextract/bin/amd64/innoextract")
     parser.add_argument("--runtime", type=Path, help="Optional exact pinned official unmodified static uruntime ELF")
     parser.add_argument("--cache", type=Path, default=ROOT / "build-appimage/cache")
@@ -884,8 +912,8 @@ def main() -> None:
     if args.self_check:
         self_check()
         return
-    if not args.engine or not args.installer or not args.output:
-        parser.error("--engine, --installer and --output are required")
+    if not args.engine or not args.installer or not args.launcher or not args.updater or not args.output:
+        parser.error("--engine, --installer, --launcher, --updater and --output are required")
     if args.output.suffix != ".AppImage":
         parser.error("--output must end in .AppImage")
     build(args)

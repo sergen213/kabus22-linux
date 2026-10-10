@@ -1,21 +1,28 @@
 # Kabus22 Linux
 
-A reverse-engineered **native Linux engine and installer for Kabus 22**. It reads your own original game scripts and assets; it does not launch Wine, run the Windows engine, or bundle the game.
+A reverse-engineered **native Linux engine, GTK installer, standalone GTK launcher and signed updater for Kabus 22**. It reads your own original game scripts and assets; it does not launch Wine, run the Windows engine, or bundle the game.
 
 ## Features and scope
 
 - C++20 WDL runtime with campaign/A6 and offline Bonus/A7 compatibility paths, native archive/model/world loading, collision and ODE physics.
 - SDL2 input/windowing, FFmpeg audio/video, FreeType/fontconfig text, and a default desktop OpenGL renderer.
-- Explicit Vulkan raster or hardware-ray-query rendering, including geometry-based visibility and reflections. Unsupported requested features fail instead of silently switching backends.
-- Native GTK installer: extracts a user-owned ISO, recovers artwork/fonts from that media, and creates application-menu and desktop shortcuts. Native widescreen for the original campaign is included without a patch folder; separately selected Kabus22Patch extras remain optional.
+- Explicit Vulkan raster or hardware-ray-query rendering. Unsupported explicitly requested features fail instead of silently switching backends.
+- Optional graphics (current source): presets `original` (default, unchanged) / `enhanced` / `ultra` / `custom`, `--graphics KEY=VALUE`, PBR + HDR tone mapping, non-destructive HD texture packs (`tools/texture-upscaler`), shadow maps, SSAO, bloom, FXAA, TAA, volumetric fog, ray-traced shadows, GI and rough reflections with denoising. `kabus22 --list-capabilities` reports what this machine supports; presets disable unsupported features with a notice. See [docs/GRAPHICS_ROADMAP.md](docs/GRAPHICS_ROADMAP.md).
+- Native GTK installer: installs from a user-owned ISO, the original `setup.exe`+`setup-1.bin`, or an installed Windows game folder (`--source`, auto-detected); `--verify` / `--repair`; versioned layout with atomic switching. Native widescreen for the original campaign is included without a patch folder. See [docs/INSTALLER.md](docs/INSTALLER.md).
+- Separate GTK launcher: Install/Import, Verify, Repair, Play, renderer/preset/ray-tracing/texture-pack settings, controller settings, language, optional first-person camera, updates and diagnostic logs.
+- `kabus22-updater`: GitHub Releases updates (stable/experimental), Ed25519-signed manifests, integrity checks, transactional install and rollback; game data, saves and settings are never touched. See [docs/RELEASE_PROCESS.md](docs/RELEASE_PROCESS.md).
+- Modern controller mode (`~/.config/kabus22/controller.ini`; original mode is the default), atomic saves with rotating backups, and `kabus22 --import-saves WINDOWS_GAME_DIR` for original Windows saves.
+- Scenario-based gameplay regression (`kabus22 --scenario`) over original saves: [docs/GAMEPLAY_TESTING.md](docs/GAMEPLAY_TESTING.md). Project status: [docs/PROGRESS.md](docs/PROGRESS.md), limits: [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md), reverse engineering: [docs/REVERSE_ENGINEERING.md](docs/REVERSE_ENGINEERING.md).
 
-Original-media installation, startup, selected original-script/world consumers and real OpenGL/Vulkan GPU checks have been exercised privately. **A full campaign/Bonus playthrough, complete original-Windows parity and execution on older CPUs are not established.** Nondefault stencil, software-world-light and VIEW render-to-bitmap routes remain unsupported. Ray tracing has a 1024-material-sampler-binding ceiling.
+Original-media installation, startup, scenario-driven gameplay from 27 original saves and real OpenGL/Vulkan GPU checks have been exercised privately. **A continuous full campaign/Bonus playthrough, complete original-Windows parity and execution on older CPUs are not established.** Nondefault stencil, software-world-light and VIEW render-to-bitmap routes remain unsupported. Ray tracing has a 1024-material-sampler-binding ceiling.
 
 ## AppImage prerelease download
 
 Use the **[v0.1.1 experimental prerelease](https://github.com/sergen213/kabus22-linux/releases/tag/v0.1.1)** for integrated original-ISO widescreen and the recovered bitmap-font palette correction. Use assets and checksums from that exact release; historical private artifact hashes in the packaging notice do not identify this download.
 
 The earlier [v0.1.0 release](https://github.com/sergen213/kabus22-linux/releases/tag/v0.1.0) is retained unchanged and predates these corrections.
+
+The current-source standalone launcher and subsequent engine changes are **not included in the unchanged published v0.1.1 release**.
 
 Download these assets together:
 
@@ -50,7 +57,8 @@ sudo apt-get install --no-install-recommends \
   git build-essential cmake ninja-build pkg-config python3 \
   libsdl2-dev libepoxy-dev libavformat-dev libavcodec-dev libavutil-dev \
   libswscale-dev libswresample-dev libfreetype6-dev libfontconfig1-dev \
-  libvulkan-dev glslang-tools libgtk-3-dev libarchive-dev innoextract
+  libvulkan-dev glslang-tools libgtk-3-dev libarchive-dev innoextract \
+  libcurl4-openssl-dev libssl-dev nlohmann-json3-dev python3-cryptography
 
 git clone https://github.com/sergen213/kabus22-linux.git
 cd kabus22-linux
@@ -60,7 +68,7 @@ cmake -S installer -B build/installer -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/installer --parallel 2
 ```
 
-The pinned ODE **source** archive and BSD notices are included under `third_party/`; configuration checks its hash and applies the contact recipe in `cmake/`. No original game data is needed to compile either executable. A local source build uses your distribution's libraries; it is not the separately pinned AppImage dependency closure described below.
+The pinned ODE **source** archive and BSD notices are included under `third_party/`; configuration checks its hash and applies two hash-checked recipes in `cmake/`: the contact merge (`KabusODEContact.cmake`) and zero-initialization of the LCP solver's `state[]` array (`KabusODELcp.cmake`). These commands build three separate executables: `build/native/kabus22`, `build/installer/kabus22-setup` and `build/installer/kabus22-launcher`. No original game data is needed to compile them. A local source build uses your distribution's libraries; it is not the separately pinned AppImage dependency closure described below.
 
 ### Tests
 
@@ -70,17 +78,18 @@ ctest --test-dir build/installer --output-on-failure
 python3 tools/check_wrs2.py
 ```
 
-A source-only checkout registers three asset-free native CTests (`wdl_semantics`, `asset_boundaries`, `media_boundaries`) and one separate installer test (`installer_security_boundaries`). The archive-tool check also generates its own fixtures.
+A source-only checkout registers three asset-free native CTests (`wdl_semantics`, `asset_boundaries`, `media_boundaries`) and two separate installer-directory tests (`installer_security_boundaries`, `launcher_settings_behavior`). The archive-tool check also generates its own fixtures.
 
 Three additional native tests (`engine_boundaries`, `material_boundaries`, `physics_boundaries`) register automatically only when their private original-game fixtures exist at CMake's expected paths. They use `Normal_Mix.fx` and `Normal_SunMix.fx` under `reverse/media/iso/mode/samples/K22_mode.wrs/`, and `reverse/extracted/assets/yr.hmp`; engine needs both shader files and terrain, material needs both shader files, physics needs terrain. If present, the private wrapped-media fixture under `reverse/decompiled/runtime/campaign-media/riff-vorbis/` also extends `media_boundaries`. These files are intentionally not published. Reconfigure after supplying legally obtained fixtures. Default CTest success alone is not graphical or gameplay qualification.
 
 ## Install your own game
 
-Run the installer as your ordinary user, **not with sudo**. A separately built installer does not search `PATH` for payloads: without overrides it expects `kabus22` and `innoextract` beside its own executable. Supply the engine and extractor explicitly for this source-build layout:
+Run the installer as your ordinary user, **not with sudo**. A separately built installer does not search `PATH` for payloads: without overrides it expects `kabus22`, `kabus22-launcher` and `innoextract` beside its own executable. Supply all three explicitly for this source-build layout:
 
 ```sh
 ./build/installer/kabus22-setup \
-  --engine "$PWD/build/native/kabus22" --extractor /usr/bin/innoextract
+  --engine "$PWD/build/native/kabus22" \
+  --launcher "$PWD/build/installer/kabus22-launcher" --extractor /usr/bin/innoextract
 ```
 
 In the window, select your original ISO and choose a **new** installation directory. **Current source includes native original-campaign widescreen by default; leave community extras empty for an ISO-only install.** A separately obtained Kabus22Patch folder is only needed if you independently want its extras. It is neither bundled nor automatically discovered, and installation does not rewrite WDL scripts or require patch artwork.
@@ -90,13 +99,32 @@ For an unattended install, substitute your own absolute media path:
 ```sh
 ./build/installer/kabus22-setup \
   --iso "/path/to/Kabus 22.iso" --install-dir "$HOME/Games/Kabus22" \
-  --engine "$PWD/build/native/kabus22" --extractor /usr/bin/innoextract \
+  --engine "$PWD/build/native/kabus22" \
+  --launcher "$PWD/build/installer/kabus22-launcher" --extractor /usr/bin/innoextract \
   --unattended
 ```
 
 Add `--patch "/path/to/Kabus22Patch"` only for separately desired community extras, not to enable native original-campaign widescreen. The installer refuses existing destinations and existing shortcuts; it stages extraction and preserves the source media on cancellation. The developer `--setup` route accepts the original loose `setup.exe` with its original sibling `setup-1.bin`, instead of `--iso`; it extracts them without running Windows code. `--help` lists options and `--self-check` runs asset-free CLI/security checks.
 
-The install contains `bin/kabus22` and `game/`. The examples above rely on installed host libraries; a bundled dependency payload additionally requires its corresponding notices. Launchers keep the existing `bin/kabus22 --data game` route: display adaptation is engine-owned, not an installer flag or configuration copy. Shortcuts launch native OpenGL by default and offer explicit Vulkan RT/raster actions. Your desktop environment may require marking a desktop shortcut trusted before opening it.
+The current-source install contains `bin/kabus22-launcher`, `bin/kabus22` and `game/`. The examples above rely on installed host libraries; a bundled dependency payload additionally requires its corresponding notices. Application-menu and desktop shortcuts open the standalone settings launcher, not the engine directly. Explicit Vulkan RT/raster actions preselect the launcher's API choice; they **do not automatically Play**. Display adaptation remains engine-owned. Your desktop environment may require marking a desktop shortcut trusted before opening it.
+
+### Standalone settings launcher (current source)
+
+Unlike the installer, which requires your own ISO and a new destination, the launcher opens an **existing native installation** and needs no ISO or extraction:
+
+```sh
+./build/installer/kabus22-launcher --install-dir "$HOME/Games/Kabus22"
+# Or use the installed application:
+"$HOME/Games/Kabus22/bin/kabus22-launcher" --install-dir "$HOME/Games/Kabus22"
+```
+
+Its six tabs are Launch, Graphics, Audio, Keyboard, Joystick and Bonus. **Apply** writes settings without starting the game; **Play** saves and starts the separate native engine. Campaign and installed offline Bonus data are selectable. OpenGL, Vulkan raster and Vulkan hardware RT remain explicit choices without fallback.
+
+Campaign controls retain original authored resolution and 16/32-bit color-depth compatibility records, lighting quality, completion buffering, mipmapping, anisotropy, reflections, blood color/amount and brightness/contrast/gamma. The color-depth record is a script/video compatibility choice, **not a promise of the old D3D framebuffer's physical format**. Blood amount and the three effects/music/dialogue volumes use 0–100; brightness/gamma use −100–100 and contrast −80–80. Original scripts may floor audio gains, so zero is not guaranteed exact mute. Ten keyboard actions and six joystick buttons are editable; joystick buttons use 1–12.
+
+Bonus exposes its five source-consumed settings: authored resolution, shader level, anisotropy, music and stored brightness (50 is neutral; accepted native fixed-point range −2097102–2097151, not a recovered Windows UI range). Its separate AA choices request off/basic/4/9 samples, negotiated against native hardware. Campaign and Bonus text support `tr`/`en`/`de`; Campaign voice/movie audio supports `tr`/`en` (German text defaults to English voices). Saved patch locales are preserved unless intentionally changed; “Keep saved language / game default” also preserves patch indices not advertised as native locales. Patched/custom display remains game-owned. No speculative sensitivity, software-light, stencil-shadow or online-score controls are added.
+
+Launcher choices live in `${XDG_CONFIG_HOME:-$HOME/.config}/kabus22/launcher.ini`. Game settings use the engine's existing save root, `${XDG_DATA_HOME:-$HOME/.local/share}/kabus22`, including private Campaign/Bonus records; original installed media and source defaults remain unchanged. Use private XDG directories for experiments. Native original-campaign display controls follow the engine limits below.
 
 ## Run the native engine
 
@@ -113,6 +141,8 @@ The install contains `bin/kabus22` and `game/`. The examples above rely on insta
 ```
 
 You can instead run the installed `"$HOME/Games/Kabus22/bin/kabus22"` with the same arguments. Vulkan requires a working host Vulkan loader/driver, Vulkan 1.3 and the requested device features. RT additionally requires ray queries, acceleration structures, buffer device addresses, descriptor indexing and shader int64. There is no automatic fallback on unsupported hardware. GPU drivers and GL/Vulkan loaders are not shipped here.
+
+**Skipping intros.** Press Escape, Return, Space, the left mouse button or pad A/B/Start to skip the startup logos (FIP Publishing / Son Işık, about 15 s; the original cannot skip them), the New Game intro and full-screen movies (the original scripts accept only Escape there). The logos are fast-forwarded, not cut, so their script effects still run; the skipping press does not reach the menu or the game. Without a press, nothing changes.
 
 ### Original-campaign widescreen (v0.1.1)
 
@@ -202,7 +232,7 @@ docker build --platform linux/amd64 -t kabus22-ubuntu24-toolchain \
 sh tools/build_kabus_baseline.sh "$PWD/build-baseline" kabus22-ubuntu24-toolchain
 ```
 
-The image pins Ubuntu 24.04/snapshot packages, builds LGPL-only FFmpeg 6.1.1 and classic SDL2 dependencies, and provides Python 3.11+, `readelf`, `patchelf`, SquashFS tools and `glib-compile-schemas`. Do not substitute Ubuntu's GPL-enabled FFmpeg binaries for this packaging closure. The driver builds with two parallel jobs using enumerated read-only source mounts, acquires authenticated corresponding dependency sources with network access, then assembles offline. ISO/assets/user data never enter the image. Output AppImage, JSON report and `.AppImage.sources.tar.gz` paths must be new; outputs are not overwritten or uploaded. Keep notices, matching dependency source sidecar and exact native project sources with any distributed artifact. The private qualified baseline imported GLIBC 2.38; generic compilation does not prove older-CPU portability.
+The image pins Ubuntu 24.04/snapshot packages, builds LGPL-only FFmpeg 6.1.1 and classic SDL2 dependencies, and provides Python 3.11+, `readelf`, `patchelf`, SquashFS tools, `glib-compile-schemas` and the updater's libcurl/OpenSSL/nlohmann-json development packages. Do not substitute Ubuntu's GPL-enabled FFmpeg binaries for this packaging closure. The driver builds the engine, GTK installer, separate GTK launcher and release (non-test) `kabus22-updater` with two parallel jobs using enumerated read-only source mounts, then passes the mandatory `--launcher` and `--updater` payloads to `tools/package_kabus_appimage.py`. It acquires authenticated corresponding dependency sources with network access, then assembles offline. The AppImage entry remains the installer; the installed settings launcher is a distinct application. ISO/assets/user data never enter the image. Output AppImage, JSON report and `.AppImage.sources.tar.gz` paths must be new; outputs are not overwritten or uploaded. Keep notices, matching dependency source sidecar and exact native project sources with any distributed artifact. The private qualified baseline required glibc 2.38 or newer; host GPU loaders/drivers are deliberately excluded. Update payload/manifest signing and rollback are described in [docs/RELEASE_PROCESS.md](docs/RELEASE_PROCESS.md).
 
 ## Ghidra tools
 

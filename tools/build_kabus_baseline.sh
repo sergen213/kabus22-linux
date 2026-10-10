@@ -80,6 +80,8 @@ package() {
     shift
     container "$network" python3 /src/tools/package_kabus_appimage.py \
         --engine /work/engine/kabus22 --installer /work/installer/kabus22-setup \
+        --launcher /work/installer/kabus22-launcher \
+        --updater /work/installer/kabus22-updater \
         --runtime /runtime --cache /work/cache --source-cache /work/sources \
         --output /work/Kabus22-Linux-Installer-x86_64.AppImage "$@"
 }

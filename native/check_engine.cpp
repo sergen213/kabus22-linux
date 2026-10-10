@@ -3,6 +3,8 @@
 #endif
 #include "engine.hpp"
 #include "wdl.hpp"
+#include "saves.hpp"
+#include "check_modern_box.hpp"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -10,13 +12,16 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdlib>
+#include <chrono>
 #include <cstring>
 #include <fstream>
 #include <filesystem>
 #include <initializer_list>
 #include <iostream>
 #include <iterator>
+#include <numbers>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <tuple>
@@ -172,6 +177,188 @@ void write_animation_model(const std::filesystem::path& path, float bias = 0) {
     std::ofstream fixture(path, std::ios::binary);
     assert(fixture.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size())).good());
 }
+void a6_movement_consumers() {
+    TempDirectory temporary;
+    SaveEnvironment saves(temporary.path / "private");
+    Assets assets(temporary.path); Media media(assets, false); State state;
+    state.profile = SemanticProfile::CampaignA6;
+    Engine engine(assets, nullptr, media, state);
+    Runtime runtime(state, [&](auto& vm, auto& ctx, auto name, auto args) {
+        if(name=="nested_push_budget"){assert(engine.number("pushed_events")==1);return Value{};}
+        return engine.builtin(vm, ctx, name, args);
+    });
+    runtime.load_text("a6-movement-consumer.wdl", R"(
+        VAR contacts,contact_x,contact_z,blocked;
+        FUNCTION touch() {
+            IF(event_type==EVENT_STUCK) { blocked+=1; }
+            ELSE { contacts+=1; contact_x=MY.x; contact_z=MY.z; }
+        }
+        VAR query_order,query_actor_x,impact_count,impact_normal,kill_query,pushed_events;
+        VAR nested_up[3]=0,0,1; VAR nested_down[3]=0,0,-1;
+        FUNCTION query_events(receiver,other) {
+            IF(event_type==EVENT_SHOOT) { query_order=query_order*100+9;query_actor_x=YOU.x;
+                IF(kill_query) { ent_remove(YOU);ent_remove(MY); }
+            }
+            IF(event_type==EVENT_SONAR) { query_order=query_order*100+11; }
+            IF(event_type==EVENT_IMPACT) { impact_count+=1;impact_normal=normal.x; }
+        }
+        FUNCTION push_nested() {
+            pushed_events+=1;nested_push_budget();
+            ent_move(nullvector,nested_up);ent_move(nullvector,nested_down);
+        }
+    )");
+    World floor; legacy_floor_fixture(floor); engine.world = &floor;
+    Model resource; resource.flags = 0x20;
+    auto mover = state.create(Object::Kind::Entity).id;
+    auto& data = engine.entities[mover]; data.model = &resource; data.type = 2;
+    state.member(mover, "event").set(Value::function(runtime.function("touch")));
+    engine.set_field(mover, "event_flags", (1u << 1) | (1u << 2) | (1u << 3));
+    auto v = [&](Vec3 value) {
+        Argument arg{Value::object(state.create(Object::Kind::Vector).id), {}};
+        engine.set_vector(arg, value); return arg;
+    };
+    auto move = [&](Vec3 start, Vec3 delta, double friction, std::uint32_t mode = 262144) {
+        engine.set_position(mover, start);
+        engine.set_global("move_mode", Value::from_int(mode));
+        engine.set_global("move_friction", Value::from_double(friction));
+        engine.set_global("contacts", {}); engine.set_global("blocked", {});
+        ProcessContext ctx{0, mover, 0};
+        const std::array args{v({}), v(delta)};
+        return engine.builtin(runtime, ctx, "ent_move", args);
+    };
+    move({0, 0, 2}, {4, 0, -4}, .25);
+    close_vector(engine.position(mover), {3.4921875f, 0, .03125f});
+    close_vector(engine.vector(engine.global_vector("vglide")), {-1, 0, 4});
+    close_vector(engine.vector(engine.global_vector("bounce")), {4, 0, 4});
+    assert(engine.number("contacts") == 1 && engine.number("blocked") == 0);
+    close(engine.number("contact_x"), 0); close(engine.number("contact_z"), 2);
+    // The original helper does not clamp friction. Reversal stops at the contact,
+    // before VGLIDE accumulation, and sends STUCK before final position publication.
+    move({0, 0, 2}, {4, 0, -4}, 1.25);
+    close_vector(engine.position(mover), {1.96875f, 0, .03125f});
+    close_vector(engine.vector(engine.global_vector("vglide")), {});
+    assert(engine.number("blocked") == 1);
+    // World start-solid rejection scales velocity to .1 from the authored origin;
+    // it is not a relocation, penetration solver or unqualified zero-motion stop.
+    move({0, 0, -1}, {0, 0, -4}, .25);
+    close_vector(engine.position(mover), {0, 0, -1.3994140625f});
+    assert(engine.number("blocked") == 1 && engine.number("contacts") == 0);
+    // Two coincident contact planes in an obtuse corner: neither single-plane
+    // candidate clears the other, so 00439150/00439240 keeps the UNNORMALIZED crease.
+    World corner;
+    corner.planes = {{{1,0,0},-.03125f,0}, {{-.6f,.8f,0},-.03125f,3}};
+    corner.legacyPointNodes = {{0,{1,-128},0}, {1,{-256,-128},1}};
+    corner.hulls = corner.legacyPointNodes;
+    corner.legacyHullsValid = true;
+    for (auto& hull : corner.legacyHulls) hull = {0,1,{},{},false};
+    engine.world = &corner;
+    move({}, {-4,-4,4}, .25);
+    close_vector(engine.position(mover), {0,0,1.919921875f}, .002);
+    close_vector(engine.vector(engine.global_vector("vglide")), {4,4,-2.080078125f}, .002);
+    assert(engine.number("contacts") == 1); // World contact is deduplicated per move.
+    move({}, {-4,-4,0}, .25);
+    close_vector(engine.position(mover), {});
+    engine.set_field(mover, "flags", 512);
+    move({}, {-4,-4,0}, .25);
+    close_vector(engine.position(mover), {-4,-4,0});
+    // Public modern consumers: retained yawed/asymmetric MY hull, direct
+    // source surface TARGET and distance scalar (not normalized-time movement).
+    engine.set_field(mover,"flags",0);engine.set_field(mover,"narrow",0);engine.set_field(mover,"fat",0);
+    for(auto [axis,lo,hi]:std::array{std::tuple{"x",-4.,4.},std::tuple{"y",-1.,1.},std::tuple{"z",-1.,1.}}){
+        engine.set_field(mover,std::string("min_")+axis,lo);engine.set_field(mover,std::string("max_")+axis,hi);
+    }
+    engine.set_field(mover,"pan",90);
+    World wall=triangle_world({0,-100,-100},{0,100,-100},{0,0,100});engine.world=&wall;
+    ProcessContext modernContext{0,mover,0};
+    const std::array traceArgs{v({5,0,0}),v({-5,0,0}),Argument{Value::from_int(8192|1),{}}};
+    close(engine.builtin(runtime,modernContext,"c_trace",traceArgs).real(),3.9501953125,.002);
+    close(engine.vector(engine.global_vector("target")).x,.0498046875,.002);
+    close_vector(engine.vector(engine.global_vector("normal")),{1,0,0},.002);
+    engine.set_field(mover,"pan",0);engine.set_field(mover,"min_x",-1);engine.set_field(mover,"max_x",1);
+    engine.set_field(mover,"min_z",-3);engine.set_field(mover,"max_z",-1);engine.set_field(mover,"scale_z",7);
+    World modernFloor=triangle_world({-100,-100,0},{100,-100,0},{0,100,0});engine.world=&modernFloor;
+    const std::array asymmetricArgs{v({0,0,5}),v({0,0,-5}),Argument{Value::from_int(8192|1),{}}};
+    close(engine.builtin(runtime,modernContext,"c_trace",asymmetricArgs).real(),1.9501953125,.002);
+    auto modernMove=[&](Vec3 start,Vec3 delta,std::uint32_t mode=262144){
+        engine.set_position(mover,start);engine.set_global("contacts",{});engine.set_global("blocked",{});
+        const std::array args{Argument{Value::object(mover),{}},v({}),v(delta),Argument{Value::from_int(mode),{}}};
+        return engine.builtin(runtime,modernContext,"c_move",args);
+    };
+    modernMove({0,0,5},{0,0,-10},0);
+    close(engine.position(mover).z,3.0498046875,.003);
+    close(engine.number("contact_z"),engine.position(mover).z,.001); // Callback sees this pass's new public XYZ.
+    engine.world=&wall;engine.set_field(mover,"min_z",-1);engine.set_field(mover,"max_z",1);
+    engine.set_global("move_min_z",Value::from_int(-1));engine.set_global("disable_z_glide",{});
+    engine.set_vector(engine.global_vector("vglide"),{7,8,9});engine.set_global("move_friction",Value::from_double(1.25));
+    modernMove({2,0,0},{-4,0,4});
+    close(engine.position(mover).z,4,.003);assert(engine.position(mover).x>1);
+    close_vector(engine.vector(engine.global_vector("vglide")),{7,8,9}); // A6 modern does not publish legacy VGLIDE/friction.
+    engine.set_global("disable_z_glide",Value::from_int(1));
+    modernMove({2,0,0},{-4,0,4});
+    assert(engine.position(mover).z>.9f&&engine.position(mover).z<1.f&&engine.position(mover).x>1.f);
+    engine.set_global("disable_z_glide",{});engine.set_global("move_min_z",Value::from_int(1));
+    modernMove({2,0,0},{-4,0,4});
+    assert(engine.position(mover).z>.9f&&engine.position(mover).z<1.f); // Independent source MOVE_MIN_Z gate.
+    engine.set_global("move_min_z",Value::from_int(-1));engine.world=nullptr;
+    modernMove({}, {20,.39f,0},0);
+    close_vector(engine.position(mover),{20.0029296875f,0,0},.001); // 0046f45a renormalizes snapped .0195 minor component.
+    auto receiver=state.create(Object::Kind::Entity).id;
+    auto& receiverData=engine.entities[receiver];receiverData.model=&wall.mesh;receiverData.type=2;
+    for(auto axis:{"x","y","z"}){engine.set_field(receiver,std::string("scale_")+axis,1);engine.set_field(receiver,std::string("min_")+axis,-1);engine.set_field(receiver,std::string("max_")+axis,1);}
+    state.member(receiver,"event").set(Value::function(runtime.function("query_events")));
+    engine.set_field(receiver,"event_flags",0);
+    modernMove({5,0,0},{-10,0,0},0);
+    close_vector(engine.vector(engine.global_vector("normal")),{1,0,0},.002);
+    engine.set_field(receiver,"event_flags",1u<<5);
+    modernMove({5,0,0},{-10,0,0},0);
+    assert(engine.number("impact_count")==1);close(engine.number("impact_normal"),-1,.002);
+    close_vector(engine.vector(engine.global_vector("normal")),{-1,0,0},.002);
+    engine.set_field(receiver,"event_flags",(1u<<9)|(1u<<11));
+    modernMove({5,0,0},{-10,0,0},1024|2048);
+    assert(engine.number("query_order")==911);close(engine.number("query_actor_x"),5);
+    close_vector(engine.vector(engine.global_vector("normal")),{1,0,0},.002);
+    // Source correction is not a broadphase horizon: a plane .025 nearer
+    // must win against the global plane even though its geometric entry is later than the backed-off old best.
+    engine.world=&modernFloor;receiverData.model=&modernFloor.mesh;engine.set_position(receiver,{0,0,.025f});
+    engine.set_field(receiver,"event_flags",0);engine.set_field(mover,"scale_z",1);
+    const std::array closestArgs{v({0,0,5}),v({0,0,-5}),Argument{Value::from_int(8192|1),{}}};
+    close(engine.builtin(runtime,modernContext,"c_trace",closestArgs).real(),3.9251953125,.002);
+    assert(modernContext.you==receiver);close(engine.vector(engine.global_vector("target")).z,.0748046875,.002);
+    engine.remove_entity(runtime,receiver);
+    World layered=triangle_world({-100,-100,0},{100,-100,0},{0,100,0});
+    layered.collision.vertices.insert(layered.collision.vertices.end(),{{-100,-100,.025f},{100,-100,.025f},{0,100,.025f}});
+    layered.collision.triangles.push_back({3,4,5});layered.collision.flags.push_back(0);
+    engine.world=&layered;engine.collisionOrder={0,1};
+    engine.collisionNodes={{{-100,-100,0},{100,100,.025f},0,0,1,2},{{-100,-100,.025f},{100,100,.025f},1,1,0,0},{{-100,-100,0},{100,100,0},0,1,0,0}};
+    close(engine.builtin(runtime,modernContext,"c_trace",closestArgs).real(),3.9251953125,.002);
+    assert(modernContext.you==0);close(engine.vector(engine.global_vector("target")).z,.0748046875,.002);
+    engine.collisionNodes.clear();engine.collisionOrder.clear();
+    World destination;legacy_floor_fixture(destination);engine.world=&destination;engine.set_field(mover,"flags",512);
+    for(auto content:{-126,-128,-256}){
+        destination.legacyPointNodes.back().children[1]=content;
+        modernMove({0,0,2},{0,0,-4},0);
+        close_vector(engine.position(mover),{0,0,-2});
+        assert(engine.number("in_passable")==int(content==-126)&&engine.number("in_solid")==int(content==-128));
+    }
+    // EVENT_PUSH performs two real nested legacy moves, restoring its pose but
+    // changing the current source epoch. A stale post-callback stamp would repeat indefinitely.
+    engine.world=nullptr;engine.set_field(mover,"flags",0);engine.set_field(mover,"push",1);
+    receiver=state.create(Object::Kind::Entity).id;auto& pushed=engine.entities[receiver];pushed.model=&resource;pushed.type=2;
+    for(auto axis:{"x","y","z"}){engine.set_field(receiver,std::string("scale_")+axis,1);engine.set_field(receiver,std::string("min_")+axis,-1);engine.set_field(receiver,std::string("max_")+axis,1);}
+    engine.set_position(receiver,{5,0,0});engine.set_field(receiver,"push",0);engine.set_field(receiver,"event_flags",1u<<4);
+    state.member(receiver,"event").set(Value::function(runtime.function("push_nested")));
+    move({}, {10,0,0},.25,512);
+    assert(engine.number("pushed_events")==1);close_vector(engine.position(mover),{10,0,0});close_vector(engine.position(receiver),{5,0,0});
+    engine.remove_entity(runtime,receiver);engine.set_field(mover,"push",0);
+    // SHOOT removal invalidates both actor and recipient before SONAR/impact; no stale owner access or final actor write.
+    receiver=state.create(Object::Kind::Entity).id;auto& removed=engine.entities[receiver];removed.model=&wall.mesh;removed.type=2;
+    for(auto axis:{"x","y","z"}){engine.set_field(receiver,std::string("scale_")+axis,1);engine.set_field(receiver,std::string("min_")+axis,-1);engine.set_field(receiver,std::string("max_")+axis,1);}
+    engine.set_field(receiver,"event_flags",(1u<<9)|(1u<<11)|(1u<<5));state.member(receiver,"event").set(Value::function(runtime.function("query_events")));
+    engine.set_global("query_order",{});engine.set_global("kill_query",Value::from_int(1));
+    close(modernMove({5,0,0},{-10,0,0},1024|2048).real(),0);
+    assert(engine.number("query_order")==9&&!engine.entities.contains(mover)&&!engine.entities.contains(receiver));
+}
+
 void legacy_trace_consumers() {
     TempDirectory temporary;
     SaveEnvironment saves(temporary.path / "private");
@@ -246,6 +433,9 @@ void legacy_trace_consumers() {
         VAR plain_owner;
         function cast(from,to,mode) {
             trace_mode=mode; var distance=trace(from,to); plain_owner=YOU; return distance;
+        }
+        function cast_you(from,to,mode,who) {
+            you=who; trace_mode=mode; trace(from,to); plain_owner=YOU;
         }
     )wdl");
     auto vector = [&](Vec3 value) {
@@ -339,6 +529,13 @@ void legacy_trace_consumers() {
     assert(cast({10, 2, 3}, {-10, 2, 3}, 0).raw() == 6112);
     assert(engine.global("plain_owner").bits == primitive);
     close_vector(engine.vector(engine.global_vector("target")), {4.03125f, 2, 3});
+    // 004546f0 rewrites YOU storage 006441dc even with IGNORE_YOU: the hit entity, else NULL
+    // (dinamik_modeller.wdl ucakkursun_gonder damages YOU after an IGNORE_YOU trace).
+    for (auto [from, expected] : {std::pair{Vec3{10, 2, 3}, primitive}, {Vec3{10, 20, 3}, ObjectId{0}}}) {
+        const std::array args{vector(from), vector({-10, from.y, 3}), Argument{Value::from_int(2), {}}, Argument{Value::object(me), {}}};
+        runtime.start("cast_you", args, 0, 0);
+        assert(engine.global("plain_owner").bits == expected);
+    }
     engine.remove_entity(runtime, primitive); engine.world = &floor;
     engine.set_field(me, "push", 0);
     const auto nearer = actor(nearMap.mesh, 4, {});
@@ -797,15 +994,22 @@ void graphics_consumers() {
         close_vector(engine.frame().lights[1].position, {90, 0, 5});
         engine.remove_entity(runtime, a); engine.remove_entity(runtime, b); engine.remove_entity(runtime, c);
         engine.set_vector(engine.global_vector("SUN_ANGLE"), {0, 60, 0}); numeric("SUN_LIGHT", 100);
+        engine.set_vector(engine.global_vector("sun_color"),{32,64,128});
         engine.prepare(runtime); assert(engine.frame().lights.size() == 1);
         const auto sun = engine.frame().lights[0];
         assert(sun.synthetic && !sun.baked && sun.type == 3);
-        close_vector(sun.direction, {.5f, 0, .8660254f}); close(sun.color.r, 1); close(sun.range, 1); close(sun.intensity, 1);
+        // A6 00437800 aims the D3D directional light away from the sun (toward-light vector = SUN_ANGLE, lit from above).
+        close_vector(sun.direction, bonus ? Vec3{.5f, 0, .8660254f} : Vec3{-.5f, 0, -.8660254f}); close(sun.color.r,bonus?128.f/255.f:2.f);
+        close(sun.color.g,bonus?64.f/255.f:2.f);close(sun.color.b,bonus?32.f/255.f:2.f);
+        close(sun.range,1);close(sun.intensity,1);
         a = lamp(110, 100); engine.prepare(runtime);
         b = lamp(120, 100); engine.prepare(runtime);
         assert(engine.frame().lights.size() == 2 && engine.frame().lights[0].type == 3);
         close_vector(engine.frame().lights[1].position, {bonus ? 110.f : 120.f, 0, 5});
         engine.remove_entity(runtime, a); engine.remove_entity(runtime, b);
+        numeric("SUN_LIGHT",-1);engine.prepare(runtime);
+        if(bonus)assert(engine.frame().lights.empty());
+        else{assert(engine.frame().lights.size()==1);close(engine.frame().lights[0].color.r,-.02);}
         numeric("SUN_LIGHT", 0); engine.prepare(runtime); assert(engine.frame().lights.empty());
         floor.lights.push_back({{70, 0, 5}, {1, 0, 0, 1}, 25});
         engine.prepare(runtime); assert(engine.frame().lights.size() == 1 && engine.frame().lights[0].baked &&
@@ -920,9 +1124,9 @@ void campaign_persistence(const std::filesystem::path& data) {
         }, idle);
         if (!game.runtime.function("dbg_screen_reset")) {
             close_vector(game.engine.vector(game.engine.global_vector("screen_size")), {2560,1440,0});
-            close(game.engine.number("GA_Cozunurluk"),0);
-            close(game.element("GA_ScaleOranlari",0).real(),2);
-            close(game.element("GA_ScaleOranlari",1).real(),2);
+            close(game.engine.number("GA_Cozunurluk"),2); // Native size >=1280x720: original GA_Cozunurluk>1 (1024) art tier.
+            close(game.element("GA_ScaleOranlari",4).real(),2);
+            close(game.element("GA_ScaleOranlari",5).real(),2);
             close(game.engine.field(game.engine.global("camera").bits,"size_x"),2560);
             close(game.engine.field(game.engine.global("camera").bits,"size_y"),1440);
         }
@@ -1175,8 +1379,8 @@ void campaign_display(const std::filesystem::path& root,std::string_view backend
         close(engine.field(engine.global("camera").bits,"size_y"),screen.y);
         assert(!engine.frame().ui.empty());
         std::cout<<"original-display "<<name<<" screen="<<screen.x<<'x'<<screen.y<<" ui="<<engine.frame().ui.size()
-                 <<" scale="<<state.require(engine.global("GA_ScaleOranlari").bits).array[0].value.real()<<','
-                 <<state.require(engine.global("GA_ScaleOranlari").bits).array[1].value.real()<<'\n';
+                 <<" scale="<<state.require(engine.global("GA_ScaleOranlari").bits).array[4].value.real()<<','
+                 <<state.require(engine.global("GA_ScaleOranlari").bits).array[5].value.real()<<'\n';
     };
     auto full=[&](std::string_view name){
         const auto id=engine.global(name).bits;const auto bitmap=state.require(id).field("bmap").value;
@@ -1192,7 +1396,7 @@ void campaign_display(const std::filesystem::path& root,std::string_view backend
         const auto& bitmap=assets.image(font.text);const int cw=int(engine.field(font.id,"style")),ch=int(engine.field(font.id,"size"));
         assert(cw>0&&ch>0);std::vector<std::string_view> rows;
         for(const auto& slot:text.array)if(slot.value){auto bytes=engine.string(slot.value);for(std::size_t start=0;;){auto end=bytes.find('\n',start);rows.push_back(bytes.substr(start,end==std::string_view::npos?bytes.size()-start:end-start));if(end==std::string_view::npos)break;start=end+1;}}
-        const int offset=int(float(engine.field(id,"offset_y"))/float(state.require(engine.global("GA_FontOranlari").bits).array[0].value.real()));
+        const int offset=int(float(engine.field(id,"offset_y"))/float(state.require(engine.global("GA_FontOranlari").bits).array[2].value.real()));
         std::size_t row=std::size_t((offset+ch-1)/ch);while(row<rows.size()&&rows[row].empty())++row;
         const auto glyph=std::find_if(engine.frame().ui.begin(),engine.frame().ui.end(),[&](const auto& command){return command.layer==engine.field(id,"layer")&&command.image&&command.image->width==bitmap.width&&command.image->height==bitmap.height;});
         if(row>=rows.size()||int(row*ch)-offset+ch>=engine.field(id,"size_y")){assert(glyph==engine.frame().ui.end());return;}
@@ -1259,7 +1463,11 @@ void campaign_display(const std::filesystem::path& root,std::string_view backend
     until("brightness/main",1800,[&]{return engine.number("ParlaklikMenuAcik")!=0||visible("AMP_YeniOyun");});
     if(engine.number("ParlaklikMenuAcik")!=0){if(menus){capture("brightness");full("PMP_Arka");}key(SDL_SCANCODE_RETURN);}
     until("main",120,[&]{return visible("AMP_YeniOyun")&&engine.number("DM_Acik")==1;});
-    if(menus){capture("main");full("DMP_Arka");}
+    auto bitmapFile=[&](std::string_view name){const auto bitmap=state.require(engine.global(name).bits).field("bmap").value;std::string file=bitmap?state.require(bitmap.bits).text:std::string();for(auto& c:file)c=char(std::tolower(static_cast<unsigned char>(c)));return file;};
+    if(menus){capture("main");full("DMP_Arka");
+        // Kabusdismenu.wdl:157-158 GA_Cozunurluk>1 -> Diablo_1024 (kan_1024.tga); eyes at gozsag/gozsol_pos[2] in 1024 space.
+        assert(bitmapFile("DMP_Arka")=="kan_1024.tga");const auto w=renderer.metrics().width,h=renderer.metrics().height;
+        close(engine.field(engine.global("DMP_GozSag").bits,"pos_x"),662*ratio(w,1024),1);close(engine.field(engine.global("DMP_Gozsol").bits,"pos_y"),603*ratio(h,768),1);}
     const auto initialMetrics=renderer.metrics();
     if(projection&&!menus)createSaveSlots();
     if(menus){
@@ -1285,7 +1493,7 @@ void campaign_display(const std::filesystem::path& root,std::string_view backend
     key(SDL_SCANCODE_DOWN);key(SDL_SCANCODE_DOWN);assert(engine.number("AM_Cursor")==2);
     key(SDL_SCANCODE_RETURN);until("settings",90,[&]{return visible("AYMP_Grafik");});capture("settings");
     key(SDL_SCANCODE_RETURN);until("graphics",90,[&]{return visible("GMP_CozunurlukA");});
-    key(SDL_SCANCODE_RIGHT);assert(engine.number("GM_CursorCozunurluk")==0);capture("graphics-native-resolution");
+    key(SDL_SCANCODE_RIGHT);assert(engine.number("GM_CursorCozunurluk")==2);capture("graphics-native-resolution");
     {
         const auto row=engine.global("GMP_CozunurlukA").bits;const float x=float(engine.field(row,"pos_x")+5*initialFontX),y=float(engine.field(row,"pos_y")+9*initialFontY);
         const auto label=std::to_string(initialMetrics.width)+"x"+std::to_string(initialMetrics.height);
@@ -1310,7 +1518,7 @@ void campaign_display(const std::filesystem::path& root,std::string_view backend
     key(SDL_SCANCODE_DOWN);key(SDL_SCANCODE_DOWN);key(SDL_SCANCODE_DOWN);key(SDL_SCANCODE_RETURN);
     until("credits",90,[&]{return visible("CRMT_Credit");});capture("credits");close(engine.field(engine.global("CRMT_Credit").bits,"size_y"),290);
     {
-        const auto credit=engine.global("CRMT_Credit").bits;const auto factor=state.require(engine.global("GA_FontOranlari").bits).array[0].value.real();
+        const auto credit=engine.global("CRMT_Credit").bits;const auto factor=state.require(engine.global("GA_FontOranlari").bits).array[2].value.real();
         const double threshold=(engine.number("YeniDil_No")==0?3980:2740)*factor;
         // GA_Kosma is original DEFINE6, not a runtime global. Read its live configured
         // binding rather than querying the nonexistent VAR or assuming a host key.
@@ -1367,7 +1575,14 @@ void campaign_display(const std::filesystem::path& root,std::string_view backend
         }
     }
     key(SDL_SCANCODE_ESCAPE);until("main after load list",90,[&]{return visible("AMP_YeniOyun");});
-    key(SDL_SCANCODE_ESCAPE);key(SDL_SCANCODE_RETURN);until("exit",90,[&]{return visible("CMP_Hayir");});capture("exit");
+    key(SDL_SCANCODE_ESCAPE);key(SDL_SCANCODE_RETURN);until("exit",90,[&]{return visible("CMP_Hayir");});for(int i=0;i<90;++i)tick(idle);capture("exit");
+    {
+        // CikisMenu.wdl:44-47 frame: question top to the authored bottom 480*sy-DM_AltPay == screen_size.y-16; menus draw +16.
+        const auto question=engine.global("CMP_Soru").bits,no=engine.global("CMP_Hayir").bits,frame=engine.global("CER_Cerceve").bits;
+        close(engine.number("Cer_hY2"),initialMetrics.height-16,.01);assert(engine.number("Cer_hY1")<engine.number("Cer_hY2"));
+        close(engine.number("Cer_hY1")+16,engine.field(question,"pos_y"),1);close(engine.number("Cer_hY2")+16,engine.field(no,"pos_y")+32*engine.field(no,"scale_y"),1);
+        close(engine.number("Cer_aY2"),engine.number("Cer_hY2"),1);assert(engine.field(frame,"scale_y")>0&&engine.field(frame,"pos_y")<engine.field(question,"pos_y"));
+    }
     key(SDL_SCANCODE_ESCAPE);until("exit back",90,[&]{return visible("AMP_YeniOyun");});
     }
     // A real resize while the original menu is live, with no second original menu invocation.
@@ -1389,31 +1604,35 @@ void campaign_display(const std::filesystem::path& root,std::string_view backend
     for(auto name:{"AMP_YeniOyun","DMP_Arka","DMP_GozSag","DMP_Gozsol","CER_Cerceve"})assert(!visible(name));
     // Source-owned bitmap/coordinate palettes through the public panel producer API.
     // No dummy player, story flags or world position are introduced to paint a HUD.
+    // GA_Cozunurluk>1 branches: PEML1024/PEME1024 and BEP1_* art authored for GA_ScaleOranlari2 = resolution/1024x768.
+    const auto artX=ratio(resizedMetrics.width,1024),artY=ratio(resizedMetrics.height,768),menuArtX=ratio(resizedMetrics.width,2048),menuArtY=ratio(resizedMetrics.height,1152);
+    close(state.require(engine.global("GA_ScaleOranlari2").bits).array[4].value.real(),menuArtX);
     for(auto [panelName,paletteName,coordinateName,index]:{
-            std::tuple{"PEMP_Enerji","PEML_Enerji","PEME_KoseKorXY",20u},
-            std::tuple{"PEMP_Kalp","PEML_Kalp","PEMK_KoseKorXY",0u}}){
+            std::tuple{"PEMP_Enerji","PEML1024_Enerji","PEME1024_KoseKorXY",20u},
+            std::tuple{"PEMP_Kalp","PEML1024_Kalp","PEMK1024_KoseKorXY",0u}}){
         const auto id=engine.global(panelName).bits;
         const auto& palette=state.require(engine.global(paletteName).bits).array;
         const auto& coordinates=state.require(engine.global(coordinateName).bits).array;
         state.member(id,"bmap").set(palette.at(index).value);
-        engine.set_field(id,"pos_x",coordinates[0].value.real()*fontX);
-        engine.set_field(id,"pos_y",coordinates[1].value.real()*fontY);
-        engine.set_field(id,"scale_x",fontX);engine.set_field(id,"scale_y",fontY);engine.set_field(id,"visible",1);
+        engine.set_field(id,"pos_x",coordinates[0].value.real()*menuArtX);
+        engine.set_field(id,"pos_y",coordinates[1].value.real()*menuArtY);
+        engine.set_field(id,"scale_x",menuArtX);engine.set_field(id,"scale_y",menuArtY);engine.set_field(id,"visible",1);
     }
     capture("producer-player-hud");
-    close(engine.field(engine.global("PEMP_Enerji").bits,"scale_x"),gameX);
-    close(engine.field(engine.global("PEMP_Enerji").bits,"scale_y"),gameY);
+    close(engine.field(engine.global("PEMP_Enerji").bits,"scale_x"),artX);
+    close(engine.field(engine.global("PEMP_Enerji").bits,"scale_y"),artY);
+    close(engine.field(engine.global("PEMP_Enerji").bits,"pos_x"),state.require(engine.global("PEME1024_KoseKorXY").bits).array[0].value.real()*artX,1);
     engine.set_field(engine.global("PEMP_Enerji").bits,"visible",0);
     engine.set_field(engine.global("PEMP_Kalp").bits,"visible",0);
-    for(auto [panelName,bitmapName]:{std::pair{"BEP_Enerji","BEPI_Enerji"},std::pair{"BEP_Cam","BEPI_Cam"},std::pair{"BEP_Ust","BEPI_Ust"}}){
+    for(auto [panelName,bitmapName]:{std::pair{"BEP_Enerji","BEP1_Enerji"},std::pair{"BEP_Cam","BEP1_Cam"},std::pair{"BEP_Ust","BEP1_Ust"}}){
         const auto id=engine.global(panelName).bits;state.member(id,"bmap").set(engine.global(bitmapName));
-        engine.set_field(id,"scale_x",fontX);engine.set_field(id,"scale_y",fontY);engine.set_field(id,"visible",1);
+        engine.set_field(id,"scale_x",menuArtX);engine.set_field(id,"scale_y",menuArtY);engine.set_field(id,"visible",1);
     }
     const auto bossEnergy=engine.global("BEP_Enerji").bits,bossCam=engine.global("BEP_Cam").bits;
-    const auto half=var(fontX*.5),quarter=var(fontX*.25);
-    const auto halfNative=var(float(half)*float(gameX)/float(fontX)),quarterNative=var(float(quarter)*float(gameX)/float(fontX));
+    const auto half=var(menuArtX*.5),quarter=var(menuArtX*.25);
+    const auto halfNative=var(float(half)*float(artX)/float(menuArtX)),quarterNative=var(float(quarter)*float(artX)/float(menuArtX));
     engine.set_field(bossEnergy,"scale_x",half);capture("producer-boss-hud");
-    close(engine.field(bossEnergy,"scale_x"),halfNative);close(engine.field(bossCam,"scale_x"),gameX);
+    close(engine.field(bossEnergy,"scale_x"),halfNative);close(engine.field(bossCam,"scale_x"),artX);
     close(engine.field(bossEnergy,"pos_x"),engine.field(bossCam,"pos_x"));
     engine.prepare(runtime);close(engine.field(bossEnergy,"scale_x"),halfNative);
     engine.set_field(bossEnergy,"scale_x",quarter);engine.prepare(runtime);close(engine.field(bossEnergy,"scale_x"),quarterNative);
@@ -1484,7 +1703,7 @@ void campaign_display(const std::filesystem::path& root,std::string_view backend
         geometryRuntime.load("K22.wdl",[&](std::string_view name){return geometryAssets.text(name);},[&](std::string_view name){geometryAssets.mount(name);});
         geometryEngine.initialize_plugins(geometryRuntime);
         assert(geometryEngine.configure_display(geometryRuntime,true,true,1366,768,WindowMode::Windowed));
-        close(geometryState.require(geometryEngine.global("GA_FontOranlari").bits).array[0].value.real(),ratio(1366,1280));
+        close(geometryState.require(geometryEngine.global("GA_FontOranlari").bits).array[2].value.real(),ratio(1366,1280));
         assert(geometryEngine.configure_display(geometryRuntime,true,true,5120,1440,WindowMode::Windowed));geometryRuntime.bootstrap();
         auto geometryTick=[&](const Input& in){geometryEngine.tick(geometryRuntime,in);geometryEngine.finish_frame(geometryRuntime);assert(!geometryEngine.quit);};
         auto geometryVisible=[&](std::string_view name){return geometryEngine.field(geometryEngine.global(name).bits,"visible")!=0;};
@@ -1505,9 +1724,331 @@ void campaign_display(const std::filesystem::path& root,std::string_view backend
     }
     std::cout<<"original campaign display phase="<<phase<<" passed; source-menu bootstrap and selected menu/producer/API assertions; no NewGame/playthrough claim\n";
 }
+std::vector<std::uint8_t> file_bytes(const std::filesystem::path& path){std::ifstream in(path,std::ios::binary);assert(in);return {std::istreambuf_iterator<char>(in),{}};}
+void write_bytes(const std::filesystem::path& path,const std::vector<std::uint8_t>& bytes){std::filesystem::create_directories(path.parent_path());std::ofstream(path,std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()),std::streamsize(bytes.size()));}
+std::vector<std::uint8_t> slot_payload(std::uint8_t level){std::vector<std::uint8_t> b(2030,1);b[0]=100;b[1]=level;return b;}
+std::string text_of(const std::filesystem::path& path){auto b=file_bytes(path);return {b.begin(),b.end()};}
+// Contract F controller.ini + modern mapping, and save atomicity/backups/metadata/import (asset-free).
+void input_saves_contracts(){
+    std::ostringstream warnings;
+    auto config=parse_controller_config("[Controller]\nmode = Modern ; inline comment\n# full comment\ndeadzone=0.25\nsensitivity=9\nvibration=0\nbogus=1\n[Buttons]\nA=12\nrighttrigger=0\ndpup=3\nnosuch=1\nb=13\n[Other]\nx=1\n",warnings);
+    assert(config.modern&&config.deadzone==0.25f&&config.sensitivity==1&&!config.vibration);
+    assert(config.buttons[SDL_CONTROLLER_BUTTON_A]==12&&config.buttons[ControllerConfig::RightTrigger]==0&&config.buttons[SDL_CONTROLLER_BUTTON_DPAD_UP]==3);
+    assert(config.buttons[SDL_CONTROLLER_BUTTON_B]==8&&config.buttons[ControllerConfig::LeftTrigger]==1&&config.buttons[SDL_CONTROLLER_BUTTON_DPAD_DOWN]==0);
+    {auto log=warnings.str();assert(std::count(log.begin(),log.end(),'\n')==6);for(auto needle:{"sensitivity","bogus","nosuch","button b","[Other]","outside"})assert(log.find(needle)!=std::string::npos);}
+    assert(!parse_controller_config("",warnings).modern&&!parse_controller_config("[Controller]\nmode=modrn\n",warnings).modern);
+    {
+        TempDirectory home;SaveEnvironment xdg(home.path,"XDG_CONFIG_HOME");std::ostringstream quiet;
+        assert(!load_controller_config(quiet).modern&&quiet.str().empty()); // Absent ⇒ original.
+        {std::filesystem::create_directories(home.path/"kabus22");std::ofstream(home.path/"kabus22/controller.ini")<<"[Controller]\nmode=modern\nsensitivity=2.5\n";}
+        auto loaded=load_controller_config(quiet);assert(loaded.modern&&loaded.sensitivity==2.5f&&loaded.deadzone==0.15f&&loaded.vibration);
+    }
+    auto zone=radial_deadzone(0.1f,0.1f,0.15f);assert(zone[0]==0&&zone[1]==0);
+    zone=radial_deadzone(0.3f,0.4f,0.2f);close(zone[0],0.225);close(zone[1],0.3);
+    zone=radial_deadzone(0.6f,0.8f,0.5f);close(zone[0],0.6);close(zone[1],0.8);
+    zone=radial_deadzone(0,-1,0);close(zone[1],-1);
+    ControllerConfig modern;modern.modern=true;modern.sensitivity=2;
+    Input pad;std::bitset<32> held;pad.joystickButtons[0].set(0); // Raw device bits are replaced, not merged.
+    pad.controllerButtons.set(SDL_CONTROLLER_BUTTON_A);pad.controllerAxes[SDL_CONTROLLER_AXIS_TRIGGERRIGHT]=0.6f;pad.controllerAxes[SDL_CONTROLLER_AXIS_TRIGGERLEFT]=0.4f;
+    pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTX]=0.3f;pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY]=-0.4f;
+    auto force=apply_modern_controller(modern,pad,held);
+    assert(pad.joystickButtons[0]==std::bitset<32>((1u<<6)|(1u<<1))&&pad.joystickPressed[0]==pad.joystickButtons[0]&&pad.joystickReleased[0].none()&&held==pad.joystickButtons[0]);
+    assert(force.x==0&&force.y==0);close(force.z,40,0.001); // Standing turn 0.49 < half: in-place turning needs Key_Sag==1 (oyuncu2.wdl:1560), so nothing.
+    pad.controllerButtons.reset();pad.controllerPressed.set(SDL_CONTROLLER_BUTTON_START); // Same-frame tap still produces one edge.
+    pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTX]=0;pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY]=-1;pad.controllerAxes[SDL_CONTROLLER_AXIS_RIGHTX]=1;
+    force=apply_modern_controller(modern,pad,held);
+    assert(pad.joystickButtons[0]==std::bitset<32>((1u<<3)|(1u<<1))&&pad.joystickPressed[0]==std::bitset<32>(1u<<3)&&pad.joystickReleased[0]==std::bitset<32>(1u<<6));
+    assert(force.y==2&&force.x==2); // Digital forward (Key_Ileri==1); right stick turns, saturated by sensitivity.
+    pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY]=1;pad.controllerAxes[SDL_CONTROLLER_AXIS_RIGHTX]=-0.1f;force=apply_modern_controller(modern,pad,held);assert(force.y==-2&&force.x==0);
+    pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY]=-1;pad.controllerAxes[SDL_CONTROLLER_AXIS_RIGHTX]=0;pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTX]=0.3f;force=apply_modern_controller(modern,pad,held);
+    close(force.x,2*2*0.3/std::hypot(0.3,1.0),0.0001);assert(force.y==2); // Walking: analog turn (oyuncu2.wdl:820), scaled by sensitivity.
+    pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY]=0;pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTX]=-0.4f;force=apply_modern_controller(modern,pad,held);assert(force.x==-2&&force.y==0); // Standing: 0.59 left → full in-place turn.
+    DamageRumble damage;assert(damage.update(7,100)==0&&damage.update(7,100)==0);close(damage.update(7,80),0.55);assert(damage.update(7,0)==1&&damage.update(9,50)==0&&damage.update(9,60)==0&&damage.update(0,0)==0);
+    TempDirectory temporary;SaveEnvironment data(temporary.path);const auto root=temporary.path/"kabus22";
+    {
+        Assets assets(temporary.path);Media media(assets,false);State state;Engine engine(assets,nullptr,media,state);
+        Runtime runtime(state,[&engine](auto& vm,auto& ctx,auto name,auto args){return engine.builtin(vm,ctx,name,args);});
+        runtime.load_text("input-saves.wdl","function main() {}");
+        Input frame;frame.controllerAxes[SDL_CONTROLLER_AXIS_LEFTX]=0.5f;frame.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY]=-0.05f;frame.controllerButtons.set(SDL_CONTROLLER_BUTTON_A);frame.joystickButtons[0].set(0);frame.dt=1.0/60;
+        engine.tick(runtime,frame);engine.finish_frame(runtime); // Original mode: raw joystick bits and the A6 00422000 axis scaling.
+        assert(engine.number("JOY_1")==1&&engine.number("JOY_7")==0);close_vector(engine.vector(engine.global_vector("joy_force")),{1945.0/1024,0,0},1e-6); // trunc((127-32)*1024*0.02f); |-12|<32 dead zone
+        {Input stick=frame;stick.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY]=-1;stick.controllerAxes[SDL_CONTROLLER_AXIS_LEFTX]=-0.4f;stick.joystickAxes[0]={-0.5f,1,0.1f};
+         engine.tick(runtime,stick);engine.finish_frame(runtime); // Full forward saturates at 2*JOY_SENSE: Joy_Takip JOY_Ileri=joy_force.y/2=1 walks (Key_Ileri==1).
+         close_vector(engine.vector(engine.global_vector("joy_force")),{-1433.0/1024,2,0},1e-6);close_vector(engine.vector(engine.global_vector("joy_raw")),{-128,255,25},1e-6);
+         engine.set_global("JOY_SENSE",Value::from_double(0.5));engine.tick(runtime,stick);engine.finish_frame(runtime);
+         close_vector(engine.vector(engine.global_vector("joy_force")),{-716.0/1024,1,0},1e-6);engine.set_global("JOY_SENSE",Value::from_int(1));}
+        engine.controller=modern;engine.tick(runtime,frame);engine.finish_frame(runtime);
+        assert(engine.number("JOY_1")==0&&engine.number("JOY_7")==1);close_vector(engine.vector(engine.global_vector("joy_force")),{2,0,0},0.01); // Standing turn 0.82 ≥ half: full in-place turn.
+        const auto player=engine.create_entity(runtime,"",{0,0,0},0);engine.set_global("player",Value::object(player));engine.set_field(player,"skill1",100);
+        engine.tick(runtime,frame);engine.finish_frame(runtime);assert(engine.rumble==0);
+        engine.set_field(player,"skill1",70);engine.tick(runtime,frame);engine.finish_frame(runtime);close(engine.rumble,0.65,0.001);
+        engine.controller.vibration=false;engine.set_field(player,"skill1",40);engine.tick(runtime,frame);engine.finish_frame(runtime);assert(engine.rumble==0);
+        // Source-written save path: backup rotation, atomic replacement and native metadata sidecar.
+        ProcessContext context;
+        auto save=[&](std::string_view name,std::uint8_t level){
+            const std::array open{Argument{engine.new_string(std::string(name)),{}}};auto handle=engine.builtin(runtime,context,"file_open_write",open);assert(handle.integer()>0);
+            for(auto byte:slot_payload(level)){const std::array write{Argument{handle,{}},Argument{Value::from_int(byte),{}}};engine.builtin(runtime,context,"file_asc_write",write);}
+            assert(file_bytes(root/name)!=slot_payload(level)||level==1); // Nothing is truncated or replaced before file_close.
+            const std::array closing{Argument{handle,{}}};engine.builtin(runtime,context,"file_close",closing);assert(file_bytes(root/name)==slot_payload(level));
+        };
+        write_bytes(root/"kayit3.sav",slot_payload(1));
+        for(std::uint8_t level=2;level<=6;++level)save("kayit3.sav",level);
+        for(int n=1;n<=3;++n)assert(file_bytes(root/("backups/kayit3.sav."+std::to_string(n)))==slot_payload(std::uint8_t(6-n)));
+        assert(!std::filesystem::exists(root/"backups/kayit3.sav.4"));
+        for(const auto& entry:std::filesystem::directory_iterator(root))assert(entry.path().filename().string().find(".tmp.")==std::string::npos);
+        auto meta=saves::parse_meta(text_of(root/"kayit3.sav.meta"));assert(meta&&meta->format==saves::MetaFormat&&meta->engine==K22_VERSION&&meta->origin=="native"&&meta->entry=="input-saves.wdl"&&meta->written.size()==20);
+        // Migration hook: an original save without sidecar (format 0) gains a legacy v1 sidecar when read.
+        write_bytes(root/"kayit5.sav",slot_payload(9));
+        const std::array read{Argument{engine.new_string("kayit5.sav"),{}}};auto handle=engine.builtin(runtime,context,"file_open_read",read);
+        const std::array closing{Argument{handle,{}}};engine.builtin(runtime,context,"file_close",closing);
+        meta=saves::parse_meta(text_of(root/"kayit5.sav.meta"));assert(meta&&meta->format==1&&meta->origin=="legacy"&&meta->entry.empty()&&meta->script.empty());
+        assert(!std::filesystem::exists(root/"backups/kayit5.sav.1")&&file_bytes(root/"kayit5.sav")==slot_payload(9)); // Reading never rewrites the payload.
+    }
+    std::ostringstream migration;const auto future="kabus22-save-meta 2\nengine=9.9.9\n";write_bytes(root/"kayit6.sav.meta",{future,future+std::strlen(future)});
+    assert(!saves::migrate_meta(root/"kayit6.sav",{1,"x"},migration)&&text_of(root/"kayit6.sav.meta")==future&&migration.str().find("newer")!=std::string::npos);
+    write_bytes(root/"kayit7.sav.meta",{'b','a','d'});assert(!saves::migrate_meta(root/"kayit7.sav",{1,"x"},migration)&&text_of(root/"kayit7.sav.meta")=="bad");
+    assert(saves::slot_number("KAYIT98.SAV")==98&&saves::slot_number("kayit0.sav")==0&&saves::slot_number("kayit99.sav")<0&&saves::slot_number("kayit01.sav")<0&&saves::slot_number("kayit.sav")<0&&saves::rotated("KYSD.sav")&&!saves::rotated("options.k22"));
+    // Atomicity: a failed write leaves the previous file intact and no partial target.
+    {auto target=root/"atomic.bin";write_bytes(target,{1,2,3});auto blocker=target;blocker+=".tmp."+std::to_string(::getpid());std::filesystem::create_directory(blocker);
+     bool threw=false;try{const std::vector<std::uint8_t> next{9};saves::write_atomic(target,next);}catch(const std::exception&){threw=true;}assert(threw&&file_bytes(target)==std::vector<std::uint8_t>({1,2,3}));std::filesystem::remove(blocker);}
+    // Import: whole validated set or nothing; existing files are rotated into backups first.
+    const auto windows=temporary.path/"windows";auto index=[](std::string_view t){return std::vector<std::uint8_t>(t.begin(),t.end());};
+    write_bytes(windows/"KAYIT0.SAV",slot_payload(3));write_bytes(windows/"kayit1.sav",slot_payload(4));write_bytes(windows/"Kysd.sav",index("1 2 01)a\n02)b\n"));write_bytes(windows/"ftz.k22",{0,1,2});
+    write_bytes(root/"kayit0.sav",slot_payload(77));const auto before=file_bytes(root/"kayit0.sav");
+    auto refuse=[&](std::string_view why){bool threw=false;try{saves::import_windows(windows,root,{},{1,"t"});}catch(const std::exception& error){threw=std::string_view(error.what()).find(why)!=std::string_view::npos;if(!threw)std::cerr<<error.what()<<'\n';}assert(threw&&file_bytes(root/"kayit0.sav")==before&&!std::filesystem::exists(root/"kysd.sav"));};
+    {auto bad=slot_payload(3);bad[0]=99;write_bytes(windows/"kayit1.sav",bad);refuse("save_versiyon");bad.resize(2029);bad[0]=100;write_bytes(windows/"kayit1.sav",bad);refuse("2030");write_bytes(windows/"kayit1.sav",slot_payload(4));}
+    write_bytes(windows/"Kysd.sav",index("1 3 01)a\n02)b\n03)c\n"));refuse("kayit2.sav is missing");write_bytes(windows/"Kysd.sav",index("1 3 01)a\n"));refuse("label count");
+    write_bytes(windows/"Kysd.sav",index("1 2 01)a\n02)b\n"));write_bytes(windows/"ftz.k22",{0,30,2});refuse("play-time");write_bytes(windows/"ftz.k22",{0,1,2});
+    std::filesystem::rename(windows/"Kysd.sav",windows/"other");refuse("no kysd.sav");std::filesystem::rename(windows/"other",windows/"Kysd.sav");
+    auto imported=saves::import_windows(windows,root,{},{1,K22_VERSION,"now","","","import:test"});
+    assert(imported.imported.size()==4&&imported.imported[2]=="kysd.sav"&&imported.imported[3]=="ftz.k22"&&imported.backedUp==std::vector<std::string>{"kayit0.sav"});
+    assert(file_bytes(root/"kayit0.sav")==slot_payload(3)&&file_bytes(root/"kayit1.sav")==slot_payload(4)&&text_of(root/"kysd.sav")=="1 2 01)a\n02)b\n"&&file_bytes(root/"backups/kayit0.sav.1")==before);
+    auto meta=saves::parse_meta(text_of(root/"kayit1.sav.meta"));assert(meta&&meta->origin=="import:test"&&meta->entry=="K22.wdl");
+    // A newer K22Widescreen-layout set under _data/saves wins and lands in the requested slot directory.
+    write_bytes(windows/"_data/saves/kysd.sav",index("0 1 01)p\n"));write_bytes(windows/"_data/saves/kayit0.sav",slot_payload(5));
+    std::filesystem::last_write_time(windows/"_data/saves/kysd.sav",std::filesystem::last_write_time(windows/"Kysd.sav")+std::chrono::seconds(5));
+    imported=saves::import_windows(windows,root,"_data/saves",{1,K22_VERSION,"now","","","import:test"});
+    assert(imported.source==windows/"_data/saves"&&file_bytes(root/"_data/saves/kayit0.sav")==slot_payload(5)&&saves::parse_meta(text_of(root/"_data/saves/kayit0.sav.meta"))->entry=="K22Widescreen.wdl");
+    std::cout<<"controller/save contracts passed\n";
+}
+// A6 vec_for_vertex 00449dc0 clamps (raw>>10)-1 into the model's vertex range (Ebru weapon asks vertex 169 of 6).
+void vertex_index_consumers(){
+    TempDirectory temporary;
+    SaveEnvironment saves(temporary.path / "private");
+    write_animation_model(temporary.path / "three.mdl");
+    Assets assets(temporary.path); Media media(assets, false); State state;
+    Engine engine(assets, nullptr, media, state);
+    Runtime runtime(state, [&engine](auto& vm, auto& ctx, auto name, auto args) { return engine.builtin(vm, ctx, name, args); });
+    runtime.load_text("vertex-index.wdl", "function main() {}");
+    const auto actor = engine.create_entity(runtime, "three.mdl", {0, 0, 0}, 0);
+    ProcessContext context;
+    auto vertex = [&](Value index) {
+        Argument out{Value::object(state.create(Object::Kind::Vector).id), {}};engine.set_vector(out, {});
+        const std::array args{out, Argument{Value::object(actor), {}}, Argument{index, {}}};
+        engine.builtin(runtime, context, "vec_for_vertex", args); return engine.vector(out);
+    };
+    close_vector(vertex(Value::from_int(169)), vertex(Value::from_int(3)));
+    close_vector(vertex(Value::from_int(0)), vertex(Value::from_int(1)));
+    close_vector(vertex(Value::from_int(-4)), vertex(Value::from_int(1)));
+    close_vector(vertex(Value::from_double(2.9)), vertex(Value::from_int(2)));
+}
+// Entity skills are contiguous (K22.exe 0043e390 entSkill41..44 / vecSkill41): vec_* on my.skillN touch skillN..N+2, never XYZ.
+// kotu_koruyucu.wdl Kotukoru_DurusAcim: vec_set(my.Yrt_Temp,player.x);vec_sub(my.Yrt_Temp,my.x);vec_to_angle(my.Yrt_HedefPan,my.Yrt_Temp).
+void skill_vector_consumers(){
+    TempDirectory temporary;
+    SaveEnvironment saves(temporary.path / "private");
+    write_animation_model(temporary.path / "three.mdl");
+    Assets assets(temporary.path); Media media(assets, false); State state;
+    Engine engine(assets, nullptr, media, state);
+    Runtime runtime(state, [&engine](auto& vm, auto& ctx, auto name, auto args) { return engine.builtin(vm, ctx, name, args); });
+    runtime.load_text("skill-vector.wdl", R"(
+        var target_pos[3] = 8, 10, 7;
+        function main() {}
+        function probe() { vec_set(my.Skill33, target_pos); vec_sub(my.Skill33, my.x); vec_to_angle(my.Skill36, my.Skill33); }
+    )");
+    const auto actor = engine.create_entity(runtime, "three.mdl", {5, 6, 7}, 0);
+    runtime.start("probe", {}, actor, 0);
+    close_vector(engine.position(actor), {5, 6, 7});
+    close(engine.field(actor, "pan"), 0);
+    close(engine.field(actor, "skill33"), 3); close(engine.field(actor, "skill34"), 4); close(engine.field(actor, "skill35"), 0);
+    close(engine.field(actor, "skill36"), std::atan2(4.0, 3.0) * 180 / M_PI, 0.01); close(engine.field(actor, "skill37"), 0, 0.01);
+}
+// K22.exe 00404020 -> 0044ee20: vec_to_screen tests only depth and the view rectangle, never the view's VISIBLE flag.
+// duma_yaratik waits in `if (vec_to_screen(loc_temp.x,camera)){break;}` (duma_yara.wdl) before it may attack.
+void screen_projection_consumers(){
+    TempDirectory temporary;
+    SaveEnvironment saves(temporary.path / "private");
+    Assets assets(temporary.path); Media media(assets, false); State state;
+    Engine engine(assets, nullptr, media, state);
+    Runtime runtime(state, [&engine](auto& vm, auto& ctx, auto name, auto args) { return engine.builtin(vm, ctx, name, args); });
+    runtime.load_text("screen.wdl", R"(
+        var shown_visible = 0; var shown_hidden = 0; var shown_behind = 0;
+        function main() {}
+        function probe() {
+            var loc_temp[3];
+            camera.visible = on;
+            vec_set(loc_temp.x, camera.x); loc_temp.x += 150; if (vec_to_screen(loc_temp.x, camera)) { shown_visible = 1; }
+            camera.visible = off;
+            vec_set(loc_temp.x, camera.x); loc_temp.x += 150; if (vec_to_screen(loc_temp.x, camera)) { shown_hidden = 1; }
+            vec_set(loc_temp.x, camera.x); loc_temp.x -= 150; if (vec_to_screen(loc_temp.x, camera)) { shown_behind = 1; }
+        }
+    )");
+    runtime.start("probe", {}, 0, 0);
+    assert(engine.number("shown_visible") == 1 && engine.number("shown_hidden") == 1 && engine.number("shown_behind") == 0);
+}
+// A6 00435730 birth/morph bounds (K22.exe ASM, reverse/wave2/GameplayWorld/K22.exe.00435730.asm.txt): SCALEd model box, automatic
+// NARROW/FAT from the XY size, and the squared XY box whose excess over +-16 is halved.
+void entity_bounds_consumers(){
+    TempDirectory temporary;
+    SaveEnvironment saves(temporary.path / "private");
+    write_animation_model(temporary.path / "three.mdl");
+    Assets assets(temporary.path); Media media(assets, false); State state;
+    Engine engine(assets, nullptr, media, state);
+    Runtime runtime(state, [&engine](auto& vm, auto& ctx, auto name, auto args) { return engine.builtin(vm, ctx, name, args); });
+    runtime.load_text("bounds.wdl", "function main() {}");
+    // A6 resource box is frame 0 only (00457d10/00457d70, 00458500 +0x38): 0,0,0 .. 0,10,10; later frames reach x 160 and are ignored.
+    const auto actor = engine.create_entity(runtime, "three.mdl", {0, 0, 0}, 0);
+    auto expect = [&](std::array<double, 6> bounds, int narrow, int fat) {
+        const std::array names{"min_x", "min_y", "min_z", "max_x", "max_y", "max_z"};
+        for (std::size_t i = 0; i < 6; ++i) close(engine.field(actor, names[i]), bounds[i]);
+        assert(engine.field(actor, "narrow") == narrow && engine.field(actor, "fat") == fat);
+    };
+    ProcessContext context;
+    const std::array morph{Argument{Value::object(actor), {}}, Argument{engine.new_string("three.mdl"), {}}};
+    auto remorph = [&](double scale, bool clearHull) {
+        for (auto axis : {"scale_x", "scale_y", "scale_z"}) engine.set_field(actor, axis, scale);
+        if (clearHull) { engine.set_field(actor, "narrow", 0); engine.set_field(actor, "fat", 0); }
+        engine.builtin(runtime, context, "ent_morph", morph);
+    };
+    expect({0, 5, 0, 5, 10, 10}, 0, 0);              // XY size 10 < 16: no hull; square of the averaged corners.
+    remorph(10, false); expect({0, 50, 0, 33, 83, 100}, 0, 1); // SCALEd XY size 100 > 6*16: FAT; square half 50 -> 50-(50-16)/2.
+    remorph(2, true); expect({0, 10, 0, 10, 20, 20}, 1, 0);    // XY size 20: NARROW.
+    engine.set_global("enable_polycollision", Value::from_int(2));
+    remorph(1, true); expect({0, 0, 0, 0, 10, 10}, 1, 1);      // both flags: unmodified frame-0 resource box.
+    std::printf("entity bounds contracts passed: A6 00435730 SCALE, automatic NARROW/FAT, squared XY box\n");
+}
+// A6 00459a90 cuts a "+N" sprite strip into N frame textures. Native keeps one texture; a strip wider than 16384 (the original
+// s_alev+61.tga is 18300 px) is laid out as a grid of frame cells with uvScale (1/cols, 1/rows); narrower strips keep one row.
+void sprite_strip_consumers(){
+    TempDirectory temporary;
+    SaveEnvironment saves(temporary.path / "private");
+    auto tga = [&](const char* name, std::uint16_t frameWidth, std::uint16_t frames) {
+        const std::uint16_t width = std::uint16_t(frameWidth * frames);
+        std::vector<std::uint8_t> bytes{0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, std::uint8_t(width), std::uint8_t(width >> 8), 2, 0, 32, 0x28};
+        for (int y = 0; y < 2; ++y) for (int x = 0; x < width; ++x) bytes.insert(bytes.end(), {0, std::uint8_t(y), std::uint8_t(x / frameWidth), 255});
+        write_bytes(temporary.path / name, bytes);
+    };
+    tga("wide+3.tga", 6000, 3); tga("narrow+3.tga", 4, 3);
+    Assets assets(temporary.path); Media media(assets, false); State state;
+    Engine engine(assets, nullptr, media, state);
+    Runtime runtime(state, [&engine](auto& vm, auto& ctx, auto name, auto args) { return engine.builtin(vm, ctx, name, args); });
+    runtime.load_text("sprites.wdl", "function main() {}");
+    auto skin = [&](ObjectId id) -> const Material& { return engine.entities.at(id).model->materials.at(0); };
+    auto red = [](const Image& image, std::uint32_t x, std::uint32_t y) { return image.rgba[(std::size_t(y) * image.width + x) * 4]; };
+    const auto wide = engine.create_entity(runtime, "wide+3.tga", {}, 0);
+    const auto& grid = *skin(wide).texture;
+    assert(engine.field(wide, "sprite_frames") == 3 && grid.width == 12000 && grid.height == 4);
+    assert(skin(wide).uvScale.x == .5f && skin(wide).uvScale.y == .5f);
+    assert(red(grid, 0, 0) == 0 && red(grid, 6000, 1) == 1 && red(grid, 5999, 2) == 2 && red(grid, 6000, 2) == 0 && grid.rgba[(std::size_t(3) * grid.width) * 4 + 1] == 1);
+    close(engine.entities.at(wide).model->max.y, 3000); // frame width, not the cell grid
+    const auto narrow = engine.create_entity(runtime, "narrow+3.tga", {}, 0);
+    assert(skin(narrow).texture->width == 12 && skin(narrow).texture->height == 2 && skin(narrow).uvScale.y == 1.f);
+    close(skin(narrow).uvScale.x, 1.0 / 3);
+    std::printf("sprite strip contracts passed: A6 00459a90 frame cells, wide strip as a 2x2 grid\n");
+}
+// A6 00443950: emit() SIZE is screen pixels, (32768/depth*SIZE)>>shift with shift=14-trunc((W-1)/320+.5) (0043fc10);
+// effect() SIZE is quants times focal=W/(2tan(ARC/2)) (0044e260). Legacy quants = SIZE*2^(15-shift)/focal.
+void legacy_particle_size_consumers(){
+    TempDirectory temporary;SaveEnvironment saves(temporary.path/"private");
+    Assets assets(temporary.path);Media media(assets,false);State state;Engine engine(assets,nullptr,media,state);
+    Runtime runtime(state,[&engine](auto& vm,auto& ctx,auto name,auto args){return engine.builtin(vm,ctx,name,args);});
+    runtime.load_text("particles.wdl",R"(
+        VAR origin[3];
+        function blood(){ if(my_age==0){my_size=300;my_alpha=100;} }
+        function smoke(){ my.size=10; }
+        function spawn(){ emit(1,origin,blood); effect(smoke,1,origin,nullvector); }
+        function main(){}
+    )");
+    engine.set_field(engine.global("camera").bits,"arc",80);engine.set_global("video_mode",Value::from_int(8));
+    Input idle;idle.dt=1.0/60;runtime.start("spawn",{},0,0);
+    auto frame=[&]{engine.tick(runtime,idle);engine.finish_frame(runtime);assert(engine.frame().particles.size()==2);return engine.frame().particles;};
+    frame();auto particles=frame();
+    const double focalTan=2*std::tan(40*std::numbers::pi/180);
+    close(particles[0].size,300*16*focalTan/1024,.001); // 1024x768: shift 11 -> 16 px per (SIZE/depth).
+    close(particles[1].size,10);                         // effect() SIZE stays in quants.
+    engine.set_global("video_mode",Value::from_int(7));particles=frame();
+    close(particles[0].size,300*8*focalTan/800,.001);   // 800x600: shift 12 -> 8.
+    std::printf("legacy particle size contracts passed: A6 00443950 emit() screen-pixel SIZE, effect() quants\n");
+}
+// Community patch 1.8.5 behaviours ported as options: load-list joystick (modern controller only) and the
+// engine-side first-person camera (--camera first-person); asset-free behavioural fixture, not campaign scripts.
+void patch_option_contracts(){
+    TempDirectory temporary;SaveEnvironment saves(temporary.path/"private");
+    write_animation_model(temporary.path/"player.mdl");
+    Assets assets(temporary.path);Media media(assets,false);State state;Engine engine(assets,nullptr,media,state);
+    Runtime runtime(state,[&engine](auto& vm,auto& ctx,auto name,auto args){return engine.builtin(vm,ctx,name,args);});
+    runtime.load_text("patch-options.wdl",R"(
+        TEXT YUMT_Liste { strings=1; }
+        VAR GA_JTuslar[6]=1,2,3,4,5,6; VAR JOY_Button[13]; VAR JOY_Ileri; VAR JOY_Geri;
+        VAR GA_Tuslar[10]=72,80,77,75,29,57,42,50,35,48;
+        VAR Aktif_Player=0; VAR LY_AktifLevelID=7; VAR oyuncu_pasif=0; VAR koruyucu_pasif=1;
+        VAR Key_Ileri; VAR Key_SilahKaldir; VAR Key_Kosma; VAR bombacam_salla_s; VAR bombacam_salla_m;
+        VIEW Video_Cam {}
+        FUNCTION main(){}
+    )");
+    auto key=[&](int code){return engine.key_state(code).integer()!=0;};
+    auto& buttons=state.require(engine.global("JOY_Button").bits).array;const auto list=engine.global("YUMT_Liste").bits;
+    engine.set_global("JOY_Ileri",Value::from_int(1));buttons[2].value=Value::from_int(1);
+    engine.set_field(list,"visible",1);assert(!key(72)&&!key(28)); // Original controller mode keeps the ISO keyboard-only list.
+    engine.controller.modern=true;engine.set_field(list,"visible",0);assert(!key(72)&&!key(28)); // Only while the list is shown.
+    engine.set_field(list,"visible",1);assert(key(72)&&!key(80)&&key(28)&&!key(1)); // JOY_Button[GA_JTuslar[1]=2] -> Enter.
+    buttons[3].value=Value::from_int(1);assert(key(1)); // JOY_Button[GA_JTuslar[2]=3] -> Esc.
+    engine.set_global("JOY_Ileri",{});engine.set_global("JOY_Geri",Value::from_int(1));assert(!key(72)&&key(80));
+    engine.controller.modern=false;engine.set_field(list,"visible",0);engine.set_global("JOY_Geri",{});
+    // Pad A/B are Enter/Esc only in modern mode; in original mode they are JOY_1/JOY_2 (aim/fire), and Enter while aiming
+    // reloads instead of firing (oyuncu2.wdl:2529). The d-pad is the arrow keys in both modes.
+    engine.input.controllerButtons.set(SDL_CONTROLLER_BUTTON_A);engine.input.controllerButtons.set(SDL_CONTROLLER_BUTTON_B);engine.input.controllerButtons.set(SDL_CONTROLLER_BUTTON_DPAD_UP);
+    assert(!key(28)&&!key(1)&&key(72));engine.controller.modern=true;assert(key(28)&&key(1)&&key(72));
+    engine.controller.modern=false;engine.input=Input{};
+
+    const auto player=engine.create_entity(runtime,"player.mdl",{100,50,10},0);
+    engine.set_global("player",Value::object(player));engine.set_field(player,"pan",90);
+    const auto camera=engine.global("camera").bits;Input idle;idle.dt=1.0/60;
+    auto pose=[&]{engine.set_position(camera,{0,0,500});engine.set_field(camera,"pan",10);engine.set_field(camera,"tilt",-60);engine.set_field(camera,"arc",60);};
+    auto fired=[&]{ProcessContext context;const std::array args{Argument{Value::from_int(57),{}}};return engine.builtin(runtime,context,"key_pressed",args).integer()!=0;};
+    pose();engine.tick(runtime,idle);assert(!engine.first_person_active());close_vector(engine.position(camera),{0,0,500}); // Default original.
+    engine.cameraMode=Engine::CameraMode::FirstPerson;engine.tick(runtime,idle);assert(engine.first_person_active());
+    // cam.wdl Demir idle: dist_total 2, yuksek 35, tilt_3rd 5 behind player.pan; ARC 70, roll 0.
+    const double planar=std::cos(5*std::numbers::pi/180)*2;
+    close_vector(engine.position(camera),{100,float(50-planar),float(45+std::sin(5*std::numbers::pi/180)*planar)},.002);
+    close(engine.field(camera,"pan"),90);close(engine.field(camera,"tilt"),0);close(engine.field(camera,"arc"),70);
+    engine.set_global("Key_SilahKaldir",Value::from_int(1));engine.tick(runtime,idle);close(engine.field(camera,"tilt"),-5);close(engine.position(camera).z,35+std::sin(5*std::numbers::pi/180)*std::cos(5*std::numbers::pi/180)*3,.002);
+    engine.set_global("Key_SilahKaldir",{});
+    // A6 00422000 mouse_force: raw=trunc(mickey*(1024*10/time_frame_raw)+prior), y up, clamp +-2*mouse_sense; dt 1/60 -> time_frame raw 273.
+    auto forceRaw=[&](int axis){const auto v=engine.vector(engine.global_vector("mouse_force"));return Value::from_double(axis?v.y:v.x).raw();};
+    Input look=idle;look.mouseDX=10;look.mouseDY=-5;look.mouseButtons.set(SDL_BUTTON_LEFT);engine.tick(runtime,look);
+    assert(engine.global("time_frame").raw()==273&&forceRaw(0)==375&&forceRaw(1)==187);const double turn=8*engine.number("time");
+    close(engine.field(player,"pan"),90-turn*375/1024,.002);close(engine.field(camera,"tilt"),-5+turn*187/1024,.002);assert(fired()); // Mouse turns, looks up from aim tilt -5, fires.
+    {Input fast=idle;fast.mouseDX=-100;fast.mouseDY=0;Input tock=idle;tock.mouseDX=0;tock.mouseDY=0;
+     engine.set_global("mouse_mode",Value::from_int(2));engine.tick(runtime,fast);assert(forceRaw(0)==375&&forceRaw(1)==187); // MOUSE_MODE>=2 keeps the last force.
+     engine.set_global("mouse_mode",{});engine.tick(runtime,fast);assert(forceRaw(0)==-2048&&forceRaw(1)==187); // Clamp -2*sense; prior y term still summed.
+     engine.tick(runtime,tock);assert(forceRaw(0)==-2048&&forceRaw(1)==0);engine.tick(runtime,tock);assert(forceRaw(0)==0&&forceRaw(1)==0);}
+    engine.set_field(player,"pan",90);
+    // Yield: freeze_mode / Inzar / Video_Cam restore untouched fields; a script write made meanwhile survives.
+    engine.set_global("freeze_mode",Value::from_int(1));engine.tick(runtime,idle);assert(!engine.first_person_active()&&!fired());
+    close_vector(engine.position(camera),{0,0,500},.002);close(engine.field(camera,"tilt"),-60);close(engine.field(camera,"arc"),60);
+    engine.set_global("freeze_mode",{});engine.tick(runtime,idle);assert(engine.first_person_active());
+    engine.set_field(camera,"x",-300);engine.set_global("Aktif_Player",Value::from_int(2));engine.tick(runtime,idle);assert(!engine.first_person_active());
+    close(engine.field(camera,"x"),-300);close(engine.field(camera,"z"),500,.002);
+    engine.set_global("Aktif_Player",Value::from_int(1));engine.set_field(engine.global("Video_Cam").bits,"visible",1);engine.tick(runtime,idle);assert(!engine.first_person_active());
+    engine.set_field(engine.global("Video_Cam").bits,"visible",0);engine.set_global("Key_Ileri",Value::from_int(1));engine.tick(runtime,idle);assert(engine.first_person_active());
+    close(engine.position(camera).z,35,.002); // Ebru walking: dist_total 0, yuksek 25.
+    std::cout<<"patch option contracts passed: modern load-list joystick, first-person camera pose/yield/mouse\n";
+}
 }
 
 int main(int argc, char** argv) {
+    if(argc==2&&std::string_view(argv[1])=="--input-saves"){input_saves_contracts();patch_option_contracts();entity_bounds_consumers();sprite_strip_consumers();legacy_particle_size_consumers();return 0;}
     if((argc==7||argc==8)&&std::string_view(argv[3])=="--campaign-display"){
         campaign_display(argv[4],argv[5],argv[6],argc==8?std::string_view(argv[7]):"all");return 0;
     }
@@ -1515,6 +2056,9 @@ int main(int argc, char** argv) {
         throw std::runtime_error("Usage: check_engine FX_DIR HMP [--campaign-data GAME_ROOT | --campaign-display ORIGINAL_GAME_ROOT opengl|vulkan|vulkan-rt CAPTURE_DIR [all|menus|presentation|projection]]");
     k22::Renderer::boundary_check();
     graphics_consumers();
+    vertex_index_consumers();
+    skill_vector_consumers();
+    screen_projection_consumers();
     {
         TempDirectory temporary;
         SaveEnvironment saves(temporary.path);
@@ -1544,21 +2088,33 @@ int main(int argc, char** argv) {
         runtime.load_text("display-graph-fixture.wdl",graph);
         assert(!engine.configure_display(runtime,false,true,2560,1440,WindowMode::Windowed));
         assert(engine.configure_display(runtime,true,true,2560,1440,WindowMode::Windowed));
-        auto scales=[&](double x,double y){
+        // Menu GA_ScaleOranlari=(W/1280,H/720); 1024-tier GA_ScaleOranlari2 keeps the authored 640/1024 ratio (W/2048,H/1152)
+        // in menus and (W/1024,H/768) in gameplay.
+        auto scales=[&](double x,double y,double x2,double y2){
             engine.prepare(runtime);
             for(auto name:{"GA_ScaleOranlari","GA_ScaleOranlari2"}){
-                const auto& table=state.require(engine.global(name).bits).array;
-                close(table[0].value.real(),x);close(table[1].value.real(),y);
+                const auto& table=state.require(engine.global(name).bits).array;const bool first=name==std::string_view("GA_ScaleOranlari");
+                close(table[4].value.real(),first?x:x2);close(table[5].value.real(),first?y:y2);
+                close(table[0].value.real(),1);close(table[1].value.real(),1); // Authored 640 slot stays intact.
             }
             const auto& fonts=state.require(engine.global("GA_FontOranlari").bits).array;
-            close(fonts[0].value.real(),2);close(fonts[1].value.real(),2);
+            close(fonts[2].value.real(),2);close(fonts[0].value.real(),1);
+            close(engine.number("GA_Cozunurluk"),2);
         };
-        scales(2,2);
-        engine.set_global("LY_AktifLevelID",Value::from_int(18));scales(2,2);
-        engine.set_global("level_yuklendi_ok",Value::from_int(1));scales(4,3);
-        engine.set_global("STM_Acik",Value::from_int(1));scales(2,2);
-        engine.set_global("STM_Acik",{});scales(4,3);
-        engine.set_global("game_over_start",Value::from_int(1));scales(2,2);
+        scales(2,2,1.25,1.25);
+        engine.set_global("LY_AktifLevelID",Value::from_int(18));scales(2,2,1.25,1.25);
+        engine.set_global("level_yuklendi_ok",Value::from_int(1));scales(4,3,2.5,1.875);
+        engine.set_global("STM_Acik",Value::from_int(1));scales(2,2,1.25,1.25);
+        engine.set_global("STM_Acik",{});scales(4,3,2.5,1.875);
+        engine.set_global("game_over_start",Value::from_int(1));scales(2,2,1.25,1.25);
+        { // options.k22 byte 0 keeps the user's authored GA_Cozunurluk; the native tier stays in memory.
+            write_bytes(engine.saveRoot/"options.k22",{1,7});
+            auto call=[&](std::string_view fn,Value a,Value b={}){std::vector<Argument> args{Argument{a,{}}};if(fn=="file_asc_write")args.push_back(Argument{b,{}});return engine.builtin(runtime,context,fn,args);};
+            auto handle=call("file_open_read",engine.new_string("options.k22"));assert(call("file_asc_read",handle).integer()==1);call("file_close",handle);
+            engine.prepare(runtime);close(engine.number("GA_Cozunurluk"),2);
+            handle=call("file_open_write",engine.new_string("options.k22"));call("file_asc_write",handle,Value::from_int(int(engine.number("GA_Cozunurluk"))));call("file_asc_write",handle,Value::from_int(9));call("file_close",handle);
+            assert(file_bytes(engine.saveRoot/"options.k22")==std::vector<std::uint8_t>({1,9}));close(engine.number("GA_Cozunurluk"),2);
+        }
         assert(engine.builtin(runtime,context,"video_switch",preset).integer()==6);
         close_vector(engine.vector(engine.global_vector("screen_size")),{2560,1440,0});
         for(bool prepareFirst:{false,true}){
@@ -1584,6 +2140,8 @@ int main(int argc, char** argv) {
         close_vector(engine.vector(engine.global_vector("screen_size")),{640,480,0});
     }
     legacy_trace_consumers();
+    a6_movement_consumers();
+    k22::check_modern_box();
     {
         TempDirectory temporary;
         SaveEnvironment saveEnvironment(temporary.path);
@@ -1621,6 +2179,7 @@ int main(int argc, char** argv) {
         TempDirectory temporary;
         SaveEnvironment saveEnvironment(temporary.path);
         {std::ofstream fixture(temporary.path/"text-load.fixture",std::ios::binary);fixture<<"\r\n\tAlpha  \tBeta\n\nGamma$"<<std::string(5000,'x')<<"\nTail\n";}
+        {std::ofstream settings(temporary.path/"mode_ayarlar.k22");settings<<"0\n0\n1\n0\n25\n";}
         Assets assets(temporary.path);
         // 004555e0 captures enhanced startup gamma 1.5 once, before any Engine sampler/prepare consumer.
         assets.initialize_native_lightmap_tables(1536, false, true);
@@ -1726,6 +2285,21 @@ int main(int argc, char** argv) {
             assert(engine.string(text.array[4].value)=="Tail");
             assert(engine.string(text.array[5].value)=="kept");
             engine.set_global("delimit_str",engine.new_string(","));
+            state.profile=SemanticProfile::BonusA7;
+            const auto privateSettings=engine.saveRoot/"mode_ayarlar.k22";
+            std::filesystem::create_directories(privateSettings.parent_path());
+            constexpr std::array expectedSettings{"2","2","0","1","50"};
+            {std::ofstream out(privateSettings);out<<"2\n2\n0\n1\n50\n";}
+            args[1].value=engine.new_string("mode_ayarlar.k22");
+            assert(engine.builtin(runtime,context,"txt_load",args).integer()==5);
+            for(std::size_t i=0;i<5;++i)assert(engine.string(text.array[i].value)==expectedSettings[i]);
+            {std::ofstream out(privateSettings);out<<"malformed\n";}
+            assert(engine.builtin(runtime,context,"txt_load",args).integer()==1);
+            assert(engine.string(text.array[0].value)=="malformed");
+            std::filesystem::remove(privateSettings);
+            assert(engine.builtin(runtime,context,"txt_load",args).integer()==5);
+            assert(engine.string(text.array[0].value)=="0"&&engine.string(text.array[4].value)=="25");
+            state.profile=SemanticProfile::CampaignA6;
         }
         auto vector_arg = [&](Vec3 value) {
             auto id = state.create(Object::Kind::Vector).id;
@@ -1793,17 +2367,17 @@ int main(int argc, char** argv) {
         const auto probe = entity({0, 0, 5});
         ProcessContext floorContext{0, probe, 0};
         // A6 00472072..0047209d: USE_BOX + MY enables the hull query.
-        close(modern_query(floorContext, {0, 0, 5}, {0, 0, -5}, 8192 | 1 | 65536).real(), 4);
+        close(modern_query(floorContext, {0, 0, 5}, {0, 0, -5}, 8192 | 1 | 65536).real(), 3.9501953125);
         assert(floorContext.you == 0 && engine.number("trace_hit") == 1);
         assert(engine.number("tex_flag1") == 0 && engine.number("tex_flag3") == 1);
-        close_vector(engine.vector(engine.global_vector("target")), {0, 0, 0}, 0.002);
+        close_vector(engine.vector(engine.global_vector("target")), {0, 0, .0498046875f}, 0.002);
         close_vector(engine.vector(engine.global_vector("normal")), {0, 0, 1}, 0.002);
         // A6 00470a50 rotates MIN + span/2; SCALE is not read by the hull builder.
         engine.set_field(probe, "min_z", -3);
         engine.set_field(probe, "max_z", -1);
         engine.set_field(probe, "scale_z", 7);
-        close(modern_query(floorContext, {0, 0, 5}, {0, 0, -5}, 8192 | 1 | 65536).real(), 2);
-        close_vector(engine.vector(engine.global_vector("target")), {0, 0, 0}, 0.002);
+        close(modern_query(floorContext, {0, 0, 5}, {0, 0, -5}, 8192 | 1 | 65536).real(), 1.9501953125);
+        close_vector(engine.vector(engine.global_vector("target")), {0, 0, .0498046875f}, 0.002);
         engine.set_field(probe, "min_z", -1);
         engine.set_field(probe, "max_z", 1);
         engine.set_field(probe, "scale_z", 1);
@@ -2216,6 +2790,8 @@ int main(int argc, char** argv) {
             assert((value.bias==(bonus?std::array<std::int32_t,3>{70000,-70000,3}:std::array<std::int32_t,3>{})));
             assert((engine.entities.at(actor).light.delta==std::array<std::int16_t,3>{-15,-75,90})); // Public color never enters persistent cache.
             for(const auto& draw:engine.frame().instances)if(draw.objectId==actor)assert(draw.bright&&draw.nativeLightScalar==180);
+            // A6 0042fa20: a drawn MDL without MATERIAL keeps mat_model (not UNLIT/METAL); Bonus binds none.
+            assert(state.member(actor,"material").get().bits==(bonus?0u:engine.global("mat_model").bits)&&(bonus||engine.global("mat_model").bits));
             engine.set_global("trace_floor",Value::from_int(2));engine.set_field(actor,"shadow",1);
             value=encounter(actor,sampledView);assert(value.scalar==(bonus?255:130));
             assert((value.delta==std::array<std::int16_t,3>{-15,-75,90}));
@@ -2419,8 +2995,8 @@ int main(int argc, char** argv) {
             close(engine.number("in_passable"), 51);
             close(engine.number("in_solid"), 52);
             close(engine.builtin(runtime, movementContext, "c_move", modernUnmoved).real(), 0);
-            assert(engine.number("in_passable") == (content == -126));
-            assert(engine.number("in_solid") == (content == -128));
+            // 0046fa80 clears both before non-PASSABLE zero c_move; no destination probe.
+            close(engine.number("in_passable"),0);close(engine.number("in_solid"),0);
         }
         {
             State bonusState;bonusState.profile=SemanticProfile::BonusA7;
@@ -2478,6 +3054,24 @@ int main(int argc, char** argv) {
             floor.collision.flags[0]=0;
             bonusEngine.world=&contents;const auto mover=actor({1,0,5});ProcessContext moveCtx{0,mover,0};
             for(auto mask:{0u,64u})for(bool pass:{false,true}){bonusEngine.set_field(mover,"flags",pass?512:0);seed();const std::array args{Argument{Value::object(mover),{}},v({}),v(pass?Vec3{0,1,0}:Vec3{}),Argument{Value::from_int(mask),{}}};close(bonusEngine.builtin(bonusRuntime,moveCtx,"c_move",args).real(),pass?1:0);close(bonusEngine.number("in_passable"),0);close(bonusEngine.number("in_solid"),0);close(bonusEngine.number("on_passable"),42);assert(bonusEngine.global("passable_ent").bits==sentinel);}
+            // A7 100757e0's admitted .707 approach uses 1.01 overclip and
+            // unclamped friction; it is not A6's six-plane crease solver.
+            bonusEngine.world=&floor;bonusEngine.set_field(mover,"flags",0);
+            bonusEngine.set_field(mover,"narrow",0);bonusEngine.set_field(mover,"fat",0);
+            for(auto angle:{"pan","tilt","roll"})bonusEngine.set_field(mover,angle,0);
+            bonusEngine.set_global("move_friction",Value::from_double(.25));
+            bonusEngine.set_global("move_min_z",Value::from_int(-1));bonusEngine.set_global("disable_z_glide",{});
+            auto diagonalMove=[&](std::uint32_t flags){
+                bonusEngine.set_position(mover,{0,0,5});bonusEngine.prepare(bonusRuntime);
+                const std::array args{Argument{Value::object(mover),{}},v({}),v({10,0,-10}),Argument{Value::from_int(flags|1|16),{}}};
+                return bonusEngine.builtin(bonusRuntime,moveCtx,"c_move",args);
+            };
+            diagonalMove(0);const auto firstContact=bonusEngine.position(mover);
+            assert(firstContact.x>3.99f&&firstContact.x<4.01f&&firstContact.z>1.f&&firstContact.z<1.01f);
+            const auto diagonalDistance=diagonalMove(262144).real();
+            const auto diagonal=bonusEngine.position(mover);
+            assert(diagonal.x>8.4f&&diagonal.x<8.6f&&diagonal.z>1.04f&&diagonal.z<1.06f);
+            close(diagonal.y,0);close(diagonalDistance,std::sqrt(diagonal.x*diagonal.x+(diagonal.z-5)*(diagonal.z-5)),.002);
             assert(!bonusState.compilerMacros.contains("IGNORE_CONTENTS"));
         }
         {
@@ -3070,8 +3664,30 @@ int main(int argc, char** argv) {
         bool found = false;
         for (const auto& draw : engine.frame().instances) if (draw.objectId == full) {
             close(draw.ambient, 53);found = true;
-        }
+            // A 32-bit TGA sprite (BMAP 0x100, A6 00440e90; Wine-observed for world sprites) is alpha-blended at opacity 255 without TRANSPARENT; 24-bit is not.
+            assert(draw.translucent && draw.alpha == 1);
+        } else if (draw.objectId == fractional) assert(!draw.translucent);
         assert(found);
+        // cam1 gazel1.tga leaf decals: a material-less 32-bit TGA FLARE|OVERLAY floor sprite is lit through the default mat_sprite
+        // (00430920 -> 0042fa20), blended, and keeps FLARE/OVERLAY; before that binding it took a fixed-ambient path and drew bright yellow.
+        engine.set_field(full, "flare", 1);engine.set_field(full, "overlay", 1);engine.set_field(full, "oriented", 1);engine.set_field(full, "tilt", 90);
+        engine.prepare(runtime);found = false;
+        for (const auto& draw : engine.frame().instances) if (draw.objectId == full) {
+            assert(draw.translucent && draw.flare && draw.overlay && !draw.billboard && !draw.additive && draw.materialIndex != ~0u);found = true;
+        }
+        assert(found && state.member(full, "material").get().bits == engine.global("mat_sprite").bits);
+        engine.set_field(full, "flare", 0);engine.set_field(full, "overlay", 0);engine.set_field(full, "oriented", 0);engine.set_field(full, "tilt", 0);
+        // A6 0043ee40/00443350: BRIGHT alone draws opaque; BRIGHT with TRANSPARENT stays additive.
+        auto fractionalDraw = [&]() -> const DrawInstance& {
+            engine.prepare(runtime);
+            for (const auto& draw : engine.frame().instances) if (draw.objectId == fractional) return draw;
+            throw std::runtime_error("fractional sprite missing from frame");
+        };
+        engine.set_field(fractional, "bright", 1);
+        assert(!fractionalDraw().additive && !fractionalDraw().translucent);
+        engine.set_field(fractional, "transparent", 1);
+        assert(fractionalDraw().additive && fractionalDraw().translucent);
+        engine.set_field(fractional, "bright", 0);engine.set_field(fractional, "transparent", 0);
         // Actual fileless declarations remain entities before and after a later morph.
         runtime.load_text("declared-view.wdl", R"wdl(
             ENTITY unbound_view { VIEW = camera; X = 150; Y = -70; Z = -37.5; }
@@ -3187,7 +3803,9 @@ int main(int argc, char** argv) {
         };
         const auto sharedIndex = drawMaterial(sharedFirst);
         assert(packetFor(drawMaterial(sharedSecond), sharedMaterial).skins[0] == original.get());
-        assert(drawMaterial(nullMaterialActor) == ~0u);
+        // A6 0042fa20 binds a persistent built-in default MATERIAL to an entity drawn without one.
+        const auto defaultMaterial = state.member(nullMaterialActor, "material").get().bits;
+        assert(defaultMaterial ? packetFor(drawMaterial(nullMaterialActor), defaultMaterial).sourceId == defaultMaterial : drawMaterial(nullMaterialActor) == ~0u);
         const auto& sharedPacket = packetFor(sharedIndex, sharedMaterial);
         const auto smokeBitmap = engine.global("native_smoke").bits;
         const auto detailBitmap = engine.global("native_detail").bits;
@@ -3214,7 +3832,8 @@ int main(int argc, char** argv) {
         state.member(nullMaterialActor, "material").set(Value::from_int(0));
         engine.tick(runtime, input);engine.finish_frame(runtime);
         assert(engine.frame().particles.front().materialIndex == ~0u);
-        assert(drawMaterial(nullMaterialActor) == ~0u);
+        // Clearing MATERIAL lets 00430920 rebind the same built-in default on the next frame.
+        assert(defaultMaterial ? state.member(nullMaterialActor, "material").get().bits == defaultMaterial && packetFor(drawMaterial(nullMaterialActor), defaultMaterial).sourceId == defaultMaterial : drawMaterial(nullMaterialActor) == ~0u);
         for (std::int32_t raw : {-1, 102401, 33554433}) {
             state.member(smoke, "alpha").set(Value::from_raw(raw));
             engine.prepare(runtime);
@@ -4205,6 +4824,26 @@ int main(int argc, char** argv) {
                 }
             }
         }
+    }
+    {
+        // A6 004447e0/0040ce80: a 32-bit TGA (BMAP0x100) panel bitmap blends with alpha min(2*round(ALPHA*2611/1024),255)/255
+        // even without TRANSPARENT; a 24-bit one keeps ALPHA/100 under TRANSPARENT only.
+        TempDirectory temporary;
+        for(unsigned depth:{24u,32u}){std::vector<std::uint8_t> tga(18,0);tga[2]=2;tga[12]=1;tga[14]=1;tga[16]=std::uint8_t(depth);tga[17]=depth==32?8:0;tga.resize(18+depth/8,255);
+            std::ofstream file(temporary.path/(std::to_string(depth)+".tga"),std::ios::binary);assert(file.write(reinterpret_cast<const char*>(tga.data()),std::streamsize(tga.size())).good());}
+        Assets assets(temporary.path); Media media(assets,false); State state;
+        Engine engine(assets,nullptr,media,state);
+        Runtime runtime(state,[&](Runtime& vm,ProcessContext& context,std::string_view name,std::span<const Argument> args){return engine.builtin(vm,context,name,args);});
+        runtime.load_text("a6-alpha-format.wdl",R"wdl(
+            BMAP rgb=<24.tga>; BMAP argb=<32.tga>;
+            PANEL rgb40 { LAYER=1; BMAP=rgb; ALPHA=40; FLAGS=TRANSPARENT; VISIBLE=ON; }
+            PANEL argb40 { LAYER=2; BMAP=argb; ALPHA=40; FLAGS=TRANSPARENT; VISIBLE=ON; }
+            PANEL argb18 { LAYER=3; BMAP=argb; ALPHA=18; VISIBLE=ON; }
+            PANEL argb70 { LAYER=4; BMAP=argb; ALPHA=70; FLAGS=TRANSPARENT; VISIBLE=ON; }
+        )wdl");
+        engine.prepare(runtime);
+        auto alpha=[&](float layer){const auto& ui=engine.frame().ui;auto c=std::find_if(ui.begin(),ui.end(),[&](const auto& d){return d.layer==layer;});assert(c!=ui.end());return double(c->color.a);};
+        close(alpha(1),.4,1e-6);close(alpha(2),202/255.,1e-6);close(alpha(3),90/255.,1e-6);close(alpha(4),1,1e-6);
     }
     {
         TempDirectory temporary;

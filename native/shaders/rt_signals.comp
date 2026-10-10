@@ -1,0 +1,113 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_nonuniform_qualifier : require
+// Screen-space ray-traced signals of the primary view, one stochastic sample per pixel and frame:
+// soft shadows (area sun/point/spot lights + contact shadows from models), one-bounce diffuse GI and
+// roughness-aware reflections. rt_filter.comp accumulates and denoises them; scene.frag consumes them.
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=0,std140) uniform Signals { mat4 inverseViewProjection,previousViewProjection; vec4 eye,sun,params,camera; ivec4 config; } g;
+// eye: xyz position, w far; sun: xyz direction, w angular radius (rad); params: x frame, y GI distance, z contact distance, w near;
+// camera: xyz forward, w light count; config: x signal bits (1 shadows, 2 GI, 4 reflections), yz size, w history valid.
+layout(set=0,binding=1,std430) readonly buffer Lights { vec4 lightData[]; };
+#include "ray_query.glsl"
+layout(set=0,binding=2) uniform sampler2D gDepth;
+layout(set=0,binding=3) uniform sampler2D gData;
+layout(set=0,binding=10,rgba16f) uniform writeonly image2D outMask;
+layout(set=0,binding=11,rgba16f) uniform writeonly image2D outGi;
+layout(set=0,binding=12,rgba16f) uniform writeonly image2D outReflect;
+uint seed;
+uint pcg(uint v){uint s=v*747796405u+2891336453u;uint w=((s>>((s>>28u)+4u))^s)*277803737u;return (w>>22u)^w;}
+float rnd(){seed=pcg(seed);return float(seed)*(1.0/4294967296.0);}
+vec3 linear(vec3 c){return pow(max(c,vec3(0)),vec3(2.2));}
+float luma(vec3 c){return dot(c,vec3(0.299,0.587,0.114));}
+vec3 decodeNormal(vec2 o){vec3 n=vec3(o,1.0-abs(o.x)-abs(o.y));if(n.z<0.0)n.xy=(1.0-abs(n.yx))*vec2(n.x>=0.0?1.0:-1.0,n.y>=0.0?1.0:-1.0);return normalize(n);}
+mat3 basis(vec3 n){vec3 t=normalize(abs(n.z)<0.999?cross(n,vec3(0,0,1)):cross(n,vec3(1,0,0)));return mat3(t,cross(n,t),n);}
+vec3 cosineDirection(vec3 n){float u=rnd(),phi=6.2831853*rnd(),r=sqrt(u);return basis(n)*vec3(r*cos(phi),r*sin(phi),sqrt(1.0-u));}
+vec3 sphereOffset(){float z=2.0*rnd()-1.0,phi=6.2831853*rnd(),r=sqrt(max(1.0-z*z,0.0));return vec3(r*cos(phi),r*sin(phi),z);}
+// Native light falloffs, as scene.frag: per-vertex world lighting (native) or the per-fragment model loop.
+float lightContribution(int i,vec3 p,vec3 n,bool native,out vec3 target,out float range){
+    vec4 a=lightData[i*5],b=lightData[i*5+1],d=lightData[i*5+2],e=lightData[i*5+3],c=lightData[i*5+4];
+    target=a.xyz;range=0.0;if(b.a<0.0)return 0.0;
+    vec3 delta=a.xyz-p;float distance=length(delta);vec3 L;float attenuation;
+    if(native){if(c.z>0.5)return 0.0;L=d.w==3.0?-d.xyz:delta/max(distance,0.0001);attenuation=d.w==3.0?1.0:(distance<=a.w?1.0/max(e.x+e.y*distance+e.z*distance*distance,0.0001):0.0);
+        if(d.w==2.0){float rho=dot(-L,d.xyz);attenuation*=rho>=c.x?1.0:rho<=c.y?0.0:pow((rho-c.y)/max(c.x-c.y,0.0001),e.w);}
+        if(d.w==3.0){target=p+L*g.eye.w;range=-1.0;}}
+    else{if(c.z>0.5&&d.w==3.0)return 0.0;L=delta/max(distance,0.0001);attenuation=max(1.0-distance/max(a.w,0.0001),0.0);attenuation*=attenuation;}
+    if(range==0.0)range=a.w;
+    return luma(b.rgb*abs(b.a))*attenuation*max(dot(n,L),0.0);
+}
+vec3 hitRadiance(uint instanceIndex,uint geometryIndex,uint triangle,bool front,vec2 bary,mat4x3 transform){
+    vec4 albedo=rtMaterialHit(instanceIndex,geometryIndex,triangle,front,bary,transform);if(albedo.a<=0.0)return vec3(0);
+    RtInstance instance=rtInstances[instanceIndex];RtMaterial m=rtMaterials[instance.materialBase+geometryIndex];uint flags=m.metadata.x;
+    if((flags&(64u|2048u|4096u))!=0u)return linear(albedo.rgb)*albedo.a; // Effect, explicit-material and unlit hits are already final.
+    RtIndices indices=RtIndices(instance.indices);RtVertices vertices=RtVertices(instance.vertices);
+    uint ia=indices.words[m.frames.z+triangle*3u],ib=indices.words[m.frames.z+triangle*3u+1u],ic=indices.words[m.frames.z+triangle*3u+2u];vec3 w=vec3(1.0-bary.x-bary.y,bary);
+    vec3 p=transform*vec4(rtPosition(vertices,ia)*w.x+rtPosition(vertices,ib)*w.y+rtPosition(vertices,ic)*w.z,1);
+    mat3 normalTransform=mat3(transform);for(int j=0;j<3;++j){float s=dot(normalTransform[j],normalTransform[j]);normalTransform[j]=s>0.0?normalTransform[j]/s:vec3(0);}
+    vec3 n=rtSafeNormal(normalTransform*(rtNormal(vertices,ia)*w.x+rtNormal(vertices,ib)*w.y+rtNormal(vertices,ic)*w.z));if(!front)n=-n;
+    vec3 illumination;
+    if((flags&8192u)!=0u){uint a=ia*13u+8u,b=ib*13u+8u,c=ic*13u+8u;vec2 lm=vec2(vertices.words[a],vertices.words[a+1u])*w.x+vec2(vertices.words[b],vertices.words[b+1u])*w.y+vec2(vertices.words[c],vertices.words[c+1u])*w.z;
+        illumination=2.0*clamp(textureLod(rtTextures[nonuniformEXT(uint(m.lightState.z))],lm,0).rgb+vec3(m.factors.z),0.0,1.0);}
+    else illumination=vec3(m.factors.w);
+    for(int i=0;i<int(g.camera.w);++i){vec4 a=lightData[i*5],b=lightData[i*5+1],d=lightData[i*5+2],e=lightData[i*5+3],c=lightData[i*5+4];if(b.a<0.0||c.z>0.5)continue;
+        vec3 delta=a.xyz-p;float distance=length(delta);vec3 L=d.w==3.0?-d.xyz:delta/max(distance,0.0001);float attenuation=d.w==3.0?1.0:(distance<=a.w?1.0/max(e.x+e.y*distance+e.z*distance*distance,0.0001):0.0);
+        if(d.w==2.0){float rho=dot(-L,d.xyz);attenuation*=rho>=c.x?1.0:rho<=c.y?0.0:pow((rho-c.y)/max(c.x-c.y,0.0001),e.w);}
+        illumination+=clamp(b.rgb*abs(b.a)*attenuation,0.0,1.0)*max(dot(n,L),0.0);}
+    return linear(albedo.rgb*illumination)*albedo.a;
+}
+// rtReflection with the transmitted fraction returned separately (the receiving color is not known here).
+vec4 reflectionLayers(vec3 origin,vec3 direction,float maxDistance){
+    vec3 radiance=vec3(0);float visibility=1.0,minDistance=.001;
+    for(uint layer=0u;layer<rtInstances[0].padding&&minDistance<=maxDistance;++layer){
+        rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsNoneEXT,255,origin,minDistance,direction,maxDistance);
+        while(rayQueryProceedEXT(q))if(rayQueryGetIntersectionTypeEXT(q,false)==gl_RayQueryCandidateIntersectionTriangleEXT){vec4 color=rtHitColor(q,false);if(color.a>0.0)rayQueryConfirmIntersectionEXT(q);}
+        if(rayQueryGetIntersectionTypeEXT(q,true)==gl_RayQueryCommittedIntersectionNoneEXT)break;
+        vec4 color=rtHitColor(q,true);float alpha=clamp(color.a,0.0,1.0);
+        uint flags=rtMaterials[rtInstances[rayQueryGetIntersectionInstanceCustomIndexEXT(q,true)].materialBase+rayQueryGetIntersectionGeometryIndexEXT(q,true)].metadata.x;
+        radiance+=visibility*alpha*color.rgb;if((flags&(512u|1024u))!=(512u|1024u))visibility*=1.0-alpha;if(visibility<=0.0)break;
+        minDistance=uintBitsToFloat(floatBitsToUint(rayQueryGetIntersectionTEXT(q,true))+1u);
+    }
+    return vec4(radiance,visibility);
+}
+void main(){
+    ivec2 pixel=ivec2(gl_GlobalInvocationID.xy);if(pixel.x>=g.config.y||pixel.y>=g.config.z)return;
+    seed=pcg(uint(pixel.x)+uint(pixel.y)*uint(g.config.y))^pcg(uint(g.params.x)*9781u+1u);
+    float depth=texelFetch(gDepth,pixel,0).r;vec4 data=texelFetch(gData,pixel,0);int flags=int(data.a+0.5);
+    vec4 mask=vec4(1),gi=vec4(0,0,0,1),reflection=vec4(0,0,0,1);
+    if(depth<1.0){
+        vec2 uv=(vec2(pixel)+0.5)/vec2(g.config.yz);vec4 world=g.inverseViewProjection*vec4(uv.x*2.0-1.0,1.0-uv.y*2.0,depth*2.0-1.0,1.0);vec3 p=world.xyz/world.w,n=decodeNormal(data.xy);
+        float viewDistance=length(p-g.eye.xyz);vec3 origin=p+n*max(0.02,viewDistance*0.0005);
+        // Unlit/explicit/effect surfaces (flag 4) take no lighting signals but still reflect (original unlit mirrors).
+        if((g.config.x&1)!=0&&(flags&4)==0){
+            bool native=(flags&2)!=0;float shadowed=0.0,unshadowed=0.0;
+            for(int i=0;i<int(g.camera.w);++i){vec3 target;float range;float c=lightContribution(i,p,n,native,target,range);if(c<=0.0)continue;unshadowed+=c;
+                // Area light: a random point on a sphere scaled with the light range (directional: cone around it).
+                vec3 jittered=target+sphereOffset()*(range<0.0?g.eye.w*0.01:clamp(range*0.03,2.0,12.0));vec3 delta=jittered-origin;float distance=length(delta);
+                shadowed+=c*rtVisibility(origin,delta/max(distance,0.0001),max(distance-(range<0.0?0.01:rtLightClearance),0.0));}
+            mask.r=unshadowed>0.0?shadowed/unshadowed:1.0;
+            if((flags&1)==0&&dot(n,g.sun.xyz)>0.0){mat3 b=basis(normalize(g.sun.xyz));float r=g.sun.w*sqrt(rnd()),phi=6.2831853*rnd();mask.g=rtVisibility(origin,normalize(b*vec3(r*cos(phi),r*sin(phi),1.0)),g.eye.w);}
+            // Contact shadows: short cosine rays that only see models (instance mask 2), so actors darken baked lighting.
+            // Alpha-tested like the raster pass; additive glow models (lamp cones, flares) are light, not occluders.
+            rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsNoneEXT,2,origin,0.01,cosineDirection(n),g.params.z);
+            while(rayQueryProceedEXT(q))if(rayQueryGetIntersectionTypeEXT(q,false)==gl_RayQueryCandidateIntersectionTriangleEXT&&!rtAdditive(rayQueryGetIntersectionInstanceCustomIndexEXT(q,false),rayQueryGetIntersectionGeometryIndexEXT(q,false))&&rtHitColor(q,false).a>=0.5)rayQueryConfirmIntersectionEXT(q);
+            if(rayQueryGetIntersectionTypeEXT(q,true)!=gl_RayQueryCommittedIntersectionNoneEXT)mask.b=mix(0.3,1.0,rayQueryGetIntersectionTEXT(q,true)/g.params.z);
+        }
+        if((g.config.x&2)!=0&&(flags&4)==0){
+            rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsNoneEXT,255,origin,0.01,cosineDirection(n),g.params.y);
+            while(rayQueryProceedEXT(q))if(rayQueryGetIntersectionTypeEXT(q,false)==gl_RayQueryCandidateIntersectionTriangleEXT){vec4 color=rtHitColor(q,false);if(color.a>=0.5)rayQueryConfirmIntersectionEXT(q);}
+            if(rayQueryGetIntersectionTypeEXT(q,true)!=gl_RayQueryCommittedIntersectionNoneEXT)
+                gi.rgb=hitRadiance(rayQueryGetIntersectionInstanceCustomIndexEXT(q,true),rayQueryGetIntersectionGeometryIndexEXT(q,true),rayQueryGetIntersectionPrimitiveIndexEXT(q,true),rayQueryGetIntersectionFrontFaceEXT(q,true),rayQueryGetIntersectionBarycentricsEXT(q,true),rayQueryGetIntersectionObjectToWorldEXT(q,true));
+        }
+        if((g.config.x&4)!=0&&(flags&8)!=0){
+            vec3 V=normalize(g.eye.xyz-p),R=reflect(-V,n);float roughness=data.b;
+            if(roughness>0.02){float a=roughness*roughness,u=rnd(),phi=6.2831853*rnd(),cosTheta=sqrt((1.0-u)/(1.0+(a*a-1.0)*u)),sinTheta=sqrt(1.0-cosTheta*cosTheta);vec3 h=basis(n)*vec3(sinTheta*cos(phi),sinTheta*sin(phi),cosTheta);R=reflect(-V,h);if(dot(R,n)<=0.0)R=reflect(-V,n);}
+            reflection=reflectionLayers(p,normalize(R),g.eye.w);
+        }
+    }
+    if((g.config.x&1)!=0)imageStore(outMask,pixel,mask);
+    if((g.config.x&2)!=0)imageStore(outGi,pixel,gi);
+    if((g.config.x&4)!=0)imageStore(outReflect,pixel,reflection);
+}

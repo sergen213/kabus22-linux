@@ -1,0 +1,15 @@
+# requires: saves
+# Demir at Kiz Kulesi (slot 10 = kayit9.sav): five atilgan_ai enemies approach and damage the player (atilgan_yara.wdl:130/147).
+# An atilgan flies off again after its pass (seed 0: 878 -> 298 at +200 frames, then 1284 at +600), so the approach is
+# sampled while it happens instead of at a fixed end frame.
+realtime off
+load-save 9
+wait until LY_AktifLevelID == 31 && level_yuklendi_ok == 1 && player != 0 timeout 7200
+assert $count(atilgan_ai) == 5
+find enemy atilgan_ai
+store d0 $dist(@enemy)
+store hp0 oyn_yaralanma
+assert @enemy.skill1 > 0
+wait until $dist(@enemy) < @d0 - 300 timeout 600
+wait until oyn_yaralanma < @hp0 timeout 600
+capture kriz_attacked

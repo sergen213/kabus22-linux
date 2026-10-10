@@ -233,6 +233,20 @@ void child_first_wait_returns() {
     assert(f.events.size() == 4 && f.runtime.processes() == 0);
     f.expect(3, {raw(3), raw(7), raw(7)});
 }
+// A6 00410a80 case5: an IF/WHILE condition is the last accumulator write, so a function that falls off its end after a false
+// IF returns 0, not an earlier statement value (kotu_koruyucu.wdl Kotukoru_OneKontrol: one_yapma_sayisi+=1; if(==10){...}).
+void falling_off_returns_last_condition() {
+    Fixture f;
+    f.load(R"wdl(
+        var counter = 0;
+        function counted() { counter += 1; if (counter == 10) { return(5); } }
+        function looped() { var i = 3; while (i > 0) { i -= 1; } }
+        function caller() { emit(counted(), looped()); counter = 9; emit(counted()); }
+    )wdl");
+    f.start("caller");
+    f.expect(0, {0, 0});
+    f.expect(1, {raw(5)});
+}
 
 void independent_local_arguments_and_context() {
     Fixture f;
@@ -1586,6 +1600,7 @@ int main() {
     filename_tokens_preserve_macro_boundaries();
     literal_delimiters_reach_file_text_consumers();
     child_first_wait_returns();
+    falling_off_returns_last_condition();
     independent_local_arguments_and_context();
     wait_clamps_to_one_frame();
     entity_freeze_pauses_remaining_timer();

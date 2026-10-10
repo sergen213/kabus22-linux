@@ -1,0 +1,12 @@
+# Startup: splash screens (K22.wdl Menu_AcilisEkrani), optional first-run brightness menu, main menu (AnaMenu.wdl).
+realtime off
+wait until ParlaklikMenuAcik == 1 || AMP_YeniOyun.visible == 1 timeout 3600
+press-until Return ParlaklikMenuAcik == 0
+wait until AMP_YeniOyun.visible == 1 && AM_Cursor == 0 timeout 600
+frames 30
+capture main_menu
+press-until Down AM_Cursor == 1
+press-until Down AM_Cursor == 4
+press Up
+assert AM_Cursor == 3
+assert $level == "level0.wmb"

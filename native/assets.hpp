@@ -18,7 +18,8 @@ struct Color { float r{}, g{}, b{}, a{1}; };
 // sourceDepth is original pixel bit depth; 0 denotes compressed/non-packed sources.
 // nativeStorageBytes records native CPU storage: 0 is encoded/compressed, 255 is unknown.
 // nativeTextureAlpha captures A7 BMAP100 under native decoded-texture policy, not pixel opacity.
-struct Image { uint32_t width{}, height{}; std::vector<uint8_t> rgba; uint32_t sourceDepth{32}; uint8_t nativeStorageBytes{255}; bool nativeTextureAlpha{}; };
+// a6AlphaFormat is A6 BMAP0x100: the file is a 32-bit TGA (0040e2b0); such bitmaps are never OVERLAY-keyed.
+struct Image { uint32_t width{}, height{}; std::vector<uint8_t> rgba; uint32_t sourceDepth{32}; uint8_t nativeStorageBytes{255}; bool nativeTextureAlpha{}; bool a6AlphaFormat{}; };
 struct Vertex { Vec3 position, normal; Vec2 uv, lightmap_uv; };
 // sourceFace is the original WMB face index; non-world triangles retain ~0u.
 struct Triangle { std::array<uint32_t,3> indices{}; uint32_t materialIndex{}; uint32_t flags{}; uint32_t sourceFace{~0u}; };
@@ -44,6 +45,8 @@ struct Model {
     std::vector<AnimationFrame> frames; std::vector<std::string> frameNames;
     std::vector<Bone> bones; std::vector<VertexWeight> weights;
     Vec3 min, max; uint32_t flags{}; std::vector<uint8_t> metadata;
+    // A6 MDL resource box: first animation frame only (K22.exe 00457d10/00457d70 bound each frame block; 00458500 copies block 1 to +0x38).
+    Vec3 resourceMin, resourceMax;
     uint32_t formatVersion{},terrainWidth{},terrainHeight{}; Vec2 terrainSpacing;
     // Original resource slots, initialized at birth; null selected slots reject geometry.
     std::array<const Model*,3> shadowLods{};
@@ -55,7 +58,7 @@ bool model_has_entity_skins(const Model&) noexcept;
 uint32_t model_skin_index(const Model&,int32_t oneBasedSelector);
 const Material* model_material(const Model&,uint32_t faceMaterial,uint32_t skinIndex);
 struct WorldEntity {
-    uint32_t type{}, flags{}, rawFlags{}; std::string name, file, action;
+    uint32_t type{}, flags{}; std::string name, file, action;
     Vec3 position, angle, scale{1,1,1}; std::array<float,100> skills{};
     Color ambient{1,1,1,1}; float albedo{1}; std::vector<uint8_t> metadata;
     uint32_t objectIndex{},pathIndex{},attachedEntityIndex{};
@@ -93,7 +96,7 @@ struct World {
 };
 class Assets {
 public:
-    // Bonus uses first-mounted archives and source-proven A7 WMB/MDL records.
+    // Loose files precede archives; the first-mounted archive member wins (A6 and A7). Bonus selects A7 WMB/MDL records.
     explicit Assets(std::filesystem::path root,bool bonusProfile=false);
     // Captured by new image loads; existing cached bitmap storage is unchanged.
     void set_native_alpha_depth(double depth) noexcept { nativeAlphaDepth_=depth; }
@@ -107,6 +110,7 @@ public:
     uint8_t native_lightmap_mono(uint16_t word) const;
     void mount(std::string_view resource);
     bool contains(std::string_view name) const;
+    std::vector<std::string> names() const; // Sorted normalized names of loose files and mounted archive entries.
     std::vector<uint8_t> read(std::string_view name) const;
     std::string text(std::string_view name) const;
     std::string archive_text(std::string_view name) const;

@@ -142,9 +142,16 @@ inline Color material_ambient_light(const DrawInstance&draw,const Camera*camera,
     auto packed=(std::uint32_t(channels[2])<<16)|(std::uint32_t(channels[1])<<8)|std::uint32_t(channels[0]);
     return {float((packed>>16)&255)/255,float((packed>>8)&255)/255,float(packed&255)/255,1};
 }
-inline float material_light_strength(float albedo,int sample,bool a7){
-    if(a7?albedo<=0:albedo==0)return 0;
-    return std::clamp((std::floor(albedo*2)-100+sample)/(a7?127.0f:255.0f),0.0f,1.0f);
+inline int material_selected_light(const RenderFrame&frame){
+    for(std::size_t i=0;i<std::min<std::size_t>(frame.lights.size(),32);++i){
+        const auto&light=frame.lights[i];if(light.synthetic&&!light.baked&&light.type==3)return static_cast<int>(i);
+    }
+    return -1;
+}
+inline float material_light_strength(std::int32_t albedoRaw,int sample,bool a7,bool fixedBank){
+    if(a7&&!fixedBank?albedoRaw<=0:albedoRaw==0)return 0;
+    const auto doubled=std::bit_cast<std::int32_t>(std::uint32_t(albedoRaw)*2u)>>10;
+    return std::clamp((doubled-100+sample)/(a7?(fixedBank?128.0f:127.0f):255.0f),0.0f,1.0f);
 }
 inline int native_skin_layers(const Model&model,int maximum){
     int layers=0;
@@ -163,6 +170,8 @@ inline ModelPassState model_pass_state(const DrawInstance&draw,const Camera&came
     const bool translucent=model_translucent(draw,bitmapAlpha);
     return {translucent||camera.alpha<0.999f,translucent&&draw.additive&&camera.opacityByte==255,depthWrite&&!translucent};
 }
+// A6 OVERLAY keying (0043bb10 key format 0x200, 0043ee40/00440e90 alpha test) is skipped for BMAP 0x100 (32-bit TGA, 0040e2b0).
+inline bool overlay_keyed(const DrawInstance&draw,const Image*image){return draw.overlay&&!(image&&image->a6AlphaFormat);}
 inline float surface_reflection(int percent,float reflectivity,bool map){
     long double strength=map?static_cast<long double>(std::lround(reflectivity*50))*static_cast<long double>(0.051):static_cast<long double>(2.55);
     auto opacity=static_cast<std::uint8_t>(255-static_cast<std::int64_t>(percent*strength));return (255-opacity)/255.0f;
@@ -218,4 +227,157 @@ inline float particle_alpha(std::int32_t alphaRaw,bool translucent,bool additive
     if(!translucent)return 1;
     return std::clamp<std::int64_t>((std::int64_t(alphaRaw)*10)>>(textured&&additive?11:12),0,255)/255.0f;
 }
+// PBR/HDR calibration. Scene values stay in the game's gamma-2.2 space; the tone curve acts on linear
+// values and is identity up to the knee (0.6 linear, 0.793 gamma), so dark/mid scenes are unchanged.
+// Above the knee a Reinhard shoulder compresses the excess toward 1 (C1-continuous, strictly monotonic).
+constexpr float toneKnee=0.6f,toneGamma=2.2f;
+inline float tone_linear(float x){if(x<=toneKnee)return std::max(x,0.f);float t=(x-toneKnee)/(1-toneKnee);return toneKnee+(1-toneKnee)*t/(1+t);}
+inline float tone_map(float gammaValue){return std::pow(tone_linear(std::pow(std::max(gammaValue,0.f),toneGamma)),1/toneGamma);}
+// Exact inverse for seeding the HDR target with already-displayed LDR content; 1.0 is held just below the asymptote.
+inline float inverse_tone_map(float gammaValue){
+    float y=std::pow(std::clamp(gammaValue,0.f,1-0.25f/255),toneGamma);if(y<=toneKnee)return std::pow(y,1/toneGamma);
+    float s=(y-toneKnee)/(1-toneKnee);return std::pow(toneKnee+(1-toneKnee)*s/(1-s),1/toneGamma);
+}
+inline Color inverse_tone_map(Color c){return {inverse_tone_map(c.r),inverse_tone_map(c.g),inverse_tone_map(c.b),c.a};}
+// Blinn-Phong power to GGX roughness (Walter et al. alpha=sqrt(2/(n+2)), roughness=sqrt(alpha)); legacy matte default.
+inline float legacy_roughness(float power){return power>0?std::clamp(std::sqrt(std::sqrt(2/(power+2))),0.05f,1.f):0.8f;}
+// Backend bits for option availability: OpenGL, Vulkan raster, Vulkan ray query.
+constexpr unsigned backendOpenGL=1,backendRaster=2,backendRT=4,backendVulkan=6,backendAll=7;
+inline unsigned backend_bit(std::string_view backend){return backend=="opengl"?backendOpenGL:backend=="vulkan-raster"?backendRaster:backend=="vulkan-rt"?backendRT:0;}
+// `restricted` names one value that only works on `restrictedBackends` (shadows=rt).
+struct GraphicsOption { std::string_view key,label,fallback; std::array<std::string_view,5> values; std::size_t count; unsigned backends{backendAll}; std::string_view restricted{}; unsigned restrictedBackends{}; };
+// Every implemented --graphics key. Backend availability is probed separately.
+inline constexpr std::array<GraphicsOption,14> graphicsOptions{{
+    {"backend","Rendering backend","opengl",{"opengl","vulkan-raster","vulkan-rt"},3},
+    {"pbr","PBR materials (HDR + tone mapping)","0",{"0","1"},2},
+    {"anisotropy","Anisotropic filtering","8",{"1","2","4","8","16"},5},
+    {"msaa","MSAA samples","4",{"1","2","4","8"},4},
+    {"texture_packs","HD texture packs","0",{"0","1"},2},
+    {"shadows","Shadows (original, shadow maps, ray traced)","original",{"original","shadowmap","rt"},3,backendAll,"rt",backendRT},
+    {"gi","Ray-traced global illumination","0",{"0","1"},2,backendRT},
+    {"reflections","Ray-traced reflections (original mirror, roughness-aware)","original",{"original","rough"},2,backendRT},
+    {"denoise","Temporal/spatial ray-tracing denoiser","0",{"0","1"},2,backendRT},
+    {"bloom","Bloom","0",{"0","1"},2},
+    {"ssao","Screen-space ambient occlusion","0",{"0","1"},2},
+    {"fxaa","FXAA anti-aliasing","0",{"0","1"},2},
+    {"taa","Temporal anti-aliasing","0",{"0","1"},2,backendVulkan},
+    {"volumetric_fog","Volumetric fog light scattering","0",{"0","1"},2}}};
+struct GraphicsSettings {
+    std::string backend{"opengl"};
+    bool pbr{},texturePacks{},explicitPacks{};
+    int anisotropy{},msaa{}; // 0 keeps the legacy/script-controlled default exactly.
+    GraphicsFeatures features;
+};
+inline GraphicsSettings resolve_graphics(std::string_view preset,std::span<const std::pair<std::string,std::string>> overrides){
+    GraphicsSettings g;auto&f=g.features;
+    if(preset=="enhanced"){g.backend="vulkan-raster";g.anisotropy=16;g.msaa=4;g.texturePacks=true;f.shadows=ShadowMode::ShadowMap;f.ssao=f.fxaa=true;}
+    else if(preset=="ultra"){g.backend="vulkan-rt";g.anisotropy=16;g.msaa=4;g.texturePacks=true;g.pbr=true;f.shadows=ShadowMode::RayTraced;f.gi=f.roughReflections=f.denoise=f.bloom=f.taa=f.fog=true;}
+    else if(preset!="original"&&preset!="custom")throw std::runtime_error("--preset requires original, enhanced, ultra or custom");
+    for(const auto&[key,value]:overrides){
+        auto option=std::find_if(graphicsOptions.begin(),graphicsOptions.end(),[&](const auto&o){return o.key==key;});
+        if(option==graphicsOptions.end())throw std::runtime_error("unknown --graphics key: "+key);
+        if(std::find(option->values.begin(),option->values.begin()+option->count,value)==option->values.begin()+option->count)throw std::runtime_error("unsupported --graphics value: "+key+"="+value);
+        const bool on=value=="1";
+        if(key=="backend")g.backend=value;else if(key=="pbr")g.pbr=on;else if(key=="anisotropy")g.anisotropy=std::stoi(value);
+        else if(key=="msaa")g.msaa=std::stoi(value);else if(key=="texture_packs"){g.texturePacks=on;g.explicitPacks=true;}
+        else if(key=="shadows")f.shadows=value=="rt"?ShadowMode::RayTraced:value=="shadowmap"?ShadowMode::ShadowMap:ShadowMode::Original;
+        else if(key=="gi")f.gi=on;else if(key=="reflections")f.roughReflections=value=="rough";else if(key=="denoise")f.denoise=on;
+        else if(key=="bloom")f.bloom=on;else if(key=="ssao")f.ssao=on;else if(key=="fxaa")f.fxaa=on;else if(key=="taa")f.taa=on;else f.fog=on;
+    }
+    return g;
+}
+// Drops features the backend cannot run, one stderr-ready notice each. Ray-traced shadows degrade to shadow maps.
+inline GraphicsFeatures admit_features(GraphicsFeatures f,std::string_view backend,std::vector<std::string>&notices){
+    const unsigned bit=backend_bit(backend);
+    auto drop=[&](bool&enabled,std::string_view key,unsigned backends){if(enabled&&!(bit&backends)){enabled=false;notices.push_back(std::string(key)+" requires "+(backends==backendRT?"vulkan-rt":"Vulkan")+"; disabling it on "+std::string(backend));}};
+    if(f.shadows==ShadowMode::RayTraced&&!(bit&backendRT)){f.shadows=ShadowMode::ShadowMap;notices.push_back("shadows=rt requires vulkan-rt; using shadows=shadowmap on "+std::string(backend));}
+    drop(f.gi,"gi",backendRT);drop(f.roughReflections,"reflections=rough",backendRT);drop(f.denoise,"denoise",backendRT);drop(f.taa,"taa",backendVulkan);
+    return f;
+}
+// Preset-selected backends degrade along this chain with a stderr notice; explicit choices never do.
+inline std::string_view fallback_backend(std::string_view backend){return backend=="vulkan-rt"?"vulkan-raster":backend=="vulkan-raster"?"opengl":"";}
+// ---- Wave-2 effect helpers shared by OpenGL and Vulkan (CPU-tested in k22-render-check --policy). ----
+// Background views go through an offscreen composite (resolve, bloom, tone map, TAA, FXAA) only when needed.
+inline bool composite_enabled(bool pbr,const GraphicsFeatures&f){return pbr||f.bloom||f.fxaa||f.taa;}
+// Only shadows=shadowmap renders depth maps; volumetric fog reuses them then, and is unshadowed under shadows=rt
+// (no 7-pass depth render just for fog).
+inline bool shadow_maps_enabled(const GraphicsFeatures&f){return f.shadows==ShadowMode::ShadowMap;}
+inline Matrix inverse(const Matrix&m){
+    Matrix r{};
+    r[0]=m[5]*m[10]*m[15]-m[5]*m[11]*m[14]-m[9]*m[6]*m[15]+m[9]*m[7]*m[14]+m[13]*m[6]*m[11]-m[13]*m[7]*m[10];
+    r[4]=-m[4]*m[10]*m[15]+m[4]*m[11]*m[14]+m[8]*m[6]*m[15]-m[8]*m[7]*m[14]-m[12]*m[6]*m[11]+m[12]*m[7]*m[10];
+    r[8]=m[4]*m[9]*m[15]-m[4]*m[11]*m[13]-m[8]*m[5]*m[15]+m[8]*m[7]*m[13]+m[12]*m[5]*m[11]-m[12]*m[7]*m[9];
+    r[12]=-m[4]*m[9]*m[14]+m[4]*m[10]*m[13]+m[8]*m[5]*m[14]-m[8]*m[6]*m[13]-m[12]*m[5]*m[10]+m[12]*m[6]*m[9];
+    r[1]=-m[1]*m[10]*m[15]+m[1]*m[11]*m[14]+m[9]*m[2]*m[15]-m[9]*m[3]*m[14]-m[13]*m[2]*m[11]+m[13]*m[3]*m[10];
+    r[5]=m[0]*m[10]*m[15]-m[0]*m[11]*m[14]-m[8]*m[2]*m[15]+m[8]*m[3]*m[14]+m[12]*m[2]*m[11]-m[12]*m[3]*m[10];
+    r[9]=-m[0]*m[9]*m[15]+m[0]*m[11]*m[13]+m[8]*m[1]*m[15]-m[8]*m[3]*m[13]-m[12]*m[1]*m[11]+m[12]*m[3]*m[9];
+    r[13]=m[0]*m[9]*m[14]-m[0]*m[10]*m[13]-m[8]*m[1]*m[14]+m[8]*m[2]*m[13]+m[12]*m[1]*m[10]-m[12]*m[2]*m[9];
+    r[2]=m[1]*m[6]*m[15]-m[1]*m[7]*m[14]-m[5]*m[2]*m[15]+m[5]*m[3]*m[14]+m[13]*m[2]*m[7]-m[13]*m[3]*m[6];
+    r[6]=-m[0]*m[6]*m[15]+m[0]*m[7]*m[14]+m[4]*m[2]*m[15]-m[4]*m[3]*m[14]-m[12]*m[2]*m[7]+m[12]*m[3]*m[6];
+    r[10]=m[0]*m[5]*m[15]-m[0]*m[7]*m[13]-m[4]*m[1]*m[15]+m[4]*m[3]*m[13]+m[12]*m[1]*m[7]-m[12]*m[3]*m[5];
+    r[14]=-m[0]*m[5]*m[14]+m[0]*m[6]*m[13]+m[4]*m[1]*m[14]-m[4]*m[2]*m[13]-m[12]*m[1]*m[6]+m[12]*m[2]*m[5];
+    r[3]=-m[1]*m[6]*m[11]+m[1]*m[7]*m[10]+m[5]*m[2]*m[11]-m[5]*m[3]*m[10]-m[9]*m[2]*m[7]+m[9]*m[3]*m[6];
+    r[7]=m[0]*m[6]*m[11]-m[0]*m[7]*m[10]-m[4]*m[2]*m[11]+m[4]*m[3]*m[10]+m[8]*m[2]*m[7]-m[8]*m[3]*m[6];
+    r[11]=-m[0]*m[5]*m[11]+m[0]*m[7]*m[9]+m[4]*m[1]*m[11]-m[4]*m[3]*m[9]-m[8]*m[1]*m[7]+m[8]*m[3]*m[5];
+    r[15]=m[0]*m[5]*m[10]-m[0]*m[6]*m[9]-m[4]*m[1]*m[10]+m[4]*m[2]*m[9]+m[8]*m[1]*m[6]-m[8]*m[2]*m[5];
+    float det=m[0]*r[0]+m[1]*r[4]+m[2]*r[8]+m[3]*r[12];if(det==0||!std::isfinite(det))throw std::runtime_error("Singular renderer matrix");
+    for(auto&v:r)v/=det;return r;
+}
+// Clip-space point (GL conventions, z in [-1,1]) for a world point; w-divided.
+inline Vec3 project_ndc(const Matrix&m,Vec3 p){float w=m[3]*p.x+m[7]*p.y+m[11]*p.z+m[15];auto q=transformed_point(m,p);return {q.x/w,q.y/w,q.z/w};}
+inline Matrix look_at(Vec3 eye,Vec3 forward,Vec3 up){
+    Vec3 f=unit(forward),s=unit(cross(f,up)),u=cross(s,f);
+    return {s.x,u.x,-f.x,0,s.y,u.y,-f.y,0,s.z,u.z,-f.z,0,-dot(s,eye),-dot(u,eye),dot(f,eye),1};
+}
+inline Matrix orthographic(float r,float nearPlane,float farPlane){return {1/r,0,0,0,0,1/r,0,0,0,0,-2/(farPlane-nearPlane),0,0,0,-(farPlane+nearPlane)/(farPlane-nearPlane),1};}
+inline Matrix perspective90(float nearPlane,float farPlane){return {1,0,0,0,0,1,0,0,0,0,-(farPlane+nearPlane)/(farPlane-nearPlane),-1,0,0,-2*farPlane*nearPlane/(farPlane-nearPlane),0};}
+// Directional (SUN) shadow map: bounding sphere of the camera frustum up to `distance`, depth range widened to every
+// world caster, center snapped to whole shadow texels so the map does not shimmer while the camera moves.
+inline Matrix sun_shadow_matrix(const Camera&camera,float aspect,Vec3 sunDirection,const Bounds&world,float distance,unsigned resolution){
+    Camera slice=camera;slice.farClip=std::min(camera.farClip,std::max(distance,camera.nearClip*2));
+    auto inverseVP=inverse(camera_matrix(slice,aspect));std::array<Vec3,8>corners;Vec3 center{};
+    for(int i=0;i<8;++i){corners[i]=project_ndc(inverseVP,{i&1?1.f:-1.f,i&2?1.f:-1.f,i&4?1.f:-1.f});center=add(center,mul(corners[i],1/8.f));}
+    float radius=0;for(auto c:corners){auto d=add(c,mul(center,-1));radius=std::max(radius,std::sqrt(dot(d,d)));}
+    radius=std::ceil(radius);Vec3 toward=unit(sunDirection),up=std::abs(toward.z)>0.99f?Vec3{1,0,0}:Vec3{0,0,1};
+    auto view=look_at({},mul(toward,-1),up);float texel=2*radius/float(resolution);
+    auto local=transformed_point(view,center);local.x=std::floor(local.x/texel)*texel;local.y=std::floor(local.y/texel)*texel;
+    float nearest=local.z+radius,farthest=local.z-radius; // View space looks down -Z.
+    if(!world.empty&&world.finite)for(int i=0;i<8;++i){auto p=transformed_point(view,{i&1?world.maximum.x:world.minimum.x,i&2?world.maximum.y:world.minimum.y,i&4?world.maximum.z:world.minimum.z});nearest=std::max(nearest,p.z);farthest=std::min(farthest,p.z);}
+    Matrix shift{1,0,0,0,0,1,0,0,0,0,1,0,-local.x,-local.y,0,1};
+    return product(orthographic(radius,-nearest-1,-farthest+1),product(shift,view));
+}
+// GL cube-map face order/orientation (+X,-X,+Y,-Y,+Z,-Z); the face image at texel (s,t) stores the GL convention.
+inline Matrix cube_face_matrix(Vec3 position,int face,float nearPlane,float farPlane){
+    static constexpr std::array<std::array<float,6>,6> axes{{{1,0,0,0,-1,0},{-1,0,0,0,-1,0},{0,1,0,0,0,1},{0,-1,0,0,0,-1},{0,0,1,0,-1,0},{0,0,-1,0,-1,0}}};
+    const auto&a=axes.at(std::size_t(face));return product(perspective90(nearPlane,farPlane),look_at(position,{a[0],a[1],a[2]},{a[3],a[4],a[5]}));
+}
+// The one point/spot light that gets a cube shadow map: strongest eligible dynamic light at the camera
+// (its range must exceed twice the cube near plane, which keeps light fixtures from occluding their own light).
+constexpr float cubeShadowNear=16;
+inline int shadow_light_index(std::span<const RenderLight>lights,Vec3 eye){
+    int best=-1;float bestScore=0;
+    for(std::size_t i=0;i<std::min<std::size_t>(lights.size(),32);++i){
+        const auto&l=lights[i];if(l.baked||l.synthetic||(l.type!=1&&l.type!=2)||!(l.range>2*cubeShadowNear)||!(l.intensity>0))continue;
+        auto d=add(l.position,mul(eye,-1));float distance=std::sqrt(dot(d,d));
+        float score=l.intensity*(l.color.r+l.color.g+l.color.b)/(1+distance/l.range);
+        if(score>bestScore){bestScore=score;best=int(i);}
+    }
+    return best;
+}
+constexpr unsigned sunShadowResolution=2048,cubeShadowResolution=1024;constexpr float sunShadowDistance=2048;
+// TAA: 8-sample Halton(2,3) sub-pixel offsets in pixels, applied in clip space.
+inline float halton(std::uint32_t index,std::uint32_t base){float f=1,r=0;for(;index;index/=base){f/=float(base);r+=f*float(index%base);}return r;}
+inline Vec2 taa_jitter(std::uint64_t frame){auto i=std::uint32_t(frame%8)+1;return {halton(i,2)-.5f,halton(i,3)-.5f};}
+inline Matrix jittered(Matrix vp,Vec2 pixels,float width,float height){
+    const float dx=2*pixels.x/width,dy=2*pixels.y/height;for(int c=0;c<4;++c){vp[c*4]+=dx*vp[c*4+3];vp[c*4+1]+=dy*vp[c*4+3];}return vp;
+}
+// Temporal accumulation (TAA and ray-traced denoiser, mirrored in the shaders): exponential history with a
+// 1/(n+1) ramp, rejected on disocclusion (relative view-depth change or normal change).
+constexpr float historyDepthTolerance=0.05f,historyNormalTolerance=0.9f;
+inline float temporal_weight(float historyLength,float minimum){return std::max(1/(std::max(historyLength,0.f)+1),minimum);}
+inline bool history_valid(float viewDepth,float previousViewDepth,float normalDot){
+    return viewDepth>0&&previousViewDepth>0&&std::abs(viewDepth-previousViewDepth)<=historyDepthTolerance*std::max(viewDepth,previousViewDepth)&&normalDot>=historyNormalTolerance;
+}
+// B3-spline a-trous kernel taps (1,4,6,4,1)/16 per axis.
+inline float atrous_tap(int offset){constexpr std::array<float,5>taps{1/16.f,4/16.f,6/16.f,4/16.f,1/16.f};return taps.at(std::size_t(std::clamp(offset,-2,2)+2));}
 }
