@@ -247,7 +247,7 @@ inline unsigned backend_bit(std::string_view backend){return backend=="opengl"?b
 // `restricted` names one value that only works on `restrictedBackends` (shadows=rt).
 struct GraphicsOption { std::string_view key,label,fallback; std::array<std::string_view,5> values; std::size_t count; unsigned backends{backendAll}; std::string_view restricted{}; unsigned restrictedBackends{}; };
 // Every implemented --graphics key. Backend availability is probed separately.
-inline constexpr std::array<GraphicsOption,14> graphicsOptions{{
+inline constexpr std::array<GraphicsOption,18> graphicsOptions{{
     {"backend","Rendering backend","opengl",{"opengl","vulkan-raster","vulkan-rt"},3},
     {"pbr","PBR materials (HDR + tone mapping)","0",{"0","1"},2},
     {"anisotropy","Anisotropic filtering","8",{"1","2","4","8","16"},5},
@@ -261,7 +261,11 @@ inline constexpr std::array<GraphicsOption,14> graphicsOptions{{
     {"ssao","Screen-space ambient occlusion","0",{"0","1"},2},
     {"fxaa","FXAA anti-aliasing","0",{"0","1"},2},
     {"taa","Temporal anti-aliasing","0",{"0","1"},2,backendVulkan},
-    {"volumetric_fog","Volumetric fog light scattering","0",{"0","1"},2}}};
+    {"volumetric_fog","Volumetric fog light scattering","0",{"0","1"},2},
+    {"smooth_normals","Smooth vertex normals (raster and ray tracing)","0",{"0","1"},2,backendVulkan},
+    {"tessellation","PN-triangle tessellation of models","0",{"0","1"},2,backendVulkan},
+    {"texture_upscale","Edge-aware 2x texture upscaling","0",{"0","1"},2,backendVulkan},
+    {"sharpen","Contrast-adaptive sharpening","0",{"0","1"},2,backendVulkan}}};
 struct GraphicsSettings {
     std::string backend{"opengl"};
     bool pbr{},texturePacks{},explicitPacks{};
@@ -270,8 +274,8 @@ struct GraphicsSettings {
 };
 inline GraphicsSettings resolve_graphics(std::string_view preset,std::span<const std::pair<std::string,std::string>> overrides){
     GraphicsSettings g;auto&f=g.features;
-    if(preset=="enhanced"){g.backend="vulkan-raster";g.anisotropy=16;g.msaa=4;g.texturePacks=true;f.shadows=ShadowMode::ShadowMap;f.ssao=f.fxaa=true;}
-    else if(preset=="ultra"){g.backend="vulkan-rt";g.anisotropy=16;g.msaa=4;g.texturePacks=true;g.pbr=true;f.shadows=ShadowMode::RayTraced;f.gi=f.roughReflections=f.denoise=f.bloom=f.taa=f.fog=true;}
+    if(preset=="enhanced"){g.backend="vulkan-raster";g.anisotropy=16;g.msaa=4;g.texturePacks=true;f.shadows=ShadowMode::ShadowMap;f.ssao=f.fxaa=true;f.smoothNormals=f.tessellation=f.upscale=f.sharpen=true;}
+    else if(preset=="ultra"){g.backend="vulkan-rt";g.anisotropy=16;g.msaa=4;g.texturePacks=true;g.pbr=true;f.shadows=ShadowMode::RayTraced;f.gi=f.roughReflections=f.denoise=f.bloom=f.taa=f.fog=true;f.smoothNormals=f.tessellation=f.upscale=f.sharpen=true;}
     else if(preset!="original"&&preset!="custom")throw std::runtime_error("--preset requires original, enhanced, ultra or custom");
     for(const auto&[key,value]:overrides){
         auto option=std::find_if(graphicsOptions.begin(),graphicsOptions.end(),[&](const auto&o){return o.key==key;});
@@ -282,7 +286,8 @@ inline GraphicsSettings resolve_graphics(std::string_view preset,std::span<const
         else if(key=="msaa")g.msaa=std::stoi(value);else if(key=="texture_packs"){g.texturePacks=on;g.explicitPacks=true;}
         else if(key=="shadows")f.shadows=value=="rt"?ShadowMode::RayTraced:value=="shadowmap"?ShadowMode::ShadowMap:ShadowMode::Original;
         else if(key=="gi")f.gi=on;else if(key=="reflections")f.roughReflections=value=="rough";else if(key=="denoise")f.denoise=on;
-        else if(key=="bloom")f.bloom=on;else if(key=="ssao")f.ssao=on;else if(key=="fxaa")f.fxaa=on;else if(key=="taa")f.taa=on;else f.fog=on;
+        else if(key=="bloom")f.bloom=on;else if(key=="ssao")f.ssao=on;else if(key=="fxaa")f.fxaa=on;else if(key=="taa")f.taa=on;
+        else if(key=="smooth_normals")f.smoothNormals=on;else if(key=="tessellation")f.tessellation=on;else if(key=="texture_upscale")f.upscale=on;else if(key=="sharpen")f.sharpen=on;else f.fog=on;
     }
     return g;
 }
@@ -292,6 +297,7 @@ inline GraphicsFeatures admit_features(GraphicsFeatures f,std::string_view backe
     auto drop=[&](bool&enabled,std::string_view key,unsigned backends){if(enabled&&!(bit&backends)){enabled=false;notices.push_back(std::string(key)+" requires "+(backends==backendRT?"vulkan-rt":"Vulkan")+"; disabling it on "+std::string(backend));}};
     if(f.shadows==ShadowMode::RayTraced&&!(bit&backendRT)){f.shadows=ShadowMode::ShadowMap;notices.push_back("shadows=rt requires vulkan-rt; using shadows=shadowmap on "+std::string(backend));}
     drop(f.gi,"gi",backendRT);drop(f.roughReflections,"reflections=rough",backendRT);drop(f.denoise,"denoise",backendRT);drop(f.taa,"taa",backendVulkan);
+    drop(f.smoothNormals,"smooth_normals",backendVulkan);drop(f.tessellation,"tessellation",backendVulkan);drop(f.upscale,"texture_upscale",backendVulkan);drop(f.sharpen,"sharpen",backendVulkan);
     return f;
 }
 // Preset-selected backends degrade along this chain with a stderr notice; explicit choices never do.

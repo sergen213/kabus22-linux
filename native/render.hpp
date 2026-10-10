@@ -23,6 +23,8 @@ enum class ShadowMode : std::uint8_t { Original, ShadowMap, RayTraced };
 struct GraphicsFeatures {
     ShadowMode shadows{ShadowMode::Original};
     bool gi{}, roughReflections{}, denoise{}, bloom{}, ssao{}, fxaa{}, taa{}, fog{};
+    // Vulkan-only visual upgrades: smoothed vertex normals, PN-triangle tessellation, load-time texture upscaling, sharpening.
+    bool smoothNormals{}, tessellation{}, upscale{}, sharpen{};
     bool operator==(const GraphicsFeatures&) const = default;
 };
 struct RenderOptions { int width{1280}, height{720}, samples{4}; float anisotropy{8}; bool vsync{true}; WindowMode mode{WindowMode::Windowed}; std::string title{"Kabus 22"}; RendererBackend backend{RendererBackend::OpenGL}; bool rayTracing{true};
