@@ -260,6 +260,7 @@
 !/installer/media.hpp
 !/installer/setup.cpp
 !/installer/setup.hpp
+!/installer/wizard_style.hpp
 !/native/assets.cpp
 !/native/assets.hpp
 !/native/check_assets.cpp

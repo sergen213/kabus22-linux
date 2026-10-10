@@ -23,8 +23,10 @@ never executed, to recover the engine font).
    `innoextract`, directories by direct copy, all into a private staging directory next to the
    destination.
 5. **Convert required resources** — the original engine font is recovered from `K22.exe` into
-   `game/engine/_a4font.pcx` (+ provenance JSON), and the desktop icon is encoded from the original
-   logo.
+   `game/engine/_a4font.pcx` (+ provenance JSON), the desktop icon is encoded from the original
+   logo, and the original setup's Inno wizard images become `wizard-image.png` /
+   `wizard-small-image.png` in the install root (ISO and `setup.exe` sources only; cosmetic, skipped
+   silently when unavailable).
 6. **Install native binaries** — `kabus22`, `kabus22-launcher`, `kabus22-updater` and bundled
    libraries/notices go into `versions/<version>/`.
 7. **Validate the installation** — extracted members are checked against the Inno MD5 listing;
@@ -33,6 +35,23 @@ never executed, to recover the engine font).
 8. **Create desktop entries** — `kabus22-native.desktop` in `$XDG_DATA_HOME/applications` and the
    XDG desktop directory, both running `<root>/bin/kabus22-launcher --install-dir <root>`.
 9. **Enable Play** — the settings launcher starts the native engine with `--data <root>/game`.
+
+## Look
+
+The GTK installer reproduces the original Inno Setup 5 wizard of the Windows ISO: a
+"Select Setup Language" dialog (Deutsch / English / Türkçe, preselected from the locale), then
+Welcome → game media → Select Destination Location → Select Additional Tasks (optional community
+extras) → Ready to Install → Installing → Completing, with Back / Next / Cancel and an
+"Exit Setup?" confirmation. Welcome and Completing show the original large wizard image, inner
+pages the small one in their white header strip. The images are never bundled: they are read from
+the user's own setup header (`media::wizardImages`: the CRC-checked, LZMA-compressed `setup-0`
+block, whose WizardImageFile and WizardSmallImageFile follow the entries as two consecutive
+length-prefixed BMPs) while the media page previews the disc, and copied into the install root on
+install. A reinstall shows them from the existing root right away; otherwise the wizard starts with
+a plain gradient panel. The settings launcher uses the same style (`installer/wizard_style.hpp`,
+GTK CSS on a fixed light Adwaita theme) and the root's `wizard-small-image.png` in its header;
+installations made before this change simply have no header image. Reference screenshots of the
+original (Wine, private Xvfb) live in `reverse/original-installer/` (local only, not in git).
 
 ## Supported sources
 

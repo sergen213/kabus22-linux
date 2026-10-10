@@ -1,4 +1,5 @@
 #include "setup.hpp"
+#include "wizard_style.hpp"
 #include <gtk/gtk.h>
 #include <gdk/gdkkeysyms.h>
 #include <algorithm>
@@ -15,6 +16,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 extern "C" {
@@ -176,13 +178,15 @@ Pixels nativeArtwork(const fs::path& path) {
     Pixels pixels;
     pixels.width = frame->width;
     pixels.height = frame->height;
-    if (pixels.width > 600 || pixels.height > 240) {
-        if (std::int64_t(frame->width) * 240 >= std::int64_t(frame->height) * 600) {
-            pixels.width = 600;
-            pixels.height = std::max(1, int(std::int64_t(frame->height) * 600 / frame->width));
+    // Fits the wizard page body without growing the 391px Inno page height.
+    constexpr int maxWidth = 440, maxHeight = 100;
+    if (pixels.width > maxWidth || pixels.height > maxHeight) {
+        if (std::int64_t(frame->width) * maxHeight >= std::int64_t(frame->height) * maxWidth) {
+            pixels.width = maxWidth;
+            pixels.height = std::max(1, int(std::int64_t(frame->height) * maxWidth / frame->width));
         } else {
-            pixels.height = 240;
-            pixels.width = std::max(1, int(std::int64_t(frame->width) * 240 / frame->height));
+            pixels.height = maxHeight;
+            pixels.width = std::max(1, int(std::int64_t(frame->width) * maxHeight / frame->height));
         }
     }
     pixels.stride = pixels.width * 4;
@@ -230,12 +234,179 @@ void labelText(GtkWidget* label, const std::string& text) {
     const auto valid = displayText(text);
     gtk_label_set_text(GTK_LABEL(label), valid.c_str());
 }
+// Inno's page icons; themes without them leave the space empty instead of a broken-image glyph.
+GtkWidget* themedIcon(const char* name) {
+    return gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), name) ? gtk_image_new_from_icon_name(name, GTK_ICON_SIZE_DND) : gtk_image_new();
+}
 
+// Languages of the original setup's "Select Setup Language" list, in its order.
+enum Language { German, English, Turkish };
+Language language = English;
+enum Text { Title, LanguageTitle, LanguagePrompt, Ok, Back, Next, Cancel, InstallButton, Finish, Browse, Yes, No,
+    WelcomeTitle, WelcomeBody, MediaTitle, MediaSubtitle, MediaLead, MediaHint,
+    DestinationTitle, DestinationSubtitle, DestinationLead, DestinationHint, DestinationNote,
+    TasksTitle, TasksSubtitle, TasksLead, TasksLabel, TasksNote,
+    ReadyTitle, ReadySubtitle, ReadyLead, ReadyDestination, ReadyMedia, ReadyTasks, ReadyShortcuts, ReadyExtras,
+    InstallingTitle, InstallingSubtitle, Preparing, NotCompleted, Cancelling, InstallCancelled,
+    ReadingArtwork, ArtworkLoaded, ArtworkFailed, ArtworkCancelled,
+    FinishedTitle, FinishedBody, OpenSettings, ExitTitle, ExitBody, TextCount };
+// Wording follows the original wizard's pages; button captions follow its translations.
+constexpr const char* texts[TextCount][3] = {
+    {"Setup - Kabus 22", "Setup - Kabus 22", "Kurulum - Kabus 22"},
+    {"Setup-Sprache auswählen", "Select Setup Language", "Kurulum Dilini Seçin"},
+    {"Wählen Sie die Sprache aus, die während der Installation benutzt werden soll:",
+     "Select the language to use during the installation:", "Kurulum sırasında kullanılacak dili seçin:"},
+    {"OK", "OK", "TAMAM"},
+    {"< _Zurück", "< _Back", "< _GERİ"},
+    {"_Weiter >", "_Next >", "İ_LERİ >"},
+    {"Abbrechen", "Cancel", "KAPAT"},
+    {"_Installieren", "_Install", "_Kur"},
+    {"_Fertigstellen", "_Finish", "_BİTTİ"},
+    {"Du_rchsuchen ...", "B_rowse...", "K_LASÖR AÇ..."},
+    {"_Ja", "_Yes", "_EVET"},
+    {"_Nein", "_No", "_HAYIR"},
+    {"Willkommen zum Kabus 22 Setup-Assistenten", "Welcome to the Kabus 22 Setup Wizard",
+     "Kabus 22 Oyunu Bilgisayarınıza Kurulacaktır"},
+    {"Dieser Assistent wird jetzt die native Linux-Version von Kabus 22 auf Ihrem Computer installieren. "
+     "Die Spieldaten stammen von Ihrem eigenen Original-Datenträger.\n\n"
+     "Sie sollten alle anderen Anwendungen beenden, bevor Sie mit dem Setup fortfahren.\n\n"
+     "\"Weiter\" zum Fortfahren, \"Abbrechen\" zum Verlassen.",
+     "This will install the native Linux version of Kabus 22 on your computer, using the game data "
+     "from your own original disc.\n\nIt is recommended that you close all other applications before continuing.\n\n"
+     "Click Next to continue, or Cancel to exit Setup.",
+     "Kabus 22'nin yerel Linux sürümü, kendi orijinal diskinizdeki oyun verileriyle bilgisayarınıza kurulacak.\n\n"
+     "Kurulum işlemine geçmeden önce çalışan diğer programlarınızı kapatın.\n\n"
+     "Kurulumu başlatmak için İLERİ > seçeneğini, çıkmak için KAPAT seçeneğini seçin."},
+    {"Spieldatenträger wählen", "Select Game Media", "Oyun Kaynağını Seçin"},
+    {"Wo befindet sich Ihr Original-Datenträger von Kabus 22?", "Where is your original Kabus 22 disc?",
+     "Orijinal Kabus 22 diskiniz nerede?"},
+    {"Das Setup liest die Spieldaten aus dem folgenden ISO-Abbild, der setup.exe oder dem installierten Windows-Spielordner.",
+     "Setup will read the game data from the following ISO image, setup.exe or installed Windows game folder.",
+     "Oyun verileri aşağıdaki ISO kalıbından, setup.exe dosyasından veya kurulu Windows oyun klasöründen okunacak."},
+    {"Klicken Sie auf \"Weiter\", um fortzufahren. Klicken Sie auf \"Durchsuchen\", falls Sie ein anderes Abbild "
+     "auswählen möchten. Vom Datenträger wird nichts ausgeführt.",
+     "To continue, click Next. If you would like to select a different image, click Browse. "
+     "Nothing on the disc is executed.",
+     "Devam etmek için İLERİ > seçeneğini seçin. Farklı bir kalıp seçmek için KLASÖR AÇ seçeneğini seçin. "
+     "Diskteki hiçbir program çalıştırılmaz."},
+    {"Ziel-Ordner wählen", "Select Destination Location", "Oyunun Kurulacağı Yeri Seçin"},
+    {"Wohin soll Kabus 22 installiert werden?", "Where should Kabus 22 be installed?", "Kabus 22 nereye kurulsun?"},
+    {"Das Setup wird Kabus 22 in den folgenden Ordner installieren.", "Setup will install Kabus 22 into the following folder.",
+     "Kabus 22 oyunu belirtilen klasöre kurulacak."},
+    {"Klicken Sie auf \"Weiter\", um fortzufahren. Klicken Sie auf \"Durchsuchen\", falls Sie einen anderen Ordner "
+     "auswählen möchten.", "To continue, click Next. If you would like to select a different folder, click Browse.",
+     "Devam etmek için İLERİ > seçeneğini seçin. Farklı bir klasöre kurmak için KLASÖR AÇ seçeneğini seçin."},
+    {"Installiert nur für Ihren Benutzer. Eine Neuinstallation ersetzt eine frühere Kabus 22-Installation und ihre "
+     "Verknüpfungen; Spielstände und Einstellungen bleiben erhalten.",
+     "Installs for your user only. Reinstalling replaces an earlier Kabus 22 installation and its shortcuts; "
+     "saves and settings are kept.",
+     "Yalnızca sizin kullanıcınız için kurulur. Yeniden kurulum önceki Kabus 22 kurulumunu ve kısayollarını "
+     "değiştirir; kayıtlar ve ayarlar korunur."},
+    {"Zusätzliche Aufgaben auswählen", "Select Additional Tasks", "Ekstra Görevleri Seçin"},
+    {"Welche zusätzlichen Aufgaben sollen ausgeführt werden?", "Which additional tasks should be performed?",
+     "Hangi ek görevler yapılsın?"},
+    {"Wählen Sie die zusätzlichen Aufgaben aus, die das Setup während der Installation von Kabus 22 ausführen soll, "
+     "und klicken Sie danach auf \"Weiter\".",
+     "Select the additional tasks you would like Setup to perform while installing Kabus 22, then click Next.",
+     "Kabus 22 kurulurken yapılmasını istediğiniz ek görevleri seçin, ardından İLERİ > seçeneğini seçin."},
+    {"_Community-Extras (optional):", "_Community extras (optional):", "_Topluluk eklentileri (isteğe bağlı):"},
+    {"Breitbild für die Original-Kampagne ist bereits enthalten; kein Patch-Ordner nötig. Leer lassen, um nur die "
+     "Original-Daten zu installieren. Einstellungsprogramm und Verknüpfungen werden immer erstellt.",
+     "Original-campaign widescreen is included natively; no patch folder is needed. Leave empty to install only the "
+     "original disc data. The settings launcher and shortcuts are always created.",
+     "Orijinal kampanya için geniş ekran desteği yerleşiktir; yama klasörü gerekmez. Yalnızca orijinal disk verilerini "
+     "kurmak için boş bırakın. Ayarlar başlatıcısı ve kısayollar her zaman oluşturulur."},
+    {"Installation durchführen", "Ready to Install", "Kurulmaya Hazır"},
+    {"Das Setup ist jetzt bereit, Kabus 22 auf Ihrem Computer zu installieren.",
+     "Setup is now ready to begin installing Kabus 22 on your computer.", "Kabus 22 şimdi bilgisayarınıza kurulacak."},
+    {"Klicken Sie auf \"Installieren\", um mit der Installation zu beginnen, oder auf \"Zurück\", um Ihre "
+     "Einstellungen zu überprüfen oder zu ändern.",
+     "Click Install to continue with the installation, or click Back if you want to review or change any settings.",
+     "Kuruluma devam etmek için Kur seçeneğini, ayarlarınızı değiştirmek için GERİ seçeneğini seçin."},
+    {"Ziel-Ordner:", "Destination location:", "Kurulum yeri:"},
+    {"Spieldatenträger:", "Game media:", "Oyun kaynağı:"},
+    {"Zusätzliche Aufgaben:", "Additional tasks:", "Ek görevler:"},
+    {"Einstellungsprogramm und Verknüpfungen erstellen", "Create the settings launcher and shortcuts",
+     "Ayarlar başlatıcısını ve kısayolları oluştur"},
+    {"Community-Extras: ", "Community extras: ", "Topluluk eklentileri: "},
+    {"Installiere ...", "Installing", "Kurulum İşlemi"},
+    {"Warten Sie bitte, während Kabus 22 auf Ihrem Computer installiert wird.",
+     "Please wait while Setup installs Kabus 22 on your computer.", "Kabus 22 bilgisayarınıza kuruluyor, lütfen bekleyin."},
+    {"Installation wird vorbereitet ...", "Preparing to install...", "Kuruluma hazırlanıyor..."},
+    {"Das Setup konnte nicht abgeschlossen werden. Beheben Sie das unten angezeigte Problem und klicken Sie auf "
+     "\"Zurück\", um es erneut zu versuchen.",
+     "Setup was not completed. Correct the problem below, then click Back to try again.",
+     "Kurulum tamamlanmadı. Aşağıdaki sorunu giderip yeniden denemek için GERİ seçeneğini seçin."},
+    {"Wird sicher abgebrochen ...", "Cancelling safely...", "Güvenli şekilde iptal ediliyor..."},
+    {"Die Installation wurde abgebrochen.", "Installation cancelled.", "Kurulum iptal edildi."},
+    {"Originalbild wird vom Datenträger gelesen ...", "Reading the original artwork from your disc...",
+     "Orijinal görseller diskinizden okunuyor..."},
+    {"Originalbild von Ihrem Datenträger geladen.", "Original artwork loaded from your disc.",
+     "Orijinal görseller diskinizden yüklendi."},
+    {"Vorschau fehlgeschlagen. Die Installation wurde nicht gestartet.",
+     "Artwork preview failed. Installation has not started.", "Önizleme başarısız oldu. Kurulum başlamadı."},
+    {"Lesen abgebrochen.", "Artwork reading cancelled.", "Okuma iptal edildi."},
+    {"Beenden des Kabus 22 Setup-Assistenten", "Completing the Kabus 22 Setup Wizard", "Kabus 22 Kurulumu Tamamlandı"},
+    {"Das Setup hat die Installation von Kabus 22 auf Ihrem Computer abgeschlossen. Das Spiel kann über die "
+     "installierten Verknüpfungen gestartet werden.\n\nKlicken Sie auf \"Fertigstellen\", um das Setup zu beenden.",
+     "Setup has finished installing Kabus 22 on your computer. The game may be launched by selecting the installed "
+     "shortcuts.\n\nClick Finish to exit Setup.",
+     "Kabus 22 bilgisayarınıza kuruldu. Oyunu kurulan kısayollardan başlatabilirsiniz.\n\n"
+     "Kurulumu kapatmak için BİTTİ seçeneğini seçin."},
+    {"Kabus 22-_Einstellungen öffnen", "_Open Kabus 22 settings", "Kabus 22 _ayarlarını aç"},
+    {"Setup verlassen", "Exit Setup", "Kurulumdan Çık"},
+    {"Das Setup ist noch nicht abgeschlossen. Wenn Sie jetzt beenden, wird Kabus 22 nicht installiert.\n\n"
+     "Sie können das Setup zu einem späteren Zeitpunkt nochmals ausführen, um die Installation zu vervollständigen.\n\n"
+     "Setup verlassen?",
+     "Setup is not complete. If you exit now, Kabus 22 will not be installed.\n\n"
+     "You may run Setup again at another time to complete the installation.\n\nExit Setup?",
+     "Kurulum tamamlanmadı. Şimdi çıkarsanız Kabus 22 kurulmayacak.\n\n"
+     "Kurulumdan çıkmak istediğinizden emin misiniz?"},
+};
+const char* T(Text id) { return texts[id][language]; }
+
+// The original setup first asks for its language; the system locale preselects it.
+bool chooseLanguage() {
+    const char* locale = nullptr;
+    for (const char* name : {"LC_ALL", "LC_MESSAGES", "LANG"}) if ((locale = g_getenv(name)) && *locale) break;
+    const std::string_view code = locale ? locale : "";
+    language = code.starts_with("tr") ? Turkish : code.starts_with("de") ? German : English;
+    auto* dialog = gtk_dialog_new_with_buttons(T(LanguageTitle), nullptr, GTK_DIALOG_MODAL,
+        T(Ok), GTK_RESPONSE_OK, T(Cancel), GTK_RESPONSE_CANCEL, nullptr);
+    gtk_window_set_resizable(GTK_WINDOW(dialog), FALSE);
+    gtk_window_set_position(GTK_WINDOW(dialog), GTK_WIN_POS_CENTER);
+    auto* row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
+    gtk_container_set_border_width(GTK_CONTAINER(row), 10);
+    auto* icon = themedIcon("media-optical");
+    gtk_widget_set_valign(icon, GTK_ALIGN_START);
+    auto* column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 18);
+    auto* choices = gtk_combo_box_text_new();
+    for (const char* name : {"Deutsch", "English", "Türkçe"}) gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(choices), name);
+    gtk_combo_box_set_active(GTK_COMBO_BOX(choices), language);
+    accessible(choices, "Setup language");
+    gtk_box_pack_start(GTK_BOX(column), k22::wizard::text(T(LanguagePrompt)), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(column), choices, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(row), icon, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(row), column, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(dialog))), row, TRUE, TRUE, 0);
+    gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_OK);
+    gtk_widget_show_all(dialog);
+    gtk_widget_grab_focus(gtk_dialog_get_widget_for_response(GTK_DIALOG(dialog), GTK_RESPONSE_OK));
+    const bool accepted = gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_OK;
+    language = static_cast<Language>(std::clamp(gtk_combo_box_get_active(GTK_COMBO_BOX(choices)), 0, 2));
+    gtk_widget_destroy(dialog);
+    return accepted;
+}
+
+// Inno Setup page flow: welcome, media (native addition), destination, additional tasks, ready,
+// installing, finished. Welcome/finished show the large wizard image, inner pages the small one.
+enum Page { Welcome, Media, Destination, Tasks, Ready, Installing, Finished };
 class Installer {
     Request request_;
     Result result_;
-    GtkWidget *window_, *fields_, *source_, *destination_, *patch_, *image_, *status_, *errors_,
-              *progress_, *preview_, *install_, *cancel_, *launch_, *close_;
+    GtkWidget *window_, *stack_, *source_, *destination_, *patch_, *image_, *mediaStatus_, *mediaErrors_,
+              *summary_, *status_, *errors_, *progress_, *launchCheck_, *finishErrors_, *back_, *next_, *cancel_;
+    std::vector<GtkWidget*> editable_, sides_, smalls_;
     GtkFileChooserNative* chooser_ = nullptr;
     std::mutex mutex_;
     std::thread worker_;
@@ -243,45 +414,160 @@ class Installer {
     std::string stage_, error_;
     std::uint64_t done_ = 0, total_ = 0;
     Pixels pixels_;
-    bool finished_ = false, dirty_ = false, succeeded_ = false, busy_ = false,
+    GdkPixbuf *wizard_ = nullptr, *wizardSmall_ = nullptr; // worker results, under mutex_
+    int page_ = Welcome;
+    bool finished_ = false, dirty_ = false, succeeded_ = false, busy_ = false, previewing_ = false,
          installed_ = false, closing_ = false;
     guint timer_ = 0;
     bool loose_;
 
-    GtkWidget* field(GtkWidget* grid, int row, const char* mnemonic, const fs::path& value,
-                     const char* description, GCallback browse) {
-        auto* label = gtk_label_new_with_mnemonic(mnemonic);
-        gtk_widget_set_halign(label, GTK_ALIGN_START);
-        auto* entry = gtk_entry_new();
-        gtk_entry_set_text(GTK_ENTRY(entry), value.c_str());
-        gtk_widget_set_hexpand(entry, TRUE);
-        gtk_label_set_mnemonic_widget(GTK_LABEL(label), entry);
-        gtk_widget_set_tooltip_text(entry, description);
-        accessible(entry, mnemonic + 1, description);
-        auto* button = gtk_button_new_with_label("Browse…");
-        accessible(button, (std::string("Browse: ") + (mnemonic + 1)).c_str(), description);
-        g_signal_connect(button, "clicked", browse, this);
-        gtk_grid_attach(GTK_GRID(grid), label, 0, row, 1, 1);
-        gtk_grid_attach(GTK_GRID(grid), entry, 1, row, 1, 1);
-        gtk_grid_attach(GTK_GRID(grid), button, 2, row, 1, 1);
-        return entry;
-    }
     GtkWidget* button(GtkWidget* box, const char* mnemonic, GCallback callback) {
         auto* widget = gtk_button_new_with_mnemonic(mnemonic);
         g_signal_connect(widget, "clicked", callback, this);
-        gtk_box_pack_start(GTK_BOX(box), widget, FALSE, FALSE, 0);
+        gtk_box_pack_end(GTK_BOX(box), widget, FALSE, FALSE, 0);
         return widget;
     }
-    void setControls() {
-        const bool editable = !busy_ && !installed_;
-        gtk_widget_set_sensitive(fields_, editable);
-        gtk_widget_set_sensitive(preview_, editable && *gtk_entry_get_text(GTK_ENTRY(source_)));
-        gtk_widget_set_sensitive(install_, editable && *gtk_entry_get_text(GTK_ENTRY(source_)));
-        gtk_widget_set_sensitive(cancel_, busy_ && !cancelled_.load());
-        gtk_widget_set_sensitive(launch_, installed_ && !busy_);
-        gtk_widget_set_sensitive(close_, !closing_);
+    // Entry with Inno's Browse… button beside it.
+    GtkWidget* field(GtkWidget* body, const char* name, const fs::path& value, const char* description, GCallback browse) {
+        auto* row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+        auto* entry = gtk_entry_new();
+        gtk_entry_set_text(GTK_ENTRY(entry), value.c_str());
+        gtk_widget_set_tooltip_text(entry, description);
+        accessible(entry, name, description);
+        auto* browser = gtk_button_new_with_mnemonic(T(Browse));
+        accessible(browser, (std::string("Browse: ") + name).c_str(), description);
+        g_signal_connect(browser, "clicked", browse, this);
+        gtk_box_pack_start(GTK_BOX(row), entry, TRUE, TRUE, 0);
+        gtk_box_pack_start(GTK_BOX(row), browser, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(body), row, FALSE, FALSE, 0);
+        editable_.insert(editable_.end(), {entry, browser});
+        return entry;
     }
-    void report(const std::string& message) { labelText(errors_, message); }
+    void add(GtkWidget* page, int index) {
+        gtk_stack_add_named(GTK_STACK(stack_), page, std::to_string(index).c_str());
+    }
+    // Welcome / finished: large wizard image at the left, white text panel (returned for extras).
+    GtkWidget* sidePage(int index, Text title, Text body) {
+        auto* page = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        auto* side = k22::wizard::styled(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0), "wizard-side");
+        gtk_widget_set_size_request(side, k22::wizard::SideWidth, k22::wizard::PageHeight);
+        auto* image = gtk_image_new();
+        gtk_box_pack_start(GTK_BOX(side), image, TRUE, TRUE, 0);
+        sides_.push_back(image);
+        auto* paper = k22::wizard::styled(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0), "wizard-white");
+        auto* panel = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+        for (auto edge : {gtk_widget_set_margin_start, gtk_widget_set_margin_end, gtk_widget_set_margin_top, gtk_widget_set_margin_bottom})
+            edge(panel, 14);
+        gtk_box_pack_start(GTK_BOX(panel), k22::wizard::styled(k22::wizard::text(T(title)), "wizard-welcome-title"), FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(panel), k22::wizard::text(T(body)), FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(paper), panel, TRUE, TRUE, 0);
+        gtk_box_pack_start(GTK_BOX(page), side, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(page), paper, TRUE, TRUE, 0);
+        add(page, index);
+        return panel;
+    }
+    // Inner page: header strip, then the indented body this returns.
+    GtkWidget* innerPage(int index, Text title, Text subtitle) {
+        GtkWidget *heading, *subheading, *image;
+        auto* page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+        gtk_box_pack_start(GTK_BOX(page), k22::wizard::header(heading, subheading, image), FALSE, FALSE, 0);
+        gtk_label_set_text(GTK_LABEL(heading), T(title));
+        gtk_label_set_text(GTK_LABEL(subheading), T(subtitle));
+        smalls_.push_back(image);
+        auto* body = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+        gtk_widget_set_margin_start(body, 36);
+        gtk_widget_set_margin_end(body, 36);
+        gtk_widget_set_margin_top(body, 16);
+        gtk_widget_set_margin_bottom(body, 12);
+        gtk_box_pack_start(GTK_BOX(page), body, TRUE, TRUE, 0);
+        add(page, index);
+        return body;
+    }
+    // Inno's icon + sentence line at the top of the media and destination pages.
+    void lead(GtkWidget* body, const char* icon, Text text) {
+        auto* row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+        gtk_box_pack_start(GTK_BOX(row), themedIcon(icon), FALSE, FALSE, 0);
+        auto* label = k22::wizard::text(T(text));
+        gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
+        gtk_box_pack_start(GTK_BOX(row), label, TRUE, TRUE, 0);
+        gtk_box_pack_start(GTK_BOX(body), row, FALSE, FALSE, 0);
+    }
+    GtkWidget* detail(GtkWidget* body, bool expand) {
+        auto* label = k22::wizard::text("");
+        gtk_label_set_selectable(GTK_LABEL(label), TRUE);
+        gtk_widget_set_valign(label, GTK_ALIGN_START);
+        gtk_box_pack_start(GTK_BOX(body), label, expand, expand, 0);
+        return label;
+    }
+    // Consumes both references; a missing image keeps the plain panel.
+    void artwork(GdkPixbuf* large, GdkPixbuf* small) {
+        if (large) {
+            auto* scaled = gdk_pixbuf_scale_simple(large, k22::wizard::SideWidth, k22::wizard::PageHeight, GDK_INTERP_BILINEAR);
+            for (auto* image : sides_) gtk_image_set_from_pixbuf(GTK_IMAGE(image), scaled);
+            if (scaled) g_object_unref(scaled);
+            g_object_unref(large);
+        }
+        if (small) {
+            for (auto* image : smalls_) gtk_image_set_from_pixbuf(GTK_IMAGE(image), small);
+            g_object_unref(small);
+        }
+    }
+    std::string text(GtkWidget* entry) const { return gtk_entry_get_text(GTK_ENTRY(entry)); }
+    void setControls() {
+        // The artwork preview runs in the background; only the media row and Install wait for it.
+        const bool idle = !busy_, browsing = idle || previewing_;
+        for (std::size_t i = 0; i < editable_.size(); ++i) gtk_widget_set_sensitive(editable_[i], !installed_ && (idle || (previewing_ && i >= 2)));
+        gtk_widget_set_visible(back_, (page_ > Welcome && page_ < Installing) || (page_ == Installing && idle && !installed_));
+        gtk_widget_set_sensitive(back_, browsing);
+        gtk_widget_set_visible(next_, page_ != Installing);
+        gtk_button_set_label(GTK_BUTTON(next_), T(page_ == Ready ? InstallButton : page_ == Finished ? Finish : Next));
+        const bool filled = (page_ != Media || !text(source_).empty()) && (page_ != Destination || !text(destination_).empty());
+        gtk_widget_set_sensitive(next_, (page_ == Ready ? idle : browsing) && filled && !closing_);
+        gtk_widget_set_visible(cancel_, page_ != Finished);
+        gtk_widget_set_sensitive(cancel_, !busy_ || !cancelled_.load());
+    }
+    void show(int page) {
+        page_ = page;
+        gtk_stack_set_visible_child_name(GTK_STACK(stack_), std::to_string(page).c_str());
+        if (page == Ready) {
+            std::string summary = std::string(T(ReadyDestination)) + "\n      " + text(destination_) + "\n\n" + T(ReadyMedia) +
+                "\n      " + text(source_) + "\n\n" + T(ReadyTasks) + "\n      " + T(ReadyShortcuts);
+            if (!text(patch_).empty()) summary += "\n      " + std::string(T(ReadyExtras)) + text(patch_);
+            gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(summary_)), displayText(summary).c_str(), -1);
+        }
+        setControls();
+        if (gtk_widget_get_visible(next_)) gtk_widget_grab_focus(next_);
+    }
+    void next() {
+        if (page_ == Ready) begin(false);
+        else if (page_ == Finished) finish();
+        else show(page_ + 1);
+    }
+    void finish() {
+        if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(launchCheck_))) {
+            try { launch(result_); }
+            catch (const std::exception& error) {
+                labelText(finishErrors_, error.what());
+                gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(launchCheck_), FALSE);
+                return;
+            }
+        }
+        close();
+    }
+    bool confirmExit() {
+        auto* dialog = gtk_message_dialog_new(GTK_WINDOW(window_), GTK_DIALOG_MODAL, GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE, "%s", T(ExitBody));
+        gtk_window_set_title(GTK_WINDOW(dialog), T(ExitTitle));
+        gtk_dialog_add_buttons(GTK_DIALOG(dialog), T(Yes), GTK_RESPONSE_YES, T(No), GTK_RESPONSE_NO, nullptr);
+        gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_NO);
+        const bool yes = gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_YES;
+        gtk_widget_destroy(dialog);
+        return yes;
+    }
+    void cancelPressed() {
+        if (installed_) close();
+        else if (busy_ && previewing_ && page_ == Media) cancel();
+        else if (confirmExit()) close();
+    }
     void choose(GtkWidget* entry, GtkFileChooserAction action, bool source, bool parent = false) {
         auto* dialog = gtk_file_chooser_native_new(source ? "Select original Kabus22 media" :
                 parent ? "Select parent for the new kabus22 directory" : "Select optional Kabus22Patch community extras",
@@ -321,21 +607,25 @@ class Installer {
     }
     void begin(bool preview) {
         if (busy_ || installed_) return;
+        GtkWidget* status = preview ? mediaStatus_ : status_;
+        GtkWidget* errors = preview ? mediaErrors_ : errors_;
+        if (!preview) show(Installing);
         try {
-            const fs::path source = gtk_entry_get_text(GTK_ENTRY(source_));
+            labelText(errors, "");
+            const fs::path source = text(source_);
             if (source.empty()) throw std::runtime_error("Select your original ISO image first.");
             Request input = request_;
             input.source = fs::absolute(source).lexically_normal();
             input.sourceIso.clear(); input.sourceSetup.clear();
-            input.installRoot = gtk_entry_get_text(GTK_ENTRY(destination_));
+            input.installRoot = text(destination_);
             if (input.installRoot.empty()) throw std::runtime_error("Choose an installation directory.");
             input.installRoot = fs::absolute(input.installRoot).lexically_normal();
-            input.optionalPatch = gtk_entry_get_text(GTK_ENTRY(patch_));
+            input.optionalPatch = text(patch_);
             if (!input.optionalPatch.empty()) input.optionalPatch = fs::absolute(input.optionalPatch).lexically_normal();
             cancelled_ = false;
             busy_ = true;
-            labelText(errors_, "");
-            labelText(status_, preview ? "Reading original artwork from your media…" : "Preparing native installation…");
+            previewing_ = preview;
+            labelText(status, T(preview ? ReadingArtwork : Preparing));
             gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(progress_), 0);
             {
                 std::lock_guard lock(mutex_);
@@ -356,29 +646,32 @@ class Installer {
                         PreviewScratch scratch;
                         const auto artwork = previewArtwork(input.source, input.extractor, scratch.root / "media", progress);
                         if (cancelled_.load() || interrupted.load()) throw Cancelled();
-                        auto pixels = nativeArtwork(artwork);
-                        if (cancelled_.load() || interrupted.load()) throw Cancelled();
+                        auto pixels = nativeArtwork(artwork.logo);
+                        auto* large = k22::wizard::load(artwork.wizard);
+                        auto* small = k22::wizard::load(artwork.wizardSmall);
                         std::lock_guard lock(mutex_);
                         pixels_ = std::move(pixels);
-                        stage_ = "Original artwork loaded from your media.";
+                        if (wizard_) g_object_unref(wizard_);
+                        if (wizardSmall_) g_object_unref(wizardSmall_);
+                        wizard_ = large; wizardSmall_ = small;
+                        stage_ = T(ArtworkLoaded);
                     } else {
                         auto result = install(input, progress);
                         std::lock_guard lock(mutex_);
                         result_ = std::move(result);
                         succeeded_ = true;
-                        stage_ = "Installation complete. Settings launcher, native game and desktop shortcuts are ready.";
                     }
                 } catch (const Cancelled& error) {
                     std::lock_guard lock(mutex_);
-                    stage_ = preview ? "Artwork reading cancelled." : "Installation cancelled.";
+                    stage_ = T(preview ? ArtworkCancelled : InstallCancelled);
                     error_ = error.what();
                 } catch (const std::exception& error) {
                     std::lock_guard lock(mutex_);
-                    stage_ = preview ? "Original artwork preview failed. Installation has not started." : "Installation failed.";
+                    stage_ = T(preview ? ArtworkFailed : NotCompleted);
                     error_ = error.what();
                 } catch (...) {
                     std::lock_guard lock(mutex_);
-                    stage_ = "Operation failed.";
+                    stage_ = T(preview ? ArtworkFailed : NotCompleted);
                     error_ = "Unexpected native installer error.";
                 }
                 std::lock_guard lock(mutex_);
@@ -386,14 +679,16 @@ class Installer {
             });
         } catch (const std::exception& error) {
             busy_ = false;
-            report(error.what());
+            previewing_ = false;
+            labelText(status, preview ? "" : T(NotCompleted));
+            labelText(errors, error.what());
             setControls();
         }
     }
     void cancel() {
         if (!busy_) return;
         cancelled_ = true;
-        labelText(status_, "Cancelling safely; waiting for the current operation to stop…");
+        labelText(previewing_ ? mediaStatus_ : status_, T(Cancelling));
         setControls();
     }
     void close() {
@@ -412,19 +707,19 @@ class Installer {
             std::lock_guard lock(mutex_);
             finished = finished_;
             if (dirty_) {
-                if (!cancelled_.load() || finished) labelText(status_, stage_);
-                labelText(errors_, error_);
-                const double fraction = total_ ? std::clamp(static_cast<double>(done_) / static_cast<double>(total_), 0.0, 1.0) : 0;
-                gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(progress_), fraction);
-                gtk_progress_bar_set_text(GTK_PROGRESS_BAR(progress_), total_ ?
-                    (std::to_string(static_cast<int>(fraction * 100)) + "%").c_str() : "Working…");
+                if (!cancelled_.load() || finished) labelText(previewing_ ? mediaStatus_ : status_, stage_);
+                labelText(previewing_ ? mediaErrors_ : errors_, error_);
+                if (!previewing_)
+                    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(progress_), total_ ?
+                        std::clamp(static_cast<double>(done_) / static_cast<double>(total_), 0.0, 1.0) : 0);
                 dirty_ = false;
             }
-            if (!total_ && !finished) gtk_progress_bar_pulse(GTK_PROGRESS_BAR(progress_));
+            if (!total_ && !finished && !previewing_) gtk_progress_bar_pulse(GTK_PROGRESS_BAR(progress_));
         }
         if (!finished) return G_SOURCE_CONTINUE;
         worker_.join();
         busy_ = false;
+        previewing_ = false;
         installed_ = succeeded_;
         if (!pixels_.rgba.empty()) {
             auto pixels = std::make_unique<Pixels>(std::move(pixels_));
@@ -436,93 +731,133 @@ class Installer {
                 gtk_image_set_from_pixbuf(GTK_IMAGE(image_), pixbuf);
                 g_object_unref(pixbuf);
                 accessible(image_, "Original Kabus22 logo", "Decoded from the selected original game media.");
-            } else report("Cannot display the decoded original artwork.");
+            } else labelText(mediaErrors_, "Cannot display the decoded original artwork.");
         }
-        gtk_progress_bar_set_text(GTK_PROGRESS_BAR(progress_), installed_ ? "Complete" : "Idle");
-        if (installed_) gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(progress_), 1);
-        setControls();
-        if (closing_) gtk_widget_destroy(window_);
-        else gtk_widget_grab_focus(installed_ ? launch_ : install_);
+        artwork(std::exchange(wizard_, nullptr), std::exchange(wizardSmall_, nullptr));
+        if (closing_) { gtk_widget_destroy(window_); return G_SOURCE_CONTINUE; }
+        if (installed_) {
+            gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(progress_), 1);
+            show(Finished);
+        } else setControls();
         return G_SOURCE_CONTINUE;
     }
 public:
     explicit Installer(Request request) : request_(std::move(request)), loose_(!request_.sourceSetup.empty()) {
         window_ = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-        gtk_window_set_title(GTK_WINDOW(window_), "Kabus22 — Native Linux Setup");
-        gtk_window_set_default_size(GTK_WINDOW(window_), 780, 620);
-        gtk_container_set_border_width(GTK_CONTAINER(window_), 20);
-        auto* content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+        gtk_window_set_title(GTK_WINDOW(window_), T(Title));
+        gtk_window_set_resizable(GTK_WINDOW(window_), FALSE);
+        gtk_window_set_position(GTK_WINDOW(window_), GTK_WIN_POS_CENTER);
+        auto* content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
         gtk_container_add(GTK_CONTAINER(window_), content);
-        auto* heading = gtk_label_new("Kabus22 — Native Linux Setup");
-        gtk_box_pack_start(GTK_BOX(content), heading, FALSE, FALSE, 0);
-        image_ = gtk_image_new();
-        gtk_widget_set_size_request(image_, -1, 224);
-        accessible(image_, "Original artwork preview", "Choose your own game media to load the original logo. No game artwork is bundled.");
-        gtk_box_pack_start(GTK_BOX(content), image_, FALSE, FALSE, 0);
-        fields_ = gtk_grid_new();
-        gtk_grid_set_row_spacing(GTK_GRID(fields_), 10);
-        gtk_grid_set_column_spacing(GTK_GRID(fields_), 10);
-        gtk_box_pack_start(GTK_BOX(content), fields_, FALSE, FALSE, 0);
-        source_ = field(fields_, 0, !request_.source.empty() ? "_Game media:" : loose_ ? "_Original setup (developer):" : "_ISO image:",
+        stack_ = gtk_stack_new();
+        gtk_widget_set_size_request(stack_, k22::wizard::Width, k22::wizard::PageHeight);
+        gtk_box_pack_start(GTK_BOX(content), stack_, TRUE, TRUE, 0);
+        gtk_box_pack_start(GTK_BOX(content), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 0);
+        auto* nav = k22::wizard::styled(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0), "wizard-nav");
+        gtk_container_set_border_width(GTK_CONTAINER(nav), 12);
+        gtk_box_pack_start(GTK_BOX(content), nav, FALSE, FALSE, 0);
+        cancel_ = button(nav, T(Cancel), G_CALLBACK(+[](GtkButton*, gpointer data) { static_cast<Installer*>(data)->cancelPressed(); }));
+        gtk_widget_set_margin_start(cancel_, 10);
+        next_ = button(nav, T(Next), G_CALLBACK(+[](GtkButton*, gpointer data) { static_cast<Installer*>(data)->next(); }));
+        back_ = button(nav, T(Back), G_CALLBACK(+[](GtkButton*, gpointer data) {
+            auto* self = static_cast<Installer*>(data); self->show(self->page_ == Installing ? Ready : self->page_ - 1);
+        }));
+
+        sidePage(Welcome, WelcomeTitle, WelcomeBody);
+
+        auto* body = innerPage(Media, MediaTitle, MediaSubtitle);
+        lead(body, "media-optical", MediaLead);
+        gtk_box_pack_start(GTK_BOX(body), k22::wizard::text(T(MediaHint)), FALSE, FALSE, 0);
+        source_ = field(body, !request_.source.empty() ? "Game media" : loose_ ? "Original setup (developer)" : "ISO image",
             !request_.source.empty() ? request_.source : loose_ ? request_.sourceSetup : request_.sourceIso,
             "Select the complete original Kabus22 ISO image, original setup.exe, or an installed Windows game folder. Nothing is executed.",
             G_CALLBACK(+[](GtkButton*, gpointer data) { auto* self = static_cast<Installer*>(data); self->choose(self->source_, GTK_FILE_CHOOSER_ACTION_OPEN, true); }));
-        destination_ = field(fields_, 1, "_Install directory:", request_.installRoot,
+        image_ = gtk_image_new();
+        accessible(image_, "Original artwork preview", "Choose your own game media to load the original logo. No game artwork is bundled.");
+        gtk_box_pack_start(GTK_BOX(body), image_, FALSE, FALSE, 0);
+        mediaStatus_ = detail(body, false);
+        accessible(mediaStatus_, "Media status");
+        mediaErrors_ = detail(body, true);
+        accessible(mediaErrors_, "Media error details");
+
+        body = innerPage(Destination, DestinationTitle, DestinationSubtitle);
+        lead(body, "folder", DestinationLead);
+        gtk_box_pack_start(GTK_BOX(body), k22::wizard::text(T(DestinationHint)), FALSE, FALSE, 0);
+        destination_ = field(body, "Install directory", request_.installRoot,
             "A new or empty directory, or an existing Kabus22 installation to replace. Browse selects a parent and adds kabus22; edit the path to choose another name.",
             G_CALLBACK(+[](GtkButton*, gpointer data) { auto* self = static_cast<Installer*>(data); self->choose(self->destination_, GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, false, true); }));
-        patch_ = field(fields_, 2, "_Community extras (optional):", request_.optionalPatch,
+        auto* note = k22::wizard::text(T(DestinationNote));
+        gtk_widget_set_valign(note, GTK_ALIGN_END);
+        gtk_box_pack_start(GTK_BOX(body), note, TRUE, TRUE, 0);
+
+        body = innerPage(Tasks, TasksTitle, TasksSubtitle);
+        gtk_box_pack_start(GTK_BOX(body), k22::wizard::text(T(TasksLead)), FALSE, FALSE, 0);
+        auto* extras = gtk_label_new_with_mnemonic(T(TasksLabel));
+        gtk_label_set_xalign(GTK_LABEL(extras), 0);
+        gtk_box_pack_start(GTK_BOX(body), extras, FALSE, FALSE, 0);
+        patch_ = field(body, "Community extras (optional)", request_.optionalPatch,
             "Optional, separately obtained Kabus22Patch directory for its extras. Not required for native original-campaign widescreen; leave empty for original ISO data.",
             G_CALLBACK(+[](GtkButton*, gpointer data) { auto* self = static_cast<Installer*>(data); self->choose(self->patch_, GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, false); }));
-        auto* note = gtk_label_new("Original-campaign widescreen is included natively; no patch folder is needed.\nInstalls for your user only. Reinstalling replaces an earlier Kabus22 installation and its shortcuts; saves and settings are kept.\nWindows executables are never launched; original ISO artwork is retained without extras.");
-        gtk_label_set_line_wrap(GTK_LABEL(note), TRUE);
-        gtk_box_pack_start(GTK_BOX(content), note, FALSE, FALSE, 0);
-        progress_ = gtk_progress_bar_new();
-        gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(progress_), TRUE);
-        gtk_progress_bar_set_text(GTK_PROGRESS_BAR(progress_), "Idle");
-        accessible(progress_, "Installation progress");
-        gtk_box_pack_start(GTK_BOX(content), progress_, FALSE, FALSE, 0);
-        status_ = gtk_label_new("Choose your original ISO image to begin.");
-        gtk_label_set_line_wrap(GTK_LABEL(status_), TRUE);
-        gtk_label_set_selectable(GTK_LABEL(status_), TRUE);
+        gtk_label_set_mnemonic_widget(GTK_LABEL(extras), patch_);
+        gtk_box_pack_start(GTK_BOX(body), k22::wizard::text(T(TasksNote)), FALSE, FALSE, 0);
+
+        body = innerPage(Ready, ReadyTitle, ReadySubtitle);
+        gtk_box_pack_start(GTK_BOX(body), k22::wizard::text(T(ReadyLead)), FALSE, FALSE, 0);
+        auto* memo = gtk_scrolled_window_new(nullptr, nullptr);
+        gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(memo), GTK_SHADOW_IN);
+        summary_ = gtk_text_view_new();
+        gtk_text_view_set_editable(GTK_TEXT_VIEW(summary_), FALSE);
+        gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(summary_), FALSE);
+        gtk_text_view_set_left_margin(GTK_TEXT_VIEW(summary_), 4);
+        accessible(summary_, "Installation summary");
+        gtk_container_add(GTK_CONTAINER(memo), summary_);
+        gtk_box_pack_start(GTK_BOX(body), memo, TRUE, TRUE, 0);
+
+        body = innerPage(Installing, InstallingTitle, InstallingSubtitle);
+        status_ = detail(body, false);
         accessible(status_, "Installer status");
-        gtk_box_pack_start(GTK_BOX(content), status_, FALSE, FALSE, 0);
-        errors_ = gtk_label_new("");
-        gtk_label_set_line_wrap(GTK_LABEL(errors_), TRUE);
-        gtk_label_set_selectable(GTK_LABEL(errors_), TRUE);
+        progress_ = gtk_progress_bar_new();
+        accessible(progress_, "Installation progress");
+        gtk_box_pack_start(GTK_BOX(body), progress_, FALSE, FALSE, 0);
+        errors_ = detail(body, true);
         accessible(errors_, "Installer error details");
-        gtk_box_pack_start(GTK_BOX(content), errors_, TRUE, TRUE, 0);
-        auto* actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-        gtk_box_pack_end(GTK_BOX(content), actions, FALSE, FALSE, 0);
-        preview_ = button(actions, "Read _artwork", G_CALLBACK(+[](GtkButton*, gpointer data) { static_cast<Installer*>(data)->begin(true); }));
-        install_ = button(actions, "_Install", G_CALLBACK(+[](GtkButton*, gpointer data) { static_cast<Installer*>(data)->begin(false); }));
-        cancel_ = button(actions, "_Cancel", G_CALLBACK(+[](GtkButton*, gpointer data) { static_cast<Installer*>(data)->cancel(); }));
-        launch_ = button(actions, "_Open settings", G_CALLBACK(+[](GtkButton*, gpointer data) {
+
+        auto* finished = sidePage(Finished, FinishedTitle, FinishedBody);
+        launchCheck_ = gtk_check_button_new_with_mnemonic(T(OpenSettings));
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(launchCheck_), TRUE);
+        gtk_box_pack_start(GTK_BOX(finished), launchCheck_, FALSE, FALSE, 0);
+        finishErrors_ = detail(finished, false);
+
+        // A reinstall already owns the original wizard images.
+        artwork(k22::wizard::load(request_.installRoot / "wizard-image.png"), k22::wizard::load(request_.installRoot / "wizard-small-image.png"));
+        for (auto* entry : {source_, destination_})
+            g_signal_connect(entry, "changed", G_CALLBACK(+[](GtkEditable* editable, gpointer data) {
+                auto* self = static_cast<Installer*>(data);
+                if (GTK_WIDGET(editable) == self->source_) gtk_image_clear(GTK_IMAGE(self->image_));
+                self->setControls();
+            }), this);
+        g_signal_connect(window_, "delete-event", G_CALLBACK(+[](GtkWidget*, GdkEvent*, gpointer data) -> gboolean {
             auto* self = static_cast<Installer*>(data);
-            try { const int pid = launch(self->result_); labelText(self->status_, "Settings launcher opened (PID " + std::to_string(pid) + ")."); }
-            catch (const std::exception& error) { self->report(error.what()); }
-        }));
-        close_ = button(actions, "Cl_ose", G_CALLBACK(+[](GtkButton*, gpointer data) { static_cast<Installer*>(data)->close(); }));
-        g_signal_connect(source_, "changed", G_CALLBACK(+[](GtkEditable*, gpointer data) {
-            auto* self = static_cast<Installer*>(data); gtk_image_clear(GTK_IMAGE(self->image_)); self->setControls();
+            if (self->installed_ || self->confirmExit()) self->close();
+            return TRUE;
         }), this);
-        g_signal_connect(window_, "delete-event", G_CALLBACK(+[](GtkWidget*, GdkEvent*, gpointer data) -> gboolean { static_cast<Installer*>(data)->close(); return TRUE; }), this);
         g_signal_connect(window_, "destroy", G_CALLBACK(+[](GtkWidget*, gpointer) { gtk_main_quit(); }), nullptr);
         g_signal_connect(window_, "key-press-event", G_CALLBACK(+[](GtkWidget*, GdkEventKey* key, gpointer data) -> gboolean {
             if (key->keyval != GDK_KEY_Escape) return FALSE;
-            auto* self = static_cast<Installer*>(data);
-            if (self->busy_) self->cancel(); else self->close();
+            static_cast<Installer*>(data)->cancelPressed();
             return TRUE;
         }), this);
         timer_ = g_timeout_add(100, +[](gpointer data) -> gboolean { return static_cast<Installer*>(data)->tick(); }, this);
-        setControls();
         gtk_widget_show_all(window_);
-        gtk_widget_grab_focus(source_);
-        if (*gtk_entry_get_text(GTK_ENTRY(source_))) begin(true);
+        show(Welcome);
+        if (!text(source_).empty()) begin(true);
     }
     ~Installer() {
         if (timer_) g_source_remove(timer_);
         cancelled_ = true;
         if (worker_.joinable()) worker_.join();
+        if (wizard_) g_object_unref(wizard_);
+        if (wizardSmall_) g_object_unref(wizardSmall_);
     }
 };
 } // namespace
@@ -575,6 +910,8 @@ int main(int argc, char** argv) {
         }
         if (!gtk_init_check(nullptr, nullptr))
             throw std::runtime_error("Cannot open the GTK display. Use --unattended with --iso for a headless install.");
+        k22::wizard::style();
+        if (!chooseLanguage()) return 0;
         Installer installer(std::move(options.request));
         gtk_main();
         return 0;
