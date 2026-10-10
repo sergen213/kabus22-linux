@@ -5,6 +5,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 }
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -171,5 +172,46 @@ inline void texture_pack_checks() {
     Capture quiet;
     auto packs = discover_texture_packs();
     require(packs.size() == 2 + std::size(malformed) && packs.front().name == "a-nomanifest" && packs[1].name == "b-good" && packs[1].valid && packs.back().name == "c-upperkey", "discover sorted, real directories only");
+
+    // texture_upscale: exact 2x, alpha-test coverage identical at every threshold, colour key never bleeds into visible
+    // texels, box-downscale stays within upscale.py's guard (6/255 mean error, 1.5/255 shift), Scale2x adds no colours.
+    auto smooth = [](std::uint32_t w, std::uint32_t h, bool cutout) {
+        Image result{w, h, std::vector<std::uint8_t>(std::size_t(w) * h * 4)};
+        for (std::uint32_t y = 0; y < h; ++y) for (std::uint32_t x = 0; x < w; ++x) {
+            auto* p = &result.rgba[(std::size_t(y) * w + x) * 4];
+            const double dx = x - w / 2.0, dy = y - h / 2.0, r = std::sqrt(dx * dx + dy * dy);
+            const std::uint8_t a = !cutout ? 255 : r < h / 4.0 ? 255 : r < h / 3.0 ? 100 : 0;
+            if (!a) { p[0] = 255; p[1] = 0; p[2] = 255; p[3] = 0; continue; } // colour key
+            p[0] = std::uint8_t(120 + 60 * std::sin(x * 0.7) * std::cos(y * 0.5)); p[1] = std::uint8_t(110 + 50 * std::cos(x * 0.3 + y * 0.4)); p[2] = std::uint8_t(90 + 40 * std::sin(y * 0.9)); p[3] = a;
+        }
+        return result;
+    };
+    for (bool wrap : {false, true}) {
+        auto in = smooth(24, 16, true); auto out = upscale_texture_2x(in, wrap);
+        require(out.width == 48 && out.height == 32 && out.rgba.size() == 48 * 32 * 4, "upscale is exactly 2x");
+        for (int t : {1, 3, 128, 255}) {
+            std::size_t before = 0, after = 0;
+            for (std::size_t i = 3; i < in.rgba.size(); i += 4) before += in.rgba[i] >= t;
+            for (std::size_t i = 3; i < out.rgba.size(); i += 4) after += out.rgba[i] >= t;
+            require(after == 4 * before, "upscale keeps alpha-test coverage");
+        }
+        for (std::size_t i = 0; i < out.rgba.size(); i += 4) require(!out.rgba[i + 3] || out.rgba[i + 1] > 20, "colour key never bleeds into visible upscaled texels");
+    }
+    {
+        auto in = smooth(32, 32, false); auto out = upscale_texture_2x(in, true);
+        double error = 0, shift[3]{};
+        for (std::uint32_t y = 0; y < 32; ++y) for (std::uint32_t x = 0; x < 32; ++x) for (int c = 0; c < 3; ++c) {
+            double box = 0;
+            for (int j = 0; j < 4; ++j) box += out.rgba[((std::size_t(y) * 2 + j / 2) * 64 + x * 2 + j % 2) * 4 + c] / 4.0;
+            const double d = box - in.rgba[(std::size_t(y) * 32 + x) * 4 + c]; error += std::abs(d); shift[c] += d;
+        }
+        require(error / (32 * 32 * 3) <= 6 && std::abs(shift[0]) / 1024 <= 1.5 && std::abs(shift[1]) / 1024 <= 1.5 && std::abs(shift[2]) / 1024 <= 1.5, "upscale passes the box-downscale consistency guard");
+    }
+    {
+        Image in{8, 8, std::vector<std::uint8_t>(8 * 8 * 4)};
+        for (std::size_t i = 0; i < 64; ++i) { const std::uint8_t v = (i % 8 + i / 8) % 3 == 0 ? 200 : i % 8 > i / 8 ? 40 : 120; in.rgba[i * 4] = v; in.rgba[i * 4 + 1] = std::uint8_t(255 - v); in.rgba[i * 4 + 2] = 7; in.rgba[i * 4 + 3] = 255; }
+        auto out = upscale_texture_2x(in, false);
+        for (std::size_t i = 0; i < out.rgba.size(); i += 4) { bool known = false; for (std::size_t j = 0; j < in.rgba.size() && !known; j += 4) known = std::memcmp(&in.rgba[j], &out.rgba[i], 4) == 0; require(known, "Scale2x emits only source colours"); }
+    }
 }
 }

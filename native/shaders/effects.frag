@@ -40,5 +40,18 @@ void main(){
         vec3 history=clamp(texture(inputB,puv).rgb,lo,hi);color=vec4(mix(history,current,0.1),1);return;
     }
     if(mode==10){color=vec4(k22Fxaa(inputA,uv,texel),1);return;}
+    if(mode==12){
+        // sharpen: AMD FidelityFX CAS (contrast-adaptive sharpening) on the final LDR image; sharpness 0.4 (0..1).
+        // Per-channel amount shrinks where the 3x3 cross is already contrasty or near clipping, so no halos.
+        vec4 e=texture(inputA,uv);
+        vec3 b=texture(inputA,uv+vec2(0,-1)*texel).rgb,d=texture(inputA,uv+vec2(-1,0)*texel).rgb,f=texture(inputA,uv+vec2(1,0)*texel).rgb,h=texture(inputA,uv+vec2(0,1)*texel).rgb;
+        vec3 a=texture(inputA,uv+vec2(-1,-1)*texel).rgb,c=texture(inputA,uv+vec2(1,-1)*texel).rgb,g=texture(inputA,uv+vec2(-1,1)*texel).rgb,i=texture(inputA,uv+vec2(1,1)*texel).rgb;
+        a=clamp(a,0.0,1.0);b=clamp(b,0.0,1.0);c=clamp(c,0.0,1.0);d=clamp(d,0.0,1.0);f=clamp(f,0.0,1.0);g=clamp(g,0.0,1.0);h=clamp(h,0.0,1.0);i=clamp(i,0.0,1.0);vec3 m=clamp(e.rgb,0.0,1.0);
+        vec3 lo=min(min(min(d,m),min(f,b)),h),hi=max(max(max(d,m),max(f,b)),h);
+        lo+=min(lo,min(min(a,c),min(g,i)));hi+=max(hi,max(max(a,c),max(g,i)));
+        vec3 amp=sqrt(clamp(min(lo,2.0-hi)/max(hi,vec3(1e-5)),0.0,1.0));
+        vec3 w=amp*(-1.0/mix(8.0,5.0,0.4));
+        color=vec4(clamp((b*w+d*w+f*w+h*w+m)/(1.0+4.0*w),0.0,1.0),e.a);return;
+    }
     color=texture(inputA,uv);
 }

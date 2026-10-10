@@ -81,6 +81,7 @@ struct Raster {
         VkExtent2D extent{};
         Image depth,depthSampled;VkImageView depthView{}; // Single-sample primary depth before view-space entities; depthSampled aliases a depth-only view.
         Image linear,ao,ldr;std::array<Image,2>taa;std::array<Image,5>bloom;
+        Image sharp; // sharpen with FXAA: FXAA output, read by the final CAS pass.
         Image sun,cube;std::array<VkImageView,6>faces{};
         std::array<Image,2>gdata,gdepth,length;std::array<Image,3>raw,tmp;std::array<std::array<Image,3>,2>history;
         Matrix sunMatrix{},previousVP{},previousRtVP{},unjittered{},inverseVP{};float sunTexel{},shadowRange{},nearPlane{1},farPlane{1};Vec3 shadowLight{},eye{},forward{};int shadowIndex{-1};
@@ -131,6 +132,7 @@ struct Raster {
     void free_effects(bool all){
         auto drop=[&](Image&i){if(all)s.destroy(i);else s.retire(i);};auto dropView=[&](VkImageView&v){if(!v)return;if(all)vkDestroyImageView(s.device,v,nullptr);else arenas[s.slotIndex].views.push_back(v);v=VK_NULL_HANDLE;};
         dropView(fx.depthView);fx.depthSampled={};drop(fx.depth);drop(fx.linear);drop(fx.ao);drop(fx.ldr);for(auto*set:{&fx.taa,&fx.gdata,&fx.gdepth,&fx.length})for(auto&i:*set)drop(i);for(auto&i:fx.bloom)drop(i);for(auto&i:fx.raw)drop(i);for(auto&i:fx.tmp)drop(i);for(auto&h:fx.history)for(auto&i:h)drop(i);
+        drop(fx.sharp);
         fx.taaValid=fx.historyValid=fx.linearValid=false;fx.extent={};
         if(all){for(auto&v:fx.faces)dropView(v);drop(fx.sun);drop(fx.cube);}
     }
@@ -197,7 +199,8 @@ struct Raster {
     void clear(Color c,bool color,bool depth,bool stencil,VkRect2D r){r=bounded(r);if(!r.extent.width||!r.extent.height)return;std::array<VkClearAttachment,2>a{};unsigned n=0;if(color){a[n].aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;a[n].colorAttachment=0;a[n++].clearValue.color={{c.r,c.g,c.b,c.a}};}if(depth||stencil){a[n].aspectMask=(depth?VK_IMAGE_ASPECT_DEPTH_BIT:0)|(stencil?VK_IMAGE_ASPECT_STENCIL_BIT:0);a[n++].clearValue.depthStencil={1,0};}if(n){VkClearRect rect{r,0,1};vkCmdClearAttachments(s.command,n,a.data(),1,&rect);}}
     void bind(PipelineKey key,const Uniform&u,std::array<Image*,6>images={},std::array<VkSampler,6>sampling={},Allocation offsets={}){key.samples=target?target->color.samples:renderSamples;key.colorFormat=target?target->color.format:renderColor;key.depthFormat=target?target->depth.format:renderDepth;vkCmdBindPipeline(s.command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline(key));auto set=descriptor(u,images,sampling,offsets);vkCmdBindDescriptorSets(s.command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelineLayout,0,1,&set,0,nullptr);if(key.program==Scene&&s.rayEnabled){auto rays=rt_set(*s.rays);vkCmdBindDescriptorSets(s.command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelineLayout,1,1,&rays,0,nullptr);}}
     void mipmaps(Image&image){end();s.transition(image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);for(std::uint32_t level=1,w=image.width,h=image.height;level<image.levels;++level){VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;b.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;b.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;b.newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.image=image.handle;b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,level-1,1,0,image.layers};vkCmdPipelineBarrier(s.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&b);auto nw=std::max(1u,w/2),nh=std::max(1u,h/2);VkImageBlit blit{};blit.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,level-1,0,image.layers};blit.srcOffsets[1]={int(w),int(h),1};blit.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,level,0,image.layers};blit.dstOffsets[1]={int(nw),int(nh),1};vkCmdBlitImage(s.command,image.handle,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,image.handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,VK_FILTER_LINEAR);w=nw;h=nh;}if(image.levels>1){VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT;b.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;b.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;b.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.image=image.handle;b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,image.levels-1,0,image.layers};vkCmdPipelineBarrier(s.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&b);}image.layout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;s.transition(image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);}
-    Texture& texture(const k22::Image*source,bool dynamic=false,std::uint64_t serial=0,UICommand::TextureMode mode=UICommand::TextureMode::Default){
+    // upscale: texture_upscale candidate (original world/model skin) 1 edge-addressed, 2 tiling.
+    Texture& texture(const k22::Image*source,bool dynamic=false,std::uint64_t serial=0,UICommand::TextureMode mode=UICommand::TextureMode::Default,int upscale=0){
         if(!source)throw std::runtime_error("NULL texture cache request");check_image(*source);if(source->width>s.properties.limits.maxImageDimension2D||source->height>s.properties.limits.maxImageDimension2D)throw std::runtime_error("Game image exceeds Vulkan texture size");
         auto&t=textures[source][std::size_t(mode)];
         if(!t.image.handle||(dynamic&&(!t.dynamic||(t.serial!=serial&&t.submission!=s.submissions)||t.image.width!=source->width||t.image.height!=source->height))){
@@ -214,7 +217,9 @@ struct Raster {
             // Packs replace immutable Default-mode images only; turbulent CPU warps keep their native source.
             const k22::Image*upload=source;auto pack=s.options.packs&&!dynamic&&mode==UICommand::TextureMode::Default&&!turbulent.contains(source)?s.options.packs->find(*source):std::nullopt;
             if(pack&&pack->albedo&&(pack->albedo->width>s.properties.limits.maxImageDimension2D||pack->albedo->height>s.properties.limits.maxImageDimension2D)){std::fprintf(stderr,"kabus22: texture pack: %s exceeds Vulkan texture size; using original\n",texture_key_hex(texture_key(*source)).c_str());pack.reset();}
+            std::optional<k22::Image>upscaled;
             if(pack&&pack->albedo){upload=pack->albedo.get();pixels=std::as_bytes(std::span(upload->rgba));}
+            else if(upscale&&s.options.features.upscale&&!dynamic&&mode==UICommand::TextureMode::Default&&!turbulent.contains(source)&&std::max(source->width,source->height)<=512){upscaled=upscale_texture_2x(*source,upscale==2);upload=&*upscaled;pixels=std::as_bytes(std::span(upload->rgba));}
             auto levels=!dynamic&&mode==UICommand::TextureMode::Default?std::bit_width(std::max(upload->width,upload->height)):1u;
             bool generate=levels>1&&frame&&frame->mipmapping>=1;
             t.image=s.image(upload->width,upload->height,format,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT,levels);VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={upload->width,upload->height,1};s.upload(t.image,pixels,std::span(&copy,1),generate);t.serial=serial;t.dynamic=dynamic;t.mipsValid=generate;t.alpha=dynamic||mode!=UICommand::TextureMode::Default;for(std::size_t i=3;!t.alpha&&i<source->rgba.size();i+=4)t.alpha=source->rgba[i]!=255;
@@ -261,9 +266,11 @@ struct Raster {
         if(!d.model||(!shadow&&!d.visible&&!d.shadowRequested)||d.scale.x==0||d.scale.y==0||d.scale.z==0)return;
         auto&m=mesh(*d.model);if(m.batches.empty())return;
         auto*live=script_material(frame,d.materialIndex);auto&pose=rt_pose(*s.rays,d,m.expanded,m.tangents,(live&&live->effect!=EffectKind::None)||s.options.pbr);prepared[&d]={&pose};bounds(d,m);
-        auto upload=[&](const k22::Image*image){auto binding=resolved_skin(image,frame->skinBindings);if(binding.image)texture(binding.image,binding.dynamic,binding.serial);};
-        for(auto&mat:d.model->materials){if(d.model->formatVersion==6&&(mat.flags&15)==9&&mat.texture)if(auto binding=resolved_skin(mat.texture.get(),frame->skinBindings);binding.image)turbulent.insert(binding.image);upload(mat.texture.get());if(mat.lightmap)texture(mat.lightmap.get());}
-        if(live)for(auto image:live->skins)upload(image);
+        // Only material skins are texture_upscale candidates: lightmaps, sky strips, UI, fonts and particles keep originals.
+        auto upload=[&](const k22::Image*image,int upscale){auto binding=resolved_skin(image,frame->skinBindings);if(binding.image)texture(binding.image,binding.dynamic,binding.serial,UICommand::TextureMode::Default,upscale);};
+        const int tiling=frame->world&&d.model==&frame->world->mesh?2:1;
+        for(auto&mat:d.model->materials){if(d.model->formatVersion==6&&(mat.flags&15)==9&&mat.texture)if(auto binding=resolved_skin(mat.texture.get(),frame->skinBindings);binding.image)turbulent.insert(binding.image);upload(mat.texture.get(),(mat.flags&15)==5?0:tiling);if(mat.lightmap)texture(mat.lightmap.get());}
+        if(live)for(auto image:live->skins)upload(image,1);
     }
     Sky& sky_texture(const k22::Image&identity){
         auto found=skies.find(&identity);if(found!=skies.end())return found->second;
@@ -453,7 +460,8 @@ struct Raster {
         auto general=[&](Image&i){s.transition(i,VK_IMAGE_LAYOUT_GENERAL,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);};
         if(depthEffects){fx.depth=s.image(w,h,s.depthFormat,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);fx.depthView=depth_view(fx.depth);fx.depthSampled=fx.depth;fx.depthSampled.view=fx.depthView;fx.linear=s.image(w,h,VK_FORMAT_R32_SFLOAT,color);}
         if(f.ssao)fx.ao=s.image(w,h,VK_FORMAT_R16_SFLOAT,color);
-        if(f.taa||f.fxaa)fx.ldr=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);
+        if(f.taa||f.fxaa||f.sharpen)fx.ldr=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);
+        if(f.fxaa&&f.sharpen)fx.sharp=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);
         if(f.taa)for(auto&i:fx.taa){i=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);readable(i);}
         if(f.bloom)for(unsigned i=0;i<fx.bloom.size();++i)fx.bloom[i]=s.image(std::max(1u,w>>(i+1)),std::max(1u,h>>(i+1)),VK_FORMAT_R16G16B16A16_SFLOAT,color);
         if(rt){
@@ -592,7 +600,7 @@ struct Raster {
     // Background-view composite: resolve, bloom, tone map (PBR) or identity, TAA, FXAA, written into the LDR scene target.
     void composite(){
         const auto&f=s.options.features;if(!composite_enabled(s.options.pbr,f))return;
-        if(!f.bloom&&!f.fxaa&&!f.taa){composite_hdr();return;}
+        if(!f.bloom&&!f.fxaa&&!f.taa&&!f.sharpen){composite_hdr();return;}
         end();Image*source=&s.hdr.color;
         if(s.samples!=VK_SAMPLE_COUNT_1_BIT){s.transition(s.hdr.color,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);s.transition(s.hdr.resolve,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);VkImageResolve resolve{};resolve.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};resolve.dstSubresource=resolve.srcSubresource;resolve.extent={s.extent.width,s.extent.height,1};vkCmdResolveImage(s.command,s.hdr.color.handle,s.hdr.color.layout,s.hdr.resolve.handle,s.hdr.resolve.layout,1,&resolve);source=&s.hdr.resolve;}
         s.transition(s.hdr.depth,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);s.transition(s.scene.depth,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
@@ -606,13 +614,15 @@ struct Raster {
         if(f.bloom){pass(fx.bloom[0],5,{source},{linear});for(unsigned i=1;i<fx.bloom.size();++i)pass(fx.bloom[i],6,{&fx.bloom[i-1]},{linear});for(int i=int(fx.bloom.size())-2;i>=0;--i)pass(fx.bloom[i],7,{&fx.bloom[i+1]},{linear},4,true);}
         u.range[3]=f.bloom?0.15f:0.f; // effects.glsl k22BloomStrength.
         const std::array<Image*,6>compositeInputs{source,f.bloom?&fx.bloom[0]:&white};const std::array<VkSampler,6>compositeSampling{nearest,linear};
-        const bool chain=f.taa||f.fxaa;Image*current=&fx.ldr;
+        const bool chain=f.taa||f.fxaa||f.sharpen;Image*current=&fx.ldr;
         if(chain)pass(fx.ldr,8,compositeInputs,compositeSampling);else{begin(s.scene);set_region(full());u.pass={8,0,0,0};bind({EffectProgram},u,compositeInputs,compositeSampling);vkCmdDraw(s.command,3,1,0,0);}
         if(f.taa){
             auto&next=fx.taa[fx.taaIndex];auto&history=fx.taa[fx.taaIndex^1u];u.inverseViewProjection=fx.inverseVP;u.previousViewProjection=fx.previousVP;u.cameraPosition=vec(fx.eye,fx.farPlane);u.camera=vec(fx.forward,fx.nearPlane);u.range[3]=fx.taaValid&&fx.linearValid?1.f:0.f;
             pass(next,9,{&fx.ldr,&history,fx.linearValid?&fx.linear:&white},{nearest,linear,nearest});current=&next;fx.taaIndex^=1u;fx.taaValid=fx.linearValid;fx.previousVP=fx.unjittered;
         }
-        if(chain){begin(s.scene);set_region(full());u.pass={f.fxaa?10.f:11.f,0,1.f/s.extent.width,1.f/s.extent.height};bind({EffectProgram},u,{current},{linear});vkCmdDraw(s.command,3,1,0,0);}
+        // sharpen: contrast-adaptive sharpening (effects.frag mode 12) is the last LDR pass, after TAA/FXAA.
+        if(f.sharpen&&f.fxaa){pass(fx.sharp,10,{current},{linear});current=&fx.sharp;}
+        if(chain){begin(s.scene);set_region(full());u.pass={f.sharpen?12.f:f.fxaa?10.f:11.f,0,1.f/s.extent.width,1.f/s.extent.height};bind({EffectProgram},u,{current},{linear});vkCmdDraw(s.command,3,1,0,0);}
     }
     void camera(const Camera&camera,bool targetOnly=false,const PortalSurface*targetPlane=nullptr){
         Rect viewport=camera.viewport;if(viewport.width<=0||viewport.height<=0)viewport={0,0,float(metrics.width),float(metrics.height)};auto r=rectangle(viewport);if(!r.extent.width||!r.extent.height||(!camera.perDrawOpacity&&camera.alpha<=0))return;

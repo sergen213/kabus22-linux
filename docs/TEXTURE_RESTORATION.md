@@ -75,6 +75,30 @@ albedo:
 
 These are approximations from colour, not measured materials; leave `--pbr` off for the original look.
 
+## In-engine `texture_upscale` (Vulkan, no pack needed)
+
+`--graphics texture_upscale=1` (Vulkan raster and RT; presets `enhanced`/`ultra`) applies the same
+non-AI `--method auto` policy at texture upload, on the CPU, without writing anything to disk:
+
+* Only world and model material skins with both sides ≤ 512 px, 2× (`k22::upscale_texture_2x`).
+  Lightmaps, sky strips, UI, fonts, particles, dynamic/turbulent images and textures that a pack
+  replaces keep their original upload. UV policy keeps the original dimensions.
+* ≤ 16 distinct colours: Scale2x. Otherwise separable Lanczos-3 plus the tool's mild unsharp mask
+  (35 %, threshold 2); world textures wrap (tiling), model atlases clamp to the edge.
+* RGB is resampled after the same 4-texel colour bleed; alpha is always nearest-scaled, so alpha-test
+  coverage is identical at every threshold (also for Scale2x, unlike the offline tool's whole-texel
+  Scale2x).
+* Mipmaps are generated from the upscaled level 0. PBR normal/ORM maps only come from packs, and a pack
+  hit skips the upscale, so derived maps always match their albedo.
+* Cost (RX 7900 XTX host, Release, row bands on all cores): all 1792 dumped world/model textures
+  ≤ 512 px take 3.9 s in total, 2.2 ms mean, 10 ms worst. Demir level5 (`kayit0.sav`) load to first
+  frames goes from 3.50 s to 3.58 s on Vulkan RT and raster (three and two runs). The result is not
+  cached on disk; it lives as long as the image's GPU texture.
+
+`k22-render-check --policy` checks exact 2×, coverage at alpha 1/3/128/255, that a magenta colour key
+never reaches visible texels, the box-downscale guard (≤ 6/255 mean error, ≤ 1.5/255 shift) and that
+Scale2x emits only source colours.
+
 ## Usage
 
 ```sh
