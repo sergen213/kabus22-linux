@@ -24,7 +24,7 @@ set(K22_SHADER_INCLUDES
   "${K22_SHADER_DIRECTORY}/effects.glsl")
 set(K22_SHADER_FILES scene.vert scene.frag shadow.vert shadow.geom shadow.frag
   ui.vert ui.frag post.vert post.frag sky.frag warp.frag cloud.frag deform.comp tonemap.frag
-  effects.frag rt_signals.comp rt_filter.comp)
+  effects.frag rt_signals.comp rt_filter.comp scene.tesc scene.tese)
 # OpenGL embeds the same PBR source text as Vulkan; re-run configure when it changes.
 file(READ "${K22_SHADER_DIRECTORY}/pbr.glsl" K22_PBR_GLSL)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${K22_SHADER_DIRECTORY}/pbr.glsl")

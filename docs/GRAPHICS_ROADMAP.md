@@ -151,6 +151,36 @@ world camera; depth-based effects apply only to it.
   (Scale2x or Lanczos-3 + mild unsharp, nearest alpha), see `docs/TEXTURE_RESTORATION.md`. No AI, no
   pack needed; a pack hit wins. Screen-space upscaling (FSR/DLSS-style) is not implemented.
 
+## Geometry upgrades (`smooth_normals`, `tessellation`; Vulkan only)
+
+Both are off by default (`enhanced` and `ultra` enable them). With both off the Vulkan pipelines, pose buffers and shaders
+take exactly the previous path (the new code sits behind a pipeline key bit and a specialization constant that defaults
+off).
+
+- **Smooth normals** (`smooth_normals=1`, `render_policy::smooth_normals`): MDL/HMP entity models get angle-weighted
+  vertex normals recomputed from every animation frame's positions when the model's pose data is built
+  (`render_vulkan_rt.cpp` `RayTracing::model`; script position overrides are re-smoothed when they change), so
+  the GPU pose blend (`deform.comp`) interpolates smoothed normals between frames. This removes MDL's 162-direction
+  normal quantization (`assets.cpp mdl_normals`), which shaded low-poly characters in visible facets. Display vertices are
+  welded through `Model::vertexSources` (UV seams share one normal; authored split vertices stay split), and faces more
+  than 60 degrees from a vertex group's mean are left out of it. WMB brushes keep their authored smoothing groups
+  (flag 16384, already smoothed by the loader): brush edges stay hard and lightmaps keep matching. Raster shading, the
+  G-buffer, shadow casters and ray-traced hits all read the same pose buffer, so every path sees the smoothed normals.
+- **PN-triangle tessellation** (`tessellation=1`, `scene.tesc`/`scene.tese`): MDL draws that are not billboards are
+  drawn as 3-point patches and evaluated as curved point-normal triangles over world-space positions and the smoothed
+  normals (it enables the smoothing for these models). The level is distance-adaptive per edge
+  (`edge length * 128 / distance`, clamped 1..8, 1 beyond 2000 units); it depends only on the edge, so neighbouring
+  patches never crack. Each vertex carries a PN weight (MDL models have no lightmap, so it rides in `lightmap_uv.x`):
+  1 where the shared normal fits every adjacent face, fading to 0 where a face deviates by more than 60 degrees, and an
+  edge bends by the smaller weight of its corners. Without it, welded hard props (chair rails, seat plates, boxes)
+  inflated into pillows. The scene pass, the RT G-buffer prepass, the sky stencil mask and the shadow-map casters all use
+  the same tessellated pipeline, so prepass and forward depths match exactly and tessellated models cast tessellated
+  shadow maps; planar (`draw_planar`) shadows and the ray-tracing BLAS stay on the base mesh. The device feature
+  `tessellationShader` is optional: without it `tessellation` is dropped with a stderr notice.
+- Cost on the RX 7900 XTX (level5 loaded view, `kayit0.sav`, 2560x1377, immediate present, 500 frames, two runs): user RT
+  settings 12.00/12.12 ms before, 12.14/12.17 ms with both upgrades (12.07/12.12 smoothing only); Vulkan raster with
+  shadow maps/SSAO/FXAA/TAA/bloom/fog/PBR 5.54/5.56 ms before, 5.60/5.60 ms with both. Within run-to-run noise.
+
 ## Not implemented
 
 A prefiltered sky cubemap for IBL, PBR in ray-traced reflection hits, mirrored-UV bitangent signs, TAA on

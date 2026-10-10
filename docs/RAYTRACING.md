@@ -94,6 +94,20 @@ Screen-space signals of the primary view (`native/render_vulkan_raster.cpp` `rt_
      camtuvalet bathroom mirror, type 3, received no reflection before this fix). Checked on that mirror:
      roughness 0 matches the default inline reflection, roughness 0.35 (test pack, `pbr=1`) is noisy and
      blurred, and `denoise=1` smooths it.
+   - *Smoothed models* (`smooth_normals=1` or `tessellation=1`, `docs/GRAPHICS_ROADMAP.md` Geometry upgrades): hit
+     shading already interpolated vertex normals with the hit barycentrics (`hitRadiance`, explicit-material hits); the
+     pose buffers now carry the smoothed normals. Shading a low-poly model with smooth normals while tracing against its
+     flat triangles lets shadow and contact rays leaving a facet near the terminator re-enter the neighbouring facets
+     (the shadow-terminator problem: dark triangle-shaped blocks). For lit, non-lightmapped pixels `rt_signals.comp`
+     therefore re-finds the base triangle under the pixel with a camera ray (within `max(4 bias, 0.4% distance)` of the
+     G-buffer depth) and starts the rays from the surface its vertex normals describe (Hanika 2021: barycentric blend of
+     the hit projected outward onto each vertex tangent plane), offset along the camera-facing geometric normal. The
+     G-buffer orients the stored normal by the camera-facing facet normal (from `worldPosition` derivatives) instead of
+     flipping any normal facing away from the camera, which inverted smooth normals at model silhouettes. Tessellated
+     PN surfaces are traced as their base mesh (the BLAS is not tessellated): a tessellated pixel whose base triangle
+     lies within the camera-ray window starts its rays from that triangle's lifted surface; where the PN bulge exceeds
+     the window (large patches close to the camera) the pixel keeps the previous origin, offset along its shading
+     normal. Lightmapped (world) pixels keep the previous origin.
 3. **Denoise** (`denoise=1`): temporal accumulation (reprojection with the previous unjittered
    view-projection, or with the per-pixel motion vector where a moving/animated entity is visible; rejected on
    >5% view-depth change or normal cosine < 0.9; history clipped to the current 3x3 raw signal mean +- 2 sigma
@@ -154,3 +168,5 @@ reflections, denoise, bloom, SSAO, FXAA, TAA, fog) the mean luma gradient of the
 - One bounce, one sample per pixel; reflections hit with legacy shading.
 - The BLAS/TLAS are rebuilt per frame/camera (BLAS refit for changed poses) without compaction.
 - Particles, view-space entities and billboards are not in the acceleration structure.
+- With `tessellation=1` the BLAS still holds the base mesh: ray-traced shadows, GI and reflections see model
+  silhouettes without the PN bulge.

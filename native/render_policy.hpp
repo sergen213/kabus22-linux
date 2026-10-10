@@ -1,9 +1,11 @@
 #pragma once
 #include "render.hpp"
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -209,6 +211,39 @@ inline void derive_tangents(const Model&model,std::span<const Vec3>positions,std
     }
     // Native policy: UV-degenerate vertices retain zero; never substitute a made-up normal-map basis.
     for(std::size_t index=0;index<out.size();++index){Vec3 n=normals.empty()?model.vertices[index].normal:normals[index];float squared=dot(n,n);Vec3 t=out[index];if(squared>0)t=add(t,mul(n,-dot(n,t)/squared));float length=std::sqrt(dot(t,t));out[index]=length>0?mul(t,1/length):Vec3{};}
+}
+// Vulkan smooth_normals targets MDL/HMP entity models; WMB keeps its authored smoothing groups (assets.cpp flag 16384) so
+// brush edges stay hard and baked lightmaps keep matching. PN-triangle tessellation patches MDL models and needs smoothing.
+inline bool pn_model(const Model&m){return m.formatVersion==4||m.formatVersion==5||m.formatVersion==7;}
+inline bool smooth_model(const GraphicsFeatures&f,const Model&m){return (f.smoothNormals&&model_has_entity_skins(m))||(f.tessellation&&pn_model(m));}
+constexpr float smoothCrease=0.5f; // cos 60 degrees.
+// Angle-weighted vertex normals recomputed from the pose (this also removes MDL's 162-direction normal quantization).
+// Display vertices are welded across UV seams (Model::vertexSources, else exact position) and a weld group shares one
+// normal, so PN patches stay crack-free; faces deviating more than the crease from the group mean are left out. `normals`
+// holds the authored normals on entry (orientation reference, fallback without area) and the smoothed ones on return.
+// Optional `pn` receives each vertex's PN-triangle weight (scene.tese): 1 where the shared normal represents every adjacent
+// face (curved surface), fading to 0 once a face deviates by more than 60 degrees (welded box/plate corners, which PN
+// patches would inflate into pillows).
+inline void smooth_normals(const Model&model,std::span<const Vec3>positions,float crease,std::span<Vec3>normals,std::span<float>pn={}){
+    const auto n=model.vertices.size();
+    if(normals.size()!=n||(!positions.empty()&&positions.size()!=n)||(!pn.empty()&&pn.size()!=n))throw std::runtime_error("Invalid smoothing pose");
+    auto point=[&](std::uint32_t i){return positions.empty()?model.vertices[i].position:positions[i];};
+    std::vector<std::uint32_t>group(n);std::uint32_t groups=0;
+    if(model.vertexSources.size()==n){for(std::size_t i=0;i<n;++i){group[i]=model.vertexSources[i];groups=std::max(groups,group[i]+1);}}
+    else{std::map<std::array<std::uint32_t,3>,std::uint32_t>weld;for(std::size_t i=0;i<n;++i){auto p=model.vertices[i].position;group[i]=weld.try_emplace({std::bit_cast<std::uint32_t>(p.x),std::bit_cast<std::uint32_t>(p.y),std::bit_cast<std::uint32_t>(p.z)},groups).first->second;if(group[i]==groups)++groups;}}
+    std::vector<Vec3>mean(groups),sum(groups),faces(model.triangles.size());std::vector<std::array<float,3>>angles(model.triangles.size());
+    for(std::size_t t=0;t<faces.size();++t){
+        const auto&index=model.triangles[t].indices;for(auto i:index)if(i>=n)throw std::runtime_error("Smoothing triangle references invalid display vertex");
+        const Vec3 p[3]{point(index[0]),point(index[1]),point(index[2])};Vec3 f=cross(add(p[1],mul(p[0],-1)),add(p[2],mul(p[0],-1)));const float area=std::sqrt(dot(f,f));if(!(area>0))continue;faces[t]=f=mul(f,1/area);
+        for(int k=0;k<3;++k){Vec3 a=add(p[(k+1)%3],mul(p[k],-1)),b=add(p[(k+2)%3],mul(p[k],-1));const float la=std::sqrt(dot(a,a)),lb=std::sqrt(dot(b,b));angles[t][k]=la>0&&lb>0?std::acos(std::clamp(dot(a,b)/(la*lb),-1.f,1.f)):0;mean[group[index[k]]]=add(mean[group[index[k]]],mul(f,angles[t][k]));}
+    }
+    for(std::size_t t=0;t<faces.size();++t)for(int k=0;k<3;++k){const auto g=group[model.triangles[t].indices[k]];const Vec3 m=mean[g];if(dot(faces[t],faces[t])>0&&dot(faces[t],m)>=crease*std::sqrt(dot(m,m)))sum[g]=add(sum[g],mul(faces[t],angles[t][k]));}
+    // Winding conventions differ per format; orient the whole model like its authored normals.
+    float orientation=0;for(std::size_t i=0;i<n;++i)orientation+=dot(sum[group[i]],normals[i]);
+    for(std::size_t i=0;i<n;++i){const Vec3 s=sum[group[i]];if(dot(s,s)>0)normals[i]=mul(unit(s),orientation<0?-1.f:1.f);}
+    if(pn.empty())return;
+    std::vector<float>least(groups,1.f);for(std::size_t t=0;t<faces.size();++t)for(auto i:model.triangles[t].indices){const auto g=group[i];if(dot(faces[t],faces[t])>0&&dot(sum[g],sum[g])>0)least[g]=std::min(least[g],dot(faces[t],unit(sum[g])));}
+    for(std::size_t i=0;i<n;++i){const auto g=group[i];const float x=dot(sum[g],sum[g])>0?std::clamp((least[g]-0.5f)/0.35f,0.f,1.f):0.f;pn[i]=x*x*(3-2*x);}
 }
 inline const ScriptMaterialState* script_material(const RenderFrame*frame,std::uint32_t index){
     if(index==~0u)return nullptr;

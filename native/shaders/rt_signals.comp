@@ -72,6 +72,27 @@ vec4 reflectionLayers(vec3 origin,vec3 direction,float maxDistance){
     }
     return vec4(radiance,visibility);
 }
+layout(constant_id=0) const bool k22SmoothNormals=false;
+// smooth_normals: shadow-terminator origin (Hanika 2021). Smoothed low-poly models are shaded with vertex normals but
+// traced against flat triangles, so rays leaving a facet near the terminator re-enter neighbouring facets: blocky
+// self-shadow. The camera ray re-finds the base-mesh triangle under the pixel (tessellated pixels within the PN bulge
+// `slack`); the origin is lifted onto the surface its vertex normals describe (outward projection onto each vertex
+// tangent plane, weighted by the barycentrics), then offset along the camera-facing geometric normal against acne.
+vec3 terminatorOrigin(vec3 p,float bias,vec3 fallback){
+    vec3 toward=p-g.eye.xyz;float len=length(toward),slack=max(bias*4.0,len*0.004);if(len<=slack)return fallback;
+    rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsNoneEXT,255,g.eye.xyz,len-slack,toward/len,len+slack);
+    while(rayQueryProceedEXT(q))if(rayQueryGetIntersectionTypeEXT(q,false)==gl_RayQueryCandidateIntersectionTriangleEXT&&rtHitColor(q,false).a>=0.5)rayQueryConfirmIntersectionEXT(q);
+    if(rayQueryGetIntersectionTypeEXT(q,true)==gl_RayQueryCommittedIntersectionNoneEXT)return fallback;
+    RtInstance instance=rtInstances[rayQueryGetIntersectionInstanceCustomIndexEXT(q,true)];RtMaterial m=rtMaterials[instance.materialBase+rayQueryGetIntersectionGeometryIndexEXT(q,true)];
+    RtIndices indices=RtIndices(instance.indices);RtVertices vertices=RtVertices(instance.vertices);uint first=m.frames.z+rayQueryGetIntersectionPrimitiveIndexEXT(q,true)*3u;
+    mat4x3 transform=rayQueryGetIntersectionObjectToWorldEXT(q,true);
+    mat3 normalTransform=mat3(transform);for(int j=0;j<3;++j){float s=dot(normalTransform[j],normalTransform[j]);normalTransform[j]=s>0.0?normalTransform[j]/s:vec3(0);}
+    vec2 bary=rayQueryGetIntersectionBarycentricsEXT(q,true);vec3 w=vec3(1.0-bary.x-bary.y,bary),v[3],vn[3];
+    for(uint j=0u;j<3u;++j){uint id=indices.words[first+j];v[j]=transform*vec4(rtPosition(vertices,id),1);vn[j]=rtSafeNormal(normalTransform*rtNormal(vertices,id));}
+    vec3 hit=v[0]*w.x+v[1]*w.y+v[2]*w.z,facet=rtSafeNormal(cross(v[1]-v[0],v[2]-v[0]));if(dot(facet,g.eye.xyz-hit)<0.0)facet=-facet;
+    vec3 lifted=hit;for(int j=0;j<3;++j){vec3 nj=dot(vn[j],facet)<0.0?-vn[j]:vn[j];lifted-=w[j]*min(dot(hit-v[j],nj),0.0)*nj;}
+    return lifted+facet*bias;
+}
 void main(){
     ivec2 pixel=ivec2(gl_GlobalInvocationID.xy);if(pixel.x>=g.config.y||pixel.y>=g.config.z)return;
     seed=pcg(uint(pixel.x)+uint(pixel.y)*uint(g.config.y))^pcg(uint(g.params.x)*9781u+1u);
@@ -80,6 +101,7 @@ void main(){
     if(depth<1.0){
         vec2 uv=(vec2(pixel)+0.5)/vec2(g.config.yz);vec4 world=g.inverseViewProjection*vec4(uv.x*2.0-1.0,1.0-uv.y*2.0,depth*2.0-1.0,1.0);vec3 p=world.xyz/world.w,n=decodeNormal(data.xy);
         float viewDistance=length(p-g.eye.xyz);vec3 origin=p+n*max(0.02,viewDistance*0.0005);
+        if(k22SmoothNormals&&(flags&5)==0&&(g.config.x&3)!=0)origin=terminatorOrigin(p,max(0.02,viewDistance*0.0005),origin); // Lit, non-lightmapped (model) pixels.
         // Unlit/explicit/effect surfaces (flag 4) take no lighting signals but still reflect (original unlit mirrors).
         if((g.config.x&1)!=0&&(flags&4)==0){
             bool native=(flags&2)!=0;float shadowed=0.0,unshadowed=0.0;

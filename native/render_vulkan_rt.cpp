@@ -146,19 +146,24 @@ Buffer RayTracing::scratch(VkDeviceSize size){auto& buffer=slot().scratch;auto r
 Buffer& RayTracing::upload(Buffer& buffer,VkDeviceSize size,VkBufferUsageFlags usage,const void* data){if(buffer.size<size){s.retire(buffer);buffer=s.buffer(size,usage,true);}if(data)std::memcpy(buffer.mapped,data,size);return buffer;}
 ModelData& RayTracing::model(const Model& source,std::span<const Vertex> vertices,std::span<const Vec3> tangents){
     auto& map=vertices.empty()?models:expandedModels;auto [it,inserted]=map.try_emplace(&source);auto& result=it->second;if(!inserted)return result;
-    if(vertices.empty())vertices=source.vertices;
+    const bool smooth=vertices.empty()&&render_policy::smooth_model(s.options.features,source);if(vertices.empty())vertices=source.vertices;
     if(vertices.size()>std::numeric_limits<std::uint32_t>::max())throw std::runtime_error("Vulkan display vertex count exceeds 32-bit topology");
     auto endpointLimit=std::min<std::uint64_t>(s.properties.limits.maxStorageBufferRange/sizeof(Endpoint),std::numeric_limits<std::uint32_t>::max()/9u);
     if(source.frames.size()>=endpointLimit||(vertices.size()&&source.frames.size()+1>endpointLimit/vertices.size())||vertices.size()>s.properties.limits.maxStorageBufferRange/sizeof(PackedVertex)||vertices.size()>static_cast<std::uint64_t>(s.properties.limits.maxComputeWorkGroupCount[0])*64)throw std::runtime_error("Vulkan immutable display pose exceeds device storage/compute endpoint limits");
     result.count=vertices.size();result.frameCount=source.frames.size();
-    std::vector<Vec3> derived;if(tangents.empty()){derived.resize(source.vertices.size());render_policy::derive_tangents(source,{},{},derived);derived.resize(vertices.size());tangents=derived;}
+    // smooth_normals/tessellation: base and every animation frame endpoint carry normals smoothed from their own positions.
+    std::vector<Vec3> normals;auto smoothed=[&](std::span<const Vec3> positions,std::span<const Vec3> authored,std::span<float> pn={})->std::span<const Vec3>{if(!smooth)return authored;normals.resize(source.vertices.size());for(std::size_t i=0;i<normals.size();++i)normals[i]=authored.empty()?source.vertices[i].normal:authored[i];render_policy::smooth_normals(source,positions,render_policy::smoothCrease,normals,pn);return normals;};
+    // MDL models have no lightmap: under tessellation lightmap_uv.x carries each vertex's PN weight (scene.tese).
+    std::vector<float> pn(smooth&&s.options.features.tessellation&&render_policy::pn_model(source)?source.vertices.size():0);
+    const auto baseNormals=smoothed({},{},pn);
+    std::vector<Vec3> derived;if(tangents.empty()){derived.resize(source.vertices.size());render_policy::derive_tangents(source,{},baseNormals,derived);derived.resize(vertices.size());tangents=derived;}
     if(tangents.size()!=vertices.size())throw std::runtime_error("Expanded Vulkan display tangents do not match vertices");
     std::vector<PackedVertex> base(vertices.size());std::vector<Endpoint> endpoints(vertices.size()*(source.frames.size()+1));
-    for(std::size_t i=0;i<vertices.size();++i){base[i]={vertices[i],tangents[i]};endpoints[i]={vertices[i].position,vertices[i].normal,tangents[i]};}
+    for(std::size_t i=0;i<vertices.size();++i){Vertex v=vertices[i];if(smooth)v.normal=baseNormals[i];if(!pn.empty())v.lightmap_uv.x=pn[i];base[i]={v,tangents[i]};endpoints[i]={v.position,v.normal,tangents[i]};}
     for(std::size_t f=0;f<source.frames.size();++f){
         const auto& frame=source.frames[f];if(frame.positions.size()!=source.vertices.size()||(!frame.normals.empty()&&frame.normals.size()!=source.vertices.size()))throw std::runtime_error("Animation frame must supply complete Vulkan decoded vertex pose");
-        derived.resize(source.vertices.size());render_policy::derive_tangents(source,frame.positions,frame.normals,derived);
-        for(std::size_t i=0;i<vertices.size();++i)endpoints[(f+1)*vertices.size()+i]=i<source.vertices.size()?Endpoint{frame.positions[i],frame.normals.empty()?source.vertices[i].normal:frame.normals[i],derived[i]}:endpoints[i];
+        const auto frameNormals=smoothed(frame.positions,frame.normals);derived.resize(source.vertices.size());render_policy::derive_tangents(source,frame.positions,frameNormals,derived);
+        for(std::size_t i=0;i<vertices.size();++i)endpoints[(f+1)*vertices.size()+i]=i<source.vertices.size()?Endpoint{frame.positions[i],smooth?frameNormals[i]:frame.normals.empty()?source.vertices[i].normal:frame.normals[i],derived[i]}:endpoints[i];
     }
     result.base=s.buffer(std::max<std::size_t>(base.size()*sizeof(PackedVertex),4),endpointUsage,true,base.empty()?nullptr:base.data());
     result.endpoints=s.buffer(std::max<std::size_t>(endpoints.size()*sizeof(Endpoint),4),endpointUsage,true,endpoints.empty()?nullptr:endpoints.data());return result;
@@ -174,8 +179,10 @@ std::pair<Buffer,std::uint32_t> RayTracing::endpoint(const DrawInstance& d,Model
     if(changed||(tangents&&!cache.tangents)){
         if(positions.empty()&&m.frameCount)positions=d.model->frames[frame].positions;
         if(normals.empty()&&m.frameCount)normals=d.model->frames[frame].normals;
-        std::vector<Vec3> derived;if(tangents){derived.resize(d.model->vertices.size());render_policy::derive_tangents(*d.model,positions,normals,derived);}
         auto* immutable=static_cast<const Endpoint*>(m.endpoints.mapped)+offset/9;
+        // Script-deformed poses re-smooth from their override positions (immutable frame normals already are smoothed).
+        std::vector<Vec3> smoothed;if(!(next?d.nextPositions:d.positions).empty()&&render_policy::smooth_model(s.options.features,*d.model)){smoothed.resize(d.model->vertices.size());for(std::size_t i=0;i<smoothed.size();++i)smoothed[i]=normals.empty()?immutable[i].normal:normals[i];render_policy::smooth_normals(*d.model,positions,render_policy::smoothCrease,smoothed);normals=smoothed;}
+        std::vector<Vec3> derived;if(tangents){derived.resize(d.model->vertices.size());render_policy::derive_tangents(*d.model,positions,normals,derived);}
         std::vector<Endpoint> data(m.count);for(std::size_t i=0;i<data.size();++i){data[i]=immutable[i];if(i<d.model->vertices.size()){if(!positions.empty())data[i].position=positions[i];if(!normals.empty())data[i].normal=normals[i];if(tangents)data[i].tangent=derived[i];}}
         s.retire(cache.endpoint);cache.endpoint=s.buffer(data.size()*sizeof(Endpoint),endpointUsage,true,data.data());cache.model=d.model;cache.revision=revision;cache.frame=frame;cache.positions=(next?d.nextPositions:d.positions).size();cache.normals=(next?d.nextNormals:d.normals).size();cache.tangents=tangents;
     }

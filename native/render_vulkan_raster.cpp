@@ -46,12 +46,13 @@ struct OverrideBounds{const Model*model{};std::uint64_t revision{~0ull};std::siz
 struct Allocation {Buffer*buffer{};VkDeviceSize offset{},size{};};
 enum Program {Scene,Shadow,UI,Post,SkyProgram,WarpProgram,CloudProgram,TonemapProgram,EffectProgram};
 // premultiplied: 1 premultiplied, 2 native model alpha, 3 multiply (AO), 4 additive keeping destination alpha (fog, bloom).
-struct PipelineKey {int program{},samples{},depth{},write{},blend{},additive{},premultiplied{},cull{},clockwise{},stencil{},colorFormat{},depthFormat{};auto operator<=>(const PipelineKey&)const=default;};
+// tess: PN-triangle tessellation stages (tessellation=1, MDL draws; scene.tesc/scene.tese).
+struct PipelineKey {int program{},samples{},depth{},write{},blend{},additive{},premultiplied{},cull{},clockwise{},stencil{},colorFormat{},depthFormat{},tess{};auto operator<=>(const PipelineKey&)const=default;};
 }
 struct Raster {
     VulkanBackend::State&s;
     VkDescriptorSetLayout layout{};VkPipelineLayout pipelineLayout{};
-    std::array<VkShaderModule,14>shaders{};std::map<PipelineKey,VkPipeline>pipelines;
+    std::array<VkShaderModule,16>shaders{};std::map<PipelineKey,VkPipeline>pipelines;
     struct Arena {std::deque<Buffer>buffers;std::vector<VkDeviceSize>used;std::vector<VkDescriptorPool>pools;std::vector<VkImageView>views;std::size_t pool{};};
     std::array<Arena,2>arenas;
     std::unordered_map<const Model*,Mesh>meshes;
@@ -68,7 +69,7 @@ struct Raster {
     Target*target{};VkRect2D region{};Uniform view{};Allocation lightAllocation,zeroAllocation;
     VkExtent2D renderExtent{};
     std::vector<UIVertex>uiVertices;std::vector<const DrawInstance*>transparent,shadowOrder;
-    struct CasterDraw{VkBuffer vertices,indices;VkDescriptorSet set;bool cull,clockwise;std::uint32_t first,count;};std::vector<CasterDraw>casterDraws;
+    struct CasterDraw{VkBuffer vertices,indices;VkDescriptorSet set;bool cull,clockwise,tess;std::uint32_t first,count;};std::vector<CasterDraw>casterDraws;
     enum class Encounter {Live,Prepare,Replay};
     struct Prepared {Pose*pose{};std::array<NativeEntityLightState,3>lights{};std::array<int,2>queues{-1,-1};unsigned admitted{};unsigned latest{3};};
     std::unordered_map<const DrawInstance*,Prepared>prepared;
@@ -94,6 +95,10 @@ struct Raster {
     std::uint64_t frameIndex{};const Camera*primary{};
     bool rtSignals()const{const auto&f=s.options.features;return s.rayEnabled&&(f.shadows==ShadowMode::RayTraced||f.gi||f.roughReflections);}
     bool motionVectors()const{return s.options.features.taa||(rtSignals()&&s.options.features.denoise);}
+    // Caster push constant stages: the tessellation evaluation stage projects tessellated casters too.
+    VkShaderStageFlags casterStages{VK_SHADER_STAGE_VERTEX_BIT};
+    bool smoothing()const{return s.options.features.smoothNormals||s.options.features.tessellation;}
+    PipelineKey tessellated(const DrawInstance&d,PipelineKey key)const{key.tess=s.options.features.tessellation&&!d.billboard&&pn_model(*d.model);return key;}
     explicit Raster(VulkanBackend::State&state):s(state){
         try{
         // Bindings: 0 uniform, 1-4 skin/lightmap/portal/effect normal, 5-6 storage, 7-8 PBR normal/ORM, 9-14 wave-2 globals.
@@ -101,9 +106,11 @@ struct Raster {
         for(unsigned i=0;i<bindings.size();++i){bindings[i].binding=i;bindings[i].descriptorCount=1;bindings[i].descriptorType=i==0?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:i==5||i==6?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;bindings[i].stageFlags=VK_SHADER_STAGE_ALL_GRAPHICS;}
         VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};li.bindingCount=bindings.size();li.pBindings=bindings.data();require(vkCreateDescriptorSetLayout(s.device,&li,nullptr,&layout),"raster descriptor layout");
         std::array<VkDescriptorSetLayout,2>layouts{layout,s.rays?rt_layout(*s.rays):VK_NULL_HANDLE};
-        VkPipelineLayoutCreateInfo pi{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};pi.setLayoutCount=s.rayEnabled?2:1;pi.pSetLayouts=layouts.data();VkPushConstantRange casterPush{VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(Matrix)};pi.pushConstantRangeCount=1;pi.pPushConstantRanges=&casterPush;require(vkCreatePipelineLayout(s.device,&pi,nullptr,&pipelineLayout),"raster pipeline layout");
+        if(s.options.features.tessellation)casterStages|=VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+        VkPipelineLayoutCreateInfo pi{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};pi.setLayoutCount=s.rayEnabled?2:1;pi.pSetLayouts=layouts.data();VkPushConstantRange casterPush{casterStages,0,sizeof(Matrix)};pi.pushConstantRangeCount=1;pi.pPushConstantRanges=&casterPush;require(vkCreatePipelineLayout(s.device,&pi,nullptr,&pipelineLayout),"raster pipeline layout");
         const std::array<std::span<const std::uint32_t>,14>code{spirv::scene_vert,s.rayEnabled?std::span<const std::uint32_t>(spirv::scene_rt_frag):std::span<const std::uint32_t>(spirv::scene_frag),spirv::shadow_vert,spirv::shadow_geom,spirv::shadow_frag,spirv::ui_vert,spirv::ui_frag,spirv::post_vert,spirv::post_frag,spirv::sky_frag,spirv::warp_frag,spirv::cloud_frag,spirv::tonemap_frag,spirv::effects_frag};
         for(std::size_t i=0;i<code.size();++i)shaders[i]=s.shader(code[i]);
+        if(s.options.features.tessellation){shaders[14]=s.shader(spirv::scene_tesc);shaders[15]=s.shader(spirv::scene_tese);}
         if(rtSignals()){
             // Compute set: 0 uniform, 1 lights, 2-9 sampled images, 10-21 storage images; set 1 is the ray-query scene.
             std::array<VkDescriptorSetLayoutBinding,22>cb{};for(unsigned i=0;i<cb.size();++i){cb[i].binding=i;cb[i].descriptorCount=1;cb[i].descriptorType=i==0?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:i==1?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:i<10?VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;cb[i].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT;}
@@ -112,6 +119,7 @@ struct Raster {
             VkPipelineLayoutCreateInfo cp{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};cp.setLayoutCount=2;cp.pSetLayouts=sets.data();cp.pushConstantRangeCount=1;cp.pPushConstantRanges=&push;require(vkCreatePipelineLayout(s.device,&cp,nullptr,&computeLayout),"RT signal pipeline layout");
             for(auto [pipeline,words]:{std::pair{&signalsPipeline,std::span<const std::uint32_t>(spirv::rt_signals_comp)},{&filterPipeline,std::span<const std::uint32_t>(spirv::rt_filter_comp)}}){
                 auto module=s.shader(words);VkComputePipelineCreateInfo pc{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};pc.layout=computeLayout;pc.stage={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};pc.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT;pc.stage.module=module;pc.stage.pName="main";
+                const VkBool32 on=VK_TRUE;const VkSpecializationMapEntry entry{0,0,sizeof(on)};const VkSpecializationInfo spec{1,&entry,sizeof(on),&on};if(smoothing()&&pipeline==&signalsPipeline)pc.stage.pSpecializationInfo=&spec;
                 auto status=vkCreateComputePipelines(s.device,VK_NULL_HANDLE,1,&pc,nullptr,pipeline);vkDestroyShaderModule(s.device,module,nullptr);require(status,"RT signal compute pipeline");
             }
         }
@@ -156,19 +164,23 @@ struct Raster {
     }
     VkPipeline pipeline(PipelineKey key){
         auto found=pipelines.find(key);if(found!=pipelines.end())return found->second;
-        std::array<VkPipelineShaderStageCreateInfo,3>stages{};unsigned count=2;unsigned vs=key.program==Scene?0:key.program==Shadow?2:key.program==UI?5:7,fs=key.program==Scene?1:key.program==Shadow?4:key.program==UI?6:key.program==Post?8:key.program==SkyProgram?9:key.program==WarpProgram?10:key.program==TonemapProgram?12:key.program==EffectProgram?13:11;
+        std::array<VkPipelineShaderStageCreateInfo,4>stages{};unsigned count=2;unsigned vs=key.program==Scene?0:key.program==Shadow?2:key.program==UI?5:7,fs=key.program==Scene?1:key.program==Shadow?4:key.program==UI?6:key.program==Post?8:key.program==SkyProgram?9:key.program==WarpProgram?10:key.program==TonemapProgram?12:key.program==EffectProgram?13:11;
         stages[0]={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};stages[0].stage=VK_SHADER_STAGE_VERTEX_BIT;stages[0].module=shaders[vs];stages[0].pName="main";stages[1]={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};stages[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT;stages[1].module=shaders[fs];stages[1].pName="main";if(key.program==Shadow){stages[2]={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};stages[2].stage=VK_SHADER_STAGE_GEOMETRY_BIT;stages[2].module=shaders[3];stages[2].pName="main";count=3;}
+        if(key.tess)for(auto [stage,module]:{std::pair{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT,shaders[14]},{VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,shaders[15]}}){stages[count]={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};stages[count].stage=stage;stages[count].module=module;stages[count++].pName="main";}
+        const VkBool32 on=VK_TRUE;const VkSpecializationMapEntry entry{0,0,sizeof(on)};const VkSpecializationInfo spec{1,&entry,sizeof(on),&on};if(key.program==Scene&&smoothing())stages[1].pSpecializationInfo=&spec; // scene.frag k22SmoothNormals.
         VkVertexInputBindingDescription binding{0,static_cast<std::uint32_t>(key.program==UI?sizeof(UIVertex):sizeof(Vertex)+sizeof(Vec3)),VK_VERTEX_INPUT_RATE_VERTEX};
         std::array<VkVertexInputAttributeDescription,5>attributes{};unsigned attrs=0;
         if(key.program==Scene||key.program==Shadow){attributes={{{0,0,VK_FORMAT_R32G32B32_SFLOAT,offsetof(Vertex,position)},{1,0,VK_FORMAT_R32G32B32_SFLOAT,offsetof(Vertex,normal)},{2,0,VK_FORMAT_R32G32_SFLOAT,offsetof(Vertex,uv)},{3,0,VK_FORMAT_R32G32_SFLOAT,offsetof(Vertex,lightmap_uv)},{4,0,VK_FORMAT_R32G32B32_SFLOAT,sizeof(Vertex)}}};attrs=key.program==Shadow?1:5;}
         else if(key.program==UI){attributes[0]={0,0,VK_FORMAT_R32G32_SFLOAT,0};attributes[1]={1,0,VK_FORMAT_R32G32_SFLOAT,8};attributes[2]={2,0,VK_FORMAT_R32G32B32A32_SFLOAT,16};attrs=3;}
         VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};vi.vertexBindingDescriptionCount=attrs?1:0;vi.pVertexBindingDescriptions=&binding;vi.vertexAttributeDescriptionCount=attrs;vi.pVertexAttributeDescriptions=attributes.data();VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};ia.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        if(key.tess)ia.topology=VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;VkPipelineTessellationStateCreateInfo ts{VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO};ts.patchControlPoints=3;
         VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};vp.viewportCount=vp.scissorCount=1;VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};rs.polygonMode=VK_POLYGON_MODE_FILL;rs.cullMode=key.cull?VK_CULL_MODE_BACK_BIT:VK_CULL_MODE_NONE;rs.frontFace=key.clockwise?VK_FRONT_FACE_CLOCKWISE:VK_FRONT_FACE_COUNTER_CLOCKWISE;rs.lineWidth=1;
         VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};ms.rasterizationSamples=static_cast<VkSampleCountFlagBits>(key.samples);VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};ds.depthTestEnable=key.depth;ds.depthWriteEnable=key.write;ds.depthCompareOp=VK_COMPARE_OP_LESS_OR_EQUAL;ds.stencilTestEnable=key.stencil!=0;ds.front={VK_STENCIL_OP_KEEP,VK_STENCIL_OP_KEEP,VK_STENCIL_OP_KEEP,key.stencil==1?VK_COMPARE_OP_ALWAYS:VK_COMPARE_OP_EQUAL,255,key.stencil==1?255u:0u,1};if(key.stencil==1)ds.front.passOp=VK_STENCIL_OP_REPLACE;ds.back=ds.front;
         VkPipelineColorBlendAttachmentState blend{};blend.colorWriteMask=key.stencil==1?0:15;blend.blendEnable=key.blend;blend.srcColorBlendFactor=key.premultiplied==1?VK_BLEND_FACTOR_ONE:VK_BLEND_FACTOR_SRC_ALPHA;blend.dstColorBlendFactor=key.additive?VK_BLEND_FACTOR_ONE:VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;blend.colorBlendOp=VK_BLEND_OP_ADD;blend.srcAlphaBlendFactor=key.premultiplied==1?VK_BLEND_FACTOR_ONE:(key.program==UI||key.premultiplied==2)?VK_BLEND_FACTOR_SRC_ALPHA:VK_BLEND_FACTOR_ONE;blend.dstAlphaBlendFactor=(key.program==UI||key.premultiplied==2)&&key.additive?VK_BLEND_FACTOR_ONE:VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;blend.alphaBlendOp=VK_BLEND_OP_ADD;
         if(key.premultiplied>=3){blend.srcColorBlendFactor=key.premultiplied==3?VK_BLEND_FACTOR_ZERO:VK_BLEND_FACTOR_ONE;blend.dstColorBlendFactor=key.premultiplied==3?VK_BLEND_FACTOR_SRC_COLOR:VK_BLEND_FACTOR_ONE;blend.srcAlphaBlendFactor=VK_BLEND_FACTOR_ZERO;blend.dstAlphaBlendFactor=VK_BLEND_FACTOR_ONE;}
         VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};cb.attachmentCount=key.colorFormat?1:0;cb.pAttachments=&blend;std::array<VkDynamicState,2>dyn{VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR};VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};dy.dynamicStateCount=dyn.size();dy.pDynamicStates=dyn.data();VkFormat format=VkFormat(key.colorFormat),depthFormat=VkFormat(key.depthFormat);VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};rendering.colorAttachmentCount=key.colorFormat?1:0;rendering.pColorAttachmentFormats=&format;rendering.depthAttachmentFormat=depthFormat;rendering.stencilAttachmentFormat=depthFormat==VK_FORMAT_D32_SFLOAT?VK_FORMAT_UNDEFINED:depthFormat;
         VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};ci.pNext=&rendering;ci.stageCount=count;ci.pStages=stages.data();ci.pVertexInputState=&vi;ci.pInputAssemblyState=&ia;ci.pViewportState=&vp;ci.pRasterizationState=&rs;ci.pMultisampleState=&ms;ci.pDepthStencilState=&ds;ci.pColorBlendState=&cb;ci.pDynamicState=&dy;ci.layout=pipelineLayout;VkPipeline result{};
+        if(key.tess)ci.pTessellationState=&ts;
         try{require(vkCreateGraphicsPipelines(s.device,VK_NULL_HANDLE,1,&ci,nullptr,&result),"Vulkan raster pipeline");pipelines.emplace(key,result);}catch(...){if(result)vkDestroyPipeline(s.device,result,nullptr);throw;}
         return result;
     }
@@ -340,12 +352,12 @@ struct Raster {
             if(!batch_admitted(d,b,camera,queue))continue;
             bool clockwise=(camera.horizontalFov<0)!=(camera.pixelAspect<0);clockwise^=d.model->clockwise;clockwise^=d.scale.x*d.scale.y*d.scale.z<0;
             // Vulkan's signed framebuffer area and shader Y inversion cancel; retain native GL winding.
-            if(maskPass){Uniform u=view;u.model=model;u.flags[2][3]=1;bind({Scene,0,1,0,0,0,0,!(d.doubleSided||d.billboard||camera.noCull),clockwise,1},u);vkCmdDrawIndexed(s.command,b.count,1,b.first,0,0);continue;}
+            if(maskPass){Uniform u=view;u.model=model;u.flags[2][3]=1;bind(tessellated(d,{Scene,0,1,0,0,0,0,!(d.doubleSided||d.billboard||camera.noCull),clockwise,1}),u);vkCmdDrawIndexed(s.command,b.count,1,b.first,0,0);continue;}
             auto*destination=target;auto viewport=region;
             auto draw=material(d,b,camera,depthWrite,*light,effects,model,true);
             if(!active){begin(*destination);set_region(viewport);}
             if(d.spriteFrames>1&&(d.frame>=d.spriteFrames||d.nextFrame>=d.spriteFrames))throw std::runtime_error("Sprite frame index outside texture strip");
-            bind({Scene,0,1,draw.depthWrite,draw.blend,draw.additive,draw.native?2:0,!(d.doubleSided||d.billboard||camera.noCull),clockwise,0},draw.u,draw.images,draw.sampling);
+            bind(tessellated(d,{Scene,0,1,draw.depthWrite,draw.blend,draw.additive,draw.native?2:0,!(d.doubleSided||d.billboard||camera.noCull),clockwise,0}),draw.u,draw.images,draw.sampling);
             bool qualified=centroid&&b.centroidCount;vkCmdDrawIndexed(s.command,qualified?b.centroidCount:b.count,1,qualified?b.centroidFirst:b.first,0,0);
         }
     }
@@ -487,7 +499,7 @@ struct Raster {
             auto found=prepared.find(&d);if(found==prepared.end())return;auto&m=mesh(*d.model);if(m.batches.empty())return;
             auto model=model_matrix(d,&camera);const NativeEntityLightState light{d.nativeLightScalar,d.nativeLightDelta,d.nativeLightBias};
             const bool clockwise=d.model->clockwise^(d.scale.x*d.scale.y*d.scale.z<0);
-            for(auto&b:m.batches){if(!batch_admitted(d,b,camera,-1))continue;auto draw=material(d,b,camera,true,light,retained,model,false);bool q=centroid&&b.centroidCount;casterDraws.push_back({found->second.pose->vertices.handle,m.indices.handle,descriptor(draw.u,draw.images,draw.sampling),!d.doubleSided,clockwise,q?b.centroidFirst:b.first,q?b.centroidCount:b.count});}
+            for(auto&b:m.batches){if(!batch_admitted(d,b,camera,-1))continue;auto draw=material(d,b,camera,true,light,retained,model,false);bool q=centroid&&b.centroidCount;casterDraws.push_back({found->second.pose->vertices.handle,m.indices.handle,descriptor(draw.u,draw.images,draw.sampling),!d.doubleSided,clockwise,tessellated(d,{}).tess!=0,q?b.centroidFirst:b.first,q?b.centroidCount:b.count});}
         };
         if(frame->world)cast(worldDraw);if(frame->renderEntities)for(auto&d:frame->instances)cast(d);
         view=saved;
@@ -495,11 +507,11 @@ struct Raster {
     // Faces turned away from the light are culled (one-sided BSP faces around a light must not occlude it); `flipped`
     // marks the Y-inverted cube-face projection, which reverses the native winding.
     void draw_casters(const Matrix&vp,bool flipped){
-        vkCmdPushConstants(s.command,pipelineLayout,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(Matrix),vp.data());
+        vkCmdPushConstants(s.command,pipelineLayout,casterStages,0,sizeof(Matrix),vp.data());
         if(s.rayEnabled){auto rays=rt_set(*s.rays);vkCmdBindDescriptorSets(s.command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelineLayout,1,1,&rays,0,nullptr);}
         VkPipeline bound{};VkBuffer vertices{},indices{};
         for(auto&c:casterDraws){
-            PipelineKey key{Scene,0,1,1,0,0,0,c.cull,c.clockwise!=flipped};key.samples=renderSamples;key.colorFormat=renderColor;key.depthFormat=renderDepth;auto p=pipeline(key);
+            PipelineKey key{Scene,0,1,1,0,0,0,c.cull,c.clockwise!=flipped};key.samples=renderSamples;key.colorFormat=renderColor;key.depthFormat=renderDepth;key.tess=c.tess;auto p=pipeline(key);
             if(p!=bound){vkCmdBindPipeline(s.command,VK_PIPELINE_BIND_POINT_GRAPHICS,p);bound=p;}
             if(c.vertices!=vertices){VkDeviceSize offset=0;vkCmdBindVertexBuffers(s.command,0,1,&c.vertices,&offset);vertices=c.vertices;}
             if(c.indices!=indices){vkCmdBindIndexBuffer(s.command,c.indices,0,VK_INDEX_TYPE_UINT32);indices=c.indices;}
@@ -574,7 +586,7 @@ struct Raster {
         VkDeviceSize offset=0;vkCmdBindVertexBuffers(s.command,0,1,&found->second.pose->vertices.handle,&offset);vkCmdBindIndexBuffer(s.command,m.indices.handle,0,VK_INDEX_TYPE_UINT32);
         const NativeEntityLightState light{d.nativeLightScalar,d.nativeLightDelta,d.nativeLightBias};bool clockwise=(camera.horizontalFov<0)!=(camera.pixelAspect<0);clockwise^=d.model->clockwise;clockwise^=d.scale.x*d.scale.y*d.scale.z<0;
         const Allocation pose=before?Allocation{&before->vertices,0,before->vertices.size}:Allocation{};
-        for(auto&b:m.batches){if(!batch_admitted(d,b,camera,queue))continue;auto mat=material(d,b,camera,true,light,retained,model,false);if(previous){mat.u.previousModel=*previous;mat.u.pass[1]=before?1.f:0.f;}bind({Scene,0,1,1,0,0,0,!(d.doubleSided||d.billboard||camera.noCull),clockwise,0},mat.u,mat.images,mat.sampling,pose);bool q=centroid&&b.centroidCount;vkCmdDrawIndexed(s.command,q?b.centroidCount:b.count,1,q?b.centroidFirst:b.first,0,0);}
+        for(auto&b:m.batches){if(!batch_admitted(d,b,camera,queue))continue;auto mat=material(d,b,camera,true,light,retained,model,false);if(previous){mat.u.previousModel=*previous;mat.u.pass[1]=before?1.f:0.f;}bind(tessellated(d,{Scene,0,1,1,0,0,0,!(d.doubleSided||d.billboard||camera.noCull),clockwise,0}),mat.u,mat.images,mat.sampling,pose);bool q=centroid&&b.centroidCount;vkCmdDrawIndexed(s.command,q?b.centroidCount:b.count,1,q?b.centroidFirst:b.first,0,0);}
     }
     // Opaque primary-view entities of the prepasses (the world is drawn by the caller).
     template<class F> void opaque_entities(const Camera&camera,F&&draw){
@@ -713,7 +725,7 @@ struct Raster {
         frame=&f;metrics=m;centroid=centroid_lighting(f);reset_arena();prepared.clear();actorLights.clear();
         ++frameIndex;ensure_dummies();fx.shadowsValid=fx.linearValid=fx.motionValid=false;reset_globals();ensure_effects();
         // scene.vert reads the caster push constant statically (selected only by shadow passes): define it for every draw.
-        {const Matrix identity{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};vkCmdPushConstants(s.command,pipelineLayout,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(Matrix),identity.data());}
+        {const Matrix identity{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};vkCmdPushConstants(s.command,pipelineLayout,casterStages,0,sizeof(Matrix),identity.data());}
         // The primary view (effects owner): first full-window background world view that is not alpha-blended.
         primary=nullptr;if(f.world)for(auto&c:f.cameras){Rect v=c.viewport;if(c.foreground||c.portalTarget||!c.drawWorld||(!c.perDrawOpacity&&c.alpha<1))continue;if(v.width<=0||v.height<=0||(v.x<=0&&v.y<=0&&v.x+v.width>=m.width&&v.y+v.height>=m.height)){primary=&c;break;}}
         selectedLight=material_selected_light(f);
