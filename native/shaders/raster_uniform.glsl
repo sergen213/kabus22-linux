@@ -19,6 +19,7 @@ layout(set=0,binding=0,std140) uniform Uniform {
     vec4 dataPass; // x pass (0 scene, 1 shadow caster, 2 G-buffer; effect passes: effect mode), y frame seed, zw texel size.
     vec4 dataCamera; // xyz camera forward, w near plane.
     vec4 dataRange; // x far plane, yz fog start/end, w effect parameter.
+    mat4 dataPreviousModel; // Motion-vector pass: the entity's previous-frame model transform.
 } u;
 #define k22ShadowMaps (u.dataEffects.x!=0)
 #define k22RtSignals int(u.dataEffects.y)

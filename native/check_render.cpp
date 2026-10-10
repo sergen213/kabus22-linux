@@ -1772,6 +1772,42 @@ void rt_reflection_checks(std::span<const std::byte> mix,std::span<const std::by
     for(unsigned i=0;i<3;++i)if(std::abs(fresh[i]-retained[i])>4)
         throw std::runtime_error("Hardware reflection sampled stale pre-warp descriptors instead of current display texture");
 }
+
+// A moving, vertex-animated actor under a following camera with the full temporal stack (TAA, and RT shadows/GI/
+// rough reflections with the denoiser) must not leave a trail: the frame reached through motion is compared with the
+// same final frame converged with everything held still. K22_CAPTURE_DIR keeps the captures for inspection.
+void temporal_ghosting_checks(bool rayTracing) {
+    using namespace k22;
+    TempDirectory captures;
+    auto checker=[](std::array<std::uint8_t,3>a,std::array<std::uint8_t,3>b){auto image=std::make_shared<Image>();image->width=image->height=8;for(unsigned i=0;i<64;++i){auto&c=(i%8+i/8)%2?a:b;image->rgba.insert(image->rgba.end(),{c[0],c[1],c[2],255});}return image;};
+    auto plane=[](Model&m,float x,float half,float repeat,std::shared_ptr<const Image>image){m.formatVersion=4;m.vertices={{{x,-half,-half},{-1,0,0},{0,0},{}},{{x,half,-half},{-1,0,0},{repeat,0},{}},{{x,half,half},{-1,0,0},{repeat,repeat},{}},{{x,-half,half},{-1,0,0},{0,repeat},{}}};m.triangles={{{0,1,2},0,0},{{0,2,3},0,0}};m.materials.resize(1);m.materials[0].texture=std::move(image);};
+    World backdrop;Model receiver,actor;
+    plane(backdrop.mesh,40,60,24,checker({40,60,160},{200,180,60}));backdrop.mesh.formatVersion=6;backdrop.mesh.materials[0].flags=3;backdrop.mesh.materials[0].raw.resize(64);
+    plane(receiver,14,7,10,checker({150,150,150},{90,110,90}));plane(actor,9,1.5f,3,checker({230,40,30},{250,250,240}));
+    // Second pose: the upper edge swings sideways like a limb (GPU-interpolated vertex animation).
+    actor.frames.resize(2);for(auto&v:actor.vertices){actor.frames[0].positions.push_back(v.position);auto p=v.position;if(p.z>0)p.y+=1.2f;actor.frames[1].positions.push_back(p);for(auto&f:actor.frames)f.normals.push_back(v.normal);}
+    std::array<DrawInstance,2> actors{};actors[0].model=&receiver;actors[0].objectId=301;actors[1].model=&actor;actors[1].objectId=302;actors[1].nextFrame=1;
+    for(auto&a:actors)a.doubleSided=a.noFog=true;
+    Camera camera;camera.nativeAmbient=-127;camera.widescreen=false;camera.noShadow=true;camera.perDrawOpacity=true;
+    RenderFrame frame;frame.cameras=std::span(&camera,1);frame.world=&backdrop;frame.sunDirection={-1,0,1};frame.instances=actors;
+    RenderOptions options;options.backend=RendererBackend::Vulkan;options.rayTracing=rayTracing;options.pbr=true;
+    options.width=320;options.height=180;options.samples=2;options.vsync=false;options.title="Kabus 22 temporal ghosting consumer";
+    auto&f=options.features;f.taa=f.fxaa=f.bloom=f.ssao=f.fog=true;
+    if(rayTracing){f.shadows=ShadowMode::RayTraced;f.gi=f.roughReflections=f.denoise=true;}
+    Renderer renderer(options);
+    auto pose=[&](int i){actors[1].position.y=-5+.4f*i;camera.position.y=.5f*actors[1].position.y;actors[1].interpolation=float(i%6)/5;};
+    auto shot=[&](const char*name){auto pixels=captured_pixels(renderer,frame,captures.path/name);if(auto*keep=std::getenv("K22_CAPTURE_DIR"))std::filesystem::copy_file(captures.path/name,std::filesystem::path(keep)/(std::string(rayTracing?"rt-":"raster-")+name),std::filesystem::copy_options::overwrite_existing);return pixels;};
+    constexpr int steps=24;for(int i=0;i<steps;++i){pose(i);renderer.draw(frame);}
+    pose(steps);const auto moving=shot("moving.ppm");
+    for(int i=0;i<40;++i)renderer.draw(frame);const auto still=shot("still.ppm");
+    for(int i=0;i<7;++i)renderer.draw(frame);const auto still2=shot("still2.ppm");
+    // Visible difference: any channel off by more than 24.
+    auto ghost=[](const std::vector<std::uint8_t>&a,const std::vector<std::uint8_t>&b){std::size_t n=0;double sum=0;for(std::size_t i=0;i<a.size();i+=3){int d=0;for(int c=0;c<3;++c)d=std::max(d,std::abs(int(a[i+c])-int(b[i+c])));n+=d>24;sum+=d;}return std::pair{n,sum/(a.size()/3)};};
+    const auto [trail,trailMean]=ghost(moving,still);const auto [noise,noiseMean]=ghost(still,still2);
+    std::cout<<(rayTracing?"RT":"Raster")<<" temporal ghosting: moving-vs-still "<<trail<<" px (mean "<<trailMean<<"), still-vs-still "<<noise<<" px (mean "<<noiseMean<<")"<<std::endl;
+    // Camera-only reprojection left 6043 (RT) / 2278 (raster) visibly different pixels of 57600; motion vectors ~800.
+    if(trail>1400||noise>200)throw std::runtime_error("Moving actor left a temporal trail");
+}
 }
 
 // Asset-free Contract D/E policy: presets, CLI extraction, fallback, tangents, tone curve.
@@ -1822,6 +1858,13 @@ void graphics_policy_checks() {
      Camera c;auto vp=camera_matrix(c,16/9.f);auto j=jittered(vp,{.25f,-.5f},1920,1080);Vec3 p{200,30,10};auto a=project_ndc(vp,p),b=project_ndc(j,p);require(std::abs(b.x-a.x-.5f/1920)<1e-5f&&std::abs(b.y-a.y+1.f/1080)<1e-5f&&std::abs(b.z-a.z)<1e-6f,"jitter moves clip XY by whole sub-pixel offsets only");}
     require(temporal_weight(0,.1f)==1&&temporal_weight(3,.1f)==.25f&&temporal_weight(100,.1f)==.1f,"temporal blend ramps 1/(n+1) to its floor");
     require(history_valid(100,103,.95f)&&!history_valid(100,110,.95f)&&!history_valid(100,100,.5f)&&!history_valid(0,100,1),"history rejects disocclusion");
+    {Camera c;auto vp=camera_matrix(c,16/9.f);auto uv=[&](Vec3 p){auto n=project_ndc(vp,p);return Vec2{n.x*.5f+.5f,.5f-n.y*.5f};};
+     const Matrix now=transform({10,1,.5f},{30,0,0},{1,1,1}),before=transform({10,-1,.5f},{0,0,0},{1,1,1});const Vec3 local{0,.5f,.25f};
+     auto still=previous_uv(vp,now,local),moved=previous_uv(vp,before,local),expected=uv(transformed_point(before,local)),current=uv(transformed_point(now,local));
+     require(std::abs(still.x-current.x)<1e-6f&&std::abs(still.y-current.y)<1e-6f&&std::abs(moved.x-expected.x)<1e-6f&&std::abs(moved.y-expected.y)<1e-6f&&std::abs(moved.x-current.x)>.05f,"motion vector reprojects through the previous model transform");
+     require(motion_visible(100,99)&&motion_visible(100,101)&&!motion_visible(120,100)&&!motion_visible(0,100),"motion sample rejected behind the visible surface");
+     auto clipped=variance_clip({5,0,0},{0,0,0},{1,1,1},taaVarianceGamma),inside=variance_clip({.5f,-.5f,1},{0,0,0},{1,1,1},taaVarianceGamma),flat=variance_clip({.3f,.2f,0},{.1f,.1f,.1f},{},signalVarianceGamma);
+     require(std::abs(clipped.x-1.25f)<1e-3f&&clipped.y==0&&inside.x==.5f&&inside.z==1&&std::abs(flat.x-.1f)<1e-3f&&std::abs(flat.y-.1f)<1e-3f,"variance clip pulls stale history onto the neighborhood box");}
     {float sum=0;for(int i=-2;i<=2;++i)sum+=atrous_tap(i);require(std::abs(sum-1)<1e-6f&&atrous_tap(0)==6/16.f,"a-trous B3 kernel normalized");}
     rejects([&]{resolve_graphics("max",{});},"unknown preset accepted");
     require(fallback_backend("vulkan-rt")=="vulkan-raster"&&fallback_backend("vulkan-raster")=="opengl"&&fallback_backend("opengl").empty(),"preset backend degradation chain");
@@ -1891,12 +1934,12 @@ int main(int argc,char** argv) {
     std::cout<<"Renderer material/effect boundary checks passed\n";
     if(argc==3) {
         if(mode=="--vulkan-rt"){
-            gl_checks(bytes(mix),bytes(sunMix),k22::RendererBackend::Vulkan,true);
+            temporal_ghosting_checks(true);gl_checks(bytes(mix),bytes(sunMix),k22::RendererBackend::Vulkan,true);
             rt_checks();rt_reflection_checks(bytes(mix),bytes(sunMix));overlay_key_checks(k22::RendererBackend::Vulkan,true);
             std::cout<<"Actual Vulkan hardware ray-query visibility/animation/alpha/reflection/turbulence consumer checks passed\n";
         }else{
             const auto backend=mode=="--vulkan"?k22::RendererBackend::Vulkan:k22::RendererBackend::OpenGL;
-            gl_checks(bytes(mix),bytes(sunMix),backend);turbulence_checks(backend);overlay_key_checks(backend,false);
+            if(backend==k22::RendererBackend::Vulkan)temporal_ghosting_checks(false);gl_checks(bytes(mix),bytes(sunMix),backend);turbulence_checks(backend);overlay_key_checks(backend,false);
             std::cout<<"Actual "<<(mode=="--vulkan"?"Vulkan raster":"GL")<<" material/effect/opacity/particle/turbulence consumer checks passed\n";
         }
     }

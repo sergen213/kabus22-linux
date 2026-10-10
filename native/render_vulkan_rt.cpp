@@ -212,10 +212,20 @@ Pose& rt_pose(RayTracing& rt,const DrawInstance& d,std::span<const Vertex> expan
     // Original no-animation endpoint fallback aliases the first override, not immutable base.
     if(!m.frameCount&&d.nextPositions.empty()&&d.nextNormals.empty())b=a;
     VkDescriptorSet set=rt.descriptors(rt.poseLayout,false);std::array<VkDescriptorBufferInfo,4> infos{{{m.base.handle,0,VK_WHOLE_SIZE},{a.first.handle,0,VK_WHOLE_SIZE},{b.first.handle,0,VK_WHOLE_SIZE},{record->pose.vertices.handle,0,VK_WHOLE_SIZE}}};std::array<VkWriteDescriptorSet,4> writes{};for(unsigned i=0;i<4;++i){writes[i]={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};writes[i].dstSet=set;writes[i].dstBinding=i;writes[i].descriptorCount=1;writes[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;writes[i].pBufferInfo=&infos[i];}vkUpdateDescriptorSets(rt.s.device,writes.size(),writes.data(),0,nullptr);
-    barrier(rt.s.command,VK_PIPELINE_STAGE_HOST_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_VERTEX_INPUT_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_HOST_WRITE_BIT|VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);
+    // VERTEX_SHADER: the motion-vector pass of the next frame reads this slot's poses as storage (rt_previous_pose).
+    barrier(rt.s.command,VK_PIPELINE_STAGE_HOST_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_VERTEX_INPUT_BIT|VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_HOST_WRITE_BIT|VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);
     vkCmdBindPipeline(rt.s.command,VK_PIPELINE_BIND_POINT_COMPUTE,rt.compute);vkCmdBindDescriptorSets(rt.s.command,VK_PIPELINE_BIND_POINT_COMPUTE,rt.computeLayout,0,1,&set,0,nullptr);struct Push{std::uint32_t count,first,next;float blend;std::uint32_t nextFallback;}push{m.count,a.second,b.second,std::clamp(d.interpolation,0.f,1.f),!m.frameCount?((d.nextPositions.empty()?1u:0u)|(d.nextNormals.empty()?2u:0u)):0u};vkCmdPushConstants(rt.s.command,rt.computeLayout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(push),&push);if(m.count)vkCmdDispatch(rt.s.command,(m.count+63)/64,1,1);
     auto destination=VK_PIPELINE_STAGE_VERTEX_INPUT_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;if(rt.s.rayEnabled)destination|=VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;auto access=VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT|VK_ACCESS_SHADER_READ_BIT;if(rt.s.rayEnabled)access|=VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;barrier(rt.s.command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,destination,VK_ACCESS_SHADER_WRITE_BIT,access);
     record->signature=signature;++record->version;return record->pose;
+}
+// The same actor's pose from the immediately preceding frame (other slot), when it differs from `current`; shared rigid
+// or ambiguous (several poses per actor) records have none.
+Pose* rt_previous_pose(RayTracing& rt,Pose& current){
+    auto& slot=rt.slot();auto found=slot.poseLookup.find(&current);if(found==slot.poseLookup.end())return nullptr;const auto* record=found->second;
+    auto& previous=rt.slots[rt.s.slotIndex^1u];if(!record->actor||previous.epoch!=rt.s.submissions)return nullptr;
+    auto group=previous.poseGroups.find({record->model,record->actor,record->expanded});if(group==previous.poseGroups.end())return nullptr;
+    PoseRecord* match{};for(auto* p:group->second)if(p->epoch==previous.epoch){if(match)return nullptr;match=p;}
+    return match&&!(match->signature==record->signature)?&match->pose:nullptr;
 }
 void rt_scene(RayTracing& rt,std::span<const RayGeometry> scene){
     if(!rt.s.rayEnabled)return;auto& s=rt.s;auto& slot=rt.slot();if(!s.command)throw std::runtime_error("Ray scene requires admitted Vulkan frame");

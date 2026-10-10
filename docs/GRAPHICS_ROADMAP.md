@@ -134,8 +134,13 @@ world camera; depth-based effects apply only to it.
   capture is unchanged. On save 26 the torch and the white poster glow and the mean rises 13.21 -> 13.58.
   The old 0.85/0.08 setting changed only 0.9% of pixels there and was not perceptible. In LDR the
   threshold cannot tell light sources from white paper. TAA (Vulkan): Halton(2,3) jitter, reprojection
-  through the previous view-projection, 3x3 neighborhood clamp, blend 0.1. Consecutive frames of a
-  walking player under the following camera (save 19) show no ghost trail, only slight softening. FXAA
+  through the previous view-projection for the static scene and through per-pixel motion vectors for moving or
+  vertex-animated entities (nearest motion sample of the 3x3 neighborhood unless the scene depth hides it;
+  [RAYTRACING.md](RAYTRACING.md) step 4), history clipped to the neighborhood's YCoCg mean +- 1.25 sigma, blend
+  0.1. Camera-only reprojection smeared the walking player (save 19, walking under the following camera, user
+  feature set with `vulkan-rt`: hair and limbs doubled). With motion vectors the pixels that differ visibly from
+  a TAA/denoise-off capture of the same frame drop from 914 to 273 (walking) and 1723 to 618 (walking while
+  turning), close to the 232 of a standing frame. Moving edges stay slightly softer than without TAA. FXAA
   was chosen over SMAA: single pass, no lookup textures, and MSAA already resolves geometric edges.
 - Upscaling: not implemented (not exposed).
 

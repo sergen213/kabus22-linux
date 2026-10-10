@@ -26,6 +26,7 @@ Honest list of what is not established or not implemented. See [PROGRESS.md](PRO
 - Bloom works in LDR thresholds when PBR/HDR is off, so bright white paper can glow like a light source.
 - Upscaling (FSR-like) is not implemented and not offered.
 - IBL is an ambient-only approximation (no sky cubemaps in the original data).
+- Vulkan motion vectors (TAA, RT denoiser) cover opaque entities of the primary view. Translucent entities, particles and view-space models have none and rely on the TAA history clip; entities without an id use camera reprojection, and actors whose pose cannot be matched to the previous frame (no id, several poses per id) get transform motion only. Moving edges stay slightly softer than with TAA off, and GI (history floor 0.06) still trails a little behind fast-moving casters.
 
 ## Controls
 

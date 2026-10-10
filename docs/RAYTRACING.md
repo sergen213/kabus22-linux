@@ -95,9 +95,20 @@ Screen-space signals of the primary view (`native/render_vulkan_raster.cpp` `rt_
      roughness 0 matches the default inline reflection, roughness 0.35 (test pack, `pbr=1`) is noisy and
      blurred, and `denoise=1` smooths it.
 3. **Denoise** (`denoise=1`): temporal accumulation (reprojection with the previous unjittered
-   view-projection; rejected on >5% view-depth change or normal cosine < 0.9; alpha max(1/(n+1), 0.15
-   shadows/reflections, 0.06 GI)), then three a-trous B3 iterations (strides 1/2/4) with depth/normal edge
-   stopping; mirror-smooth reflections are not blurred.
+   view-projection, or with the per-pixel motion vector where a moving/animated entity is visible; rejected on
+   >5% view-depth change or normal cosine < 0.9; history clipped to the current 3x3 raw signal mean +- 2 sigma
+   so a shadow or bounce does not linger where its caster left; alpha max(1/(n+1), 0.15 shadows/reflections,
+   0.06 GI)), then three a-trous B3 iterations (strides 1/2/4) with depth/normal edge stopping; mirror-smooth
+   reflections are not blurred.
+4. **Motion vectors** (`taa=1`, or `denoise=1` with signals): after the G-buffer, entities whose transform
+   (keyed by entity id, previous frame only) or GPU-deformed pose (the same actor's pose in the other frame
+   slot, `rt_previous_pose`) changed are drawn again (scene pass 3) into an RGBA16F target: previous-minus-current
+   UV, view depth, previous view depth. The world and unmoved entities keep camera reprojection, so nothing is
+   drawn when nothing moves. TAA and the denoiser use it; with both off the pass and its images do not exist.
+   `k22-render-check --vulkan|--vulkan-rt` renders a moving, vertex-animated actor under a following camera
+   with the full temporal stack and compares the frame reached through motion with the same frame held still:
+   visibly different pixels (any channel > 24) of 57600 went from 6043 (RT) / 2278 (raster) with camera-only
+   reprojection to 819 / 790 (remaining: TAA softening of moving edges).
 
 Wall-clock per-frame cost, RX 7900 XTX (RADV, Mesa 26.2.4), Start4 test view 2560x1377 (window-manager
 clamped from 2560x1440), MSAA 4, present mode immediate, (t(600 frames) - t(100 frames)) / 500, best of two.
