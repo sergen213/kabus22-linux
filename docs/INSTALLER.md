@@ -57,11 +57,23 @@ install they carry its settings as defaults).
 
 ## Transactions
 
-Installation builds the complete tree in `<parent>/.kabus22-setup-XXXXXX` and publishes it with a
-non-replacing `renameat2(RENAME_NOREPLACE)`; an existing destination is never adopted or
-overwritten. Shortcuts are published the same way. Any failure or cancellation (SIGINT/SIGTERM)
-removes only what this run created; files changed concurrently are preserved and reported. Sources
-are never written.
+Installation builds the complete tree in `<parent>/.kabus22-setup-XXXXXX`, then publishes it:
+
+- missing destination: one non-replacing `renameat2(RENAME_NOREPLACE)` of the whole tree;
+- empty folder or earlier Kabus22 installation (has `.kabus22-owned`): reinstall. Each top-level entry
+  the new installation owns (`game/`, `versions/`, `current`, `bin`, `lib`, `share`, `kabus22.png`,
+  `.kabus22-owned`, `.kabus22-inventory.json`) is swapped in with `renameat2(RENAME_EXCHANGE)`
+  while holding the updater lock; the old entries are deleted only after everything committed.
+  Every other entry in the folder — saves, `options.k22`, Bonus settings, launcher state, texture
+  packs, which default to this same `${XDG_DATA_HOME:-~/.local/share}/kabus22` folder — is never
+  moved or touched, so a reinstall keeps them. Refused while setup itself runs from that installation;
+- any other non-empty folder (e.g. home or Documents) is refused untouched, foreign data is never
+  deleted. The folder must be owned by you and not group/other-writable.
+
+Existing `kabus22-native.desktop` shortcuts (file or symlink) are replaced the same atomic way; a
+directory in their place is refused. Any failure or cancellation (SIGINT/SIGTERM) restores the old
+installation and shortcuts (or removes only what this run created); files changed concurrently are
+preserved and reported. Sources are never written.
 
 ## Layout
 

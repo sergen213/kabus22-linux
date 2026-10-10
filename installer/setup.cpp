@@ -266,6 +266,35 @@ void renameNew(const fs::path& from, const fs::path& to) {
     require(::syscall(SYS_renameat2, AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), 1U) == 0,
         "Cannot publish without replacing existing files: " + to.string() + ": " + std::strerror(errno));
 }
+void exchange(const fs::path& from, const fs::path& to) {
+    require(::syscall(SYS_renameat2, AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), 2U) == 0, // RENAME_EXCHANGE
+        "Cannot atomically replace " + to.string() + ": " + std::strerror(errno));
+}
+// Existing desktop entries (file or symlink) are replaced; a directory in their place is not.
+bool shortcutPresent(const fs::path& path) {
+    struct stat value{};
+    if (::lstat(path.c_str(), &value) != 0) {
+        require(errno == ENOENT, "Cannot inspect " + path.string() + ": " + std::strerror(errno));
+        return false;
+    }
+    require(!S_ISDIR(value.st_mode), "Refusing to replace a directory with a shortcut: " + path.string());
+    return true;
+}
+// False: root is absent. True: an empty private folder or an earlier Kabus22 installation to replace.
+// Anything else (e.g. home or Documents) is refused untouched; foreign data is never deleted.
+bool replaceable(const fs::path& root) {
+    const auto value = lstatPath(root, true);
+    if (!value.st_mode) return false;
+    require(S_ISDIR(value.st_mode), "Destination exists and is not a folder: " + root.string());
+    require(value.st_uid == geteuid() && !(value.st_mode & (S_IWGRP | S_IWOTH)),
+        "Destination folder must be owned by you and not writable by others: " + root.string());
+    if (fs::is_empty(root)) return true;
+    require(lstatPath(root/".kabus22-owned", true).st_mode && smallFile(root/".kabus22-owned") == marker,
+        "Destination folder is not empty and is not a Kabus22 installation; choose a new or empty folder, "
+        "or an existing Kabus22 installation to replace: " + root.string());
+    require(layout::running_version(root).empty(), "Close the Kabus22 program running from " + root.string() + " before replacing it");
+    return true;
+}
 std::vector<Identity> tree(const fs::path& root) {
     std::vector<Identity> result{{root, lstatPath(root)}};
     for (const auto& entry : fs::recursive_directory_iterator(root)) {
@@ -968,6 +997,87 @@ fs::path previewArtwork(const fs::path& input, const fs::path& extractor, const 
     media::extract(prepared, checkedAbsolute(extractor), selected, destination/"artwork", progress);
     return destination/"artwork"/selected.front().path;
 }
+void publish(const fs::path& staging, const fs::path& input, const std::vector<std::pair<fs::path, fs::path>>& shortcuts, const Progress& progress) {
+    const auto root = checkedAbsolute(input), installation = checkedAbsolute(staging);
+    for (const auto& item : shortcuts) { chain(item.second.parent_path()); shortcutPresent(item.second); }
+    const auto owned = tree(installation);
+    std::vector<Identity> entries; // staged top-level entries; an existing root receives them one by one
+    for (const auto& item : owned) if (item.path.parent_path() == installation) entries.push_back(item);
+    chain(root.parent_path());
+    // Swapping only installation-owned names keeps the root folder and everything else in it
+    // (saves::root() and the launcher's private settings default to this same folder) in place.
+    const bool existing = replaceable(root);
+    const auto rootIdentity = existing ? lstatPath(root) : owned.front().info;
+    std::optional<layout::Lock> updates;
+    if (existing && lstatPath(root/".kabus22-owned", true).st_mode) updates.emplace(root);
+    std::vector<bool> swapped; // per entry: exchanged with an old one (true) or newly added
+    std::vector<std::pair<Identity, fs::path>> published; // shortcut, staged path now holding the displaced one
+    bool rootPublished = false;
+    const auto checkRoot = [&] {
+        chain(root.parent_path());
+        require(same(rootIdentity, lstatPath(root)), "Installation root changed concurrently; refusing its replacement");
+    };
+    try {
+        report(progress, existing ? "Replacing existing installation" : "Publishing native installation");
+        if (existing) for (const auto& entry : entries) {
+            checkRoot();
+            const auto target = root/entry.path.filename();
+            struct stat old{};
+            const bool present = ::lstat(target.c_str(), &old) == 0;
+            if (present) exchange(entry.path, target); else renameNew(entry.path, target);
+            swapped.push_back(present);
+        }
+        else { renameNew(installation, root); rootPublished = true; }
+        checkRoot();
+        for (std::size_t index = 0; index < shortcuts.size(); ++index) {
+            report(progress, "Creating desktop shortcuts", index, shortcuts.size());
+            checkRoot();
+            const auto& [file, target] = shortcuts[index];
+            chain(target.parent_path());
+            const Identity identity{target, lstatPath(file)};
+            const bool displace = shortcutPresent(target);
+            if (displace) exchange(file, target); else renameNew(file, target);
+            published.emplace_back(identity, displace ? file : fs::path{});
+        }
+        checkRoot();
+        // Completion is non-cancellable after atomic publications have committed.
+    } catch (...) {
+        const auto original = std::current_exception();
+        std::string recovery;
+        for (auto it = published.rbegin(); it != published.rend(); ++it) {
+            const auto& [file, displaced] = *it;
+            try {
+                auto folder = directoryFd(file.path.parent_path());
+                struct stat now{};
+                if (::fstatat(folder.value, file.path.filename().c_str(), &now, AT_SYMLINK_NOFOLLOW) == 0) {
+                    if (!same(file.info, now, true)) recovery += "\nChanged shortcut preserved: " + file.path.string();
+                    else if (!displaced.empty()) exchange(displaced, file.path);
+                    else if (::unlinkat(folder.value, file.path.filename().c_str(), 0) != 0)
+                        recovery += "\nCannot remove owned shortcut: " + file.path.string();
+                }
+            } catch (const std::exception& error) { recovery += "\n" + std::string(error.what()); }
+        }
+        for (auto index = swapped.size(); index-- > 0;) {
+            const auto& entry = entries[index];
+            const auto target = root/entry.path.filename();
+            try {
+                struct stat now{};
+                require(::lstat(target.c_str(), &now) == 0 && same(entry.info, now), "Changed entry preserved: " + target.string());
+                if (swapped[index]) exchange(entry.path, target); else renameNew(target, entry.path);
+            } catch (const std::exception& error) { recovery += "\n" + std::string(error.what()); }
+        }
+        if (rootPublished) {
+            try { rollbackOwned(installation, root, owned); }
+            catch (const std::exception& error) { recovery += "\n" + std::string(error.what()); }
+        }
+        if (!recovery.empty()) throw std::runtime_error("Installation did not commit; manual recovery required:" + recovery);
+        std::rethrow_exception(original);
+    }
+    // Only the replaced installation's own entries and displaced shortcuts remain staged.
+    std::error_code ignored;
+    if (existing) fs::remove_all(installation, ignored);
+    for (const auto& item : published) if (!item.second.empty()) ::unlink(item.second.c_str());
+}
 Result install(const Request& request, const Progress& progress) {
     require(geteuid() != 0, "Run installer as your ordinary user, not root/sudo");
     require(int(!request.source.empty()) + int(!request.sourceIso.empty()) + int(!request.sourceSetup.empty()) == 1,
@@ -979,9 +1089,9 @@ Result install(const Request& request, const Progress& progress) {
     require(root != root.root_path() && !within(root, applications) && !within(root, desktop), "Shortcut folders must be outside installation root");
     require(!within(source.path, root) && !within(root, source.path), "Installation directory and source must not contain each other");
     chain(root.parent_path()); chain(applications); chain(desktop);
-    require(!lstatPath(root, true).st_mode, "Destination exists; choose a new folder. Existing games are never adopted or overwritten.");
+    replaceable(root);
     for (const auto& folder : {applications, desktop}) {
-        require(!lstatPath(folder/shortcutName, true).st_mode, "Refusing to overwrite an existing shortcut: " + (folder/shortcutName).string());
+        shortcutPresent(folder/shortcutName);
         enough(writableAncestor(folder), 65536);
     }
     auto files = payload(checkedAbsolute(request.enginePayload), checkedAbsolute(request.launcherPayload), checkedAbsolute(request.updaterPayload));
@@ -1068,60 +1178,18 @@ Result install(const Request& request, const Progress& progress) {
     encodeIcon(logo, installation/"kabus22.png");
     finalizeInstallation(installation, {root, source.path, kindName(source.kind), edition(names),
         {applications/shortcutName, desktop/shortcutName}}, progress);
-    const auto owned = tree(installation);
     Result result{root, root/"game", root/"bin/kabus22-launcher", applications/shortcutName, desktop/shortcutName};
     std::vector<std::unique_ptr<Temporary>> shortcuts;
-    std::vector<Identity> published;
+    std::vector<std::pair<fs::path, fs::path>> staged;
     for (const auto& folder : {applications, desktop}) {
         if (folder == desktop && desktop == applications && !shortcuts.empty()) continue;
         shortcuts.push_back(std::make_unique<Temporary>(folder));
         writeFile(shortcuts.back()->path/shortcutName, desktopEntry(result), 0700);
+        staged.emplace_back(shortcuts.back()->path/shortcutName, folder/shortcutName);
     }
-    bool rootPublished = false;
-    const auto checkRoot = [&] {
-        chain(root.parent_path());
-        require(same(owned.front().info, lstatPath(root)), "Installation root changed concurrently; refusing its replacement");
-    };
-    try {
-        report(progress, "Publishing native installation");
-        chain(root.parent_path());
-        if (patch) patch->verify();
-        if (windows) windows->verify();
-        renameNew(installation, root); rootPublished = true;
-        checkRoot();
-        for (std::size_t index = 0; index < shortcuts.size(); ++index) {
-            report(progress, "Creating desktop shortcuts", index, shortcuts.size());
-            checkRoot();
-            const auto folder = index == 0 ? applications : desktop;
-            chain(folder);
-            const auto file = shortcuts[index]->path/shortcutName;
-            auto identity = lstatPath(file);
-            renameNew(file, folder/shortcutName); published.push_back({folder/shortcutName, identity});
-        }
-        checkRoot();
-        // Completion is non-cancellable after atomic publications have committed.
-    } catch (...) {
-        const auto original = std::current_exception();
-        std::string recovery;
-        for (const auto& file : published) {
-            try {
-                auto folder = directoryFd(file.path.parent_path());
-                struct stat now{};
-                if (::fstatat(folder.value, file.path.filename().c_str(), &now, AT_SYMLINK_NOFOLLOW) == 0) {
-                    if (same(file.info, now, true)) {
-                        if (::unlinkat(folder.value, file.path.filename().c_str(), 0) != 0)
-                            recovery += "\nCannot remove owned shortcut: " + file.path.string();
-                    } else recovery += "\nChanged shortcut preserved: " + file.path.string();
-                }
-            } catch (const std::exception& error) { recovery += "\n" + std::string(error.what()); }
-        }
-        if (rootPublished) {
-            try { rollbackOwned(installation, root, owned); }
-            catch (const std::exception& error) { recovery += "\n" + std::string(error.what()); }
-        }
-        if (!recovery.empty()) throw std::runtime_error("Installation did not commit; manual recovery required:" + recovery);
-        std::rethrow_exception(original);
-    }
+    if (patch) patch->verify();
+    if (windows) windows->verify();
+    publish(installation, root, staged, progress);
     return result;
 }
 int launch(const Result& result) {

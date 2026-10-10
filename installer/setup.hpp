@@ -4,6 +4,7 @@
 #include <functional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace k22::setup {
@@ -53,6 +54,14 @@ Result install(const Request& request, const Progress& progress = {});
 // inventories. Part of install(); exposed for asset-free tests.
 struct Provenance { fs::path root, source; std::string kind, edition; std::vector<fs::path> shortcuts; };
 void finalizeInstallation(const fs::path& installation, const Provenance& provenance, const Progress& progress = {});
+// Commit step of install(), exposed for asset-free tests. Publishes a finalized staged installation at
+// root and each staged desktop entry (staged file, target). A missing root receives the whole tree; an
+// empty folder or earlier Kabus22 installation has its installation-owned top-level entries atomically
+// exchanged, so saves, options and launcher state stored in the same folder stay untouched. Any other
+// non-empty folder, or a directory at a shortcut target, is refused before changes. Existing shortcut
+// files/symlinks are replaced. Failures roll everything back; on success the staged paths are removed.
+void publish(const fs::path& installation, const fs::path& root,
+             const std::vector<std::pair<fs::path, fs::path>>& shortcuts, const Progress& progress = {});
 // Returns the settings launcher PID; no shell, Wine, or Windows execution.
 int launch(const Result& result);
 // Security regression checks; no media extraction or user-directory writes.

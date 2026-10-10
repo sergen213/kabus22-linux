@@ -468,12 +468,12 @@ public:
             "Select the complete original Kabus22 ISO image, original setup.exe, or an installed Windows game folder. Nothing is executed.",
             G_CALLBACK(+[](GtkButton*, gpointer data) { auto* self = static_cast<Installer*>(data); self->choose(self->source_, GTK_FILE_CHOOSER_ACTION_OPEN, true); }));
         destination_ = field(fields_, 1, "_Install directory:", request_.installRoot,
-            "A new directory is required. Browse selects a parent and adds kabus22; edit the path to choose another name.",
+            "A new or empty directory, or an existing Kabus22 installation to replace. Browse selects a parent and adds kabus22; edit the path to choose another name.",
             G_CALLBACK(+[](GtkButton*, gpointer data) { auto* self = static_cast<Installer*>(data); self->choose(self->destination_, GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, false, true); }));
         patch_ = field(fields_, 2, "_Community extras (optional):", request_.optionalPatch,
             "Optional, separately obtained Kabus22Patch directory for its extras. Not required for native original-campaign widescreen; leave empty for original ISO data.",
             G_CALLBACK(+[](GtkButton*, gpointer data) { auto* self = static_cast<Installer*>(data); self->choose(self->patch_, GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, false); }));
-        auto* note = gtk_label_new("Original-campaign widescreen is included natively; no patch folder is needed.\nInstalls for your user only. Existing installations are not overwritten.\nWindows executables are never launched; original ISO artwork is retained without extras.");
+        auto* note = gtk_label_new("Original-campaign widescreen is included natively; no patch folder is needed.\nInstalls for your user only. Reinstalling replaces an earlier Kabus22 installation and its shortcuts; saves and settings are kept.\nWindows executables are never launched; original ISO artwork is retained without extras.");
         gtk_label_set_line_wrap(GTK_LABEL(note), TRUE);
         gtk_box_pack_start(GTK_BOX(content), note, FALSE, FALSE, 0);
         progress_ = gtk_progress_bar_new();

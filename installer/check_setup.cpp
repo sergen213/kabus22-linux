@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <set>
 #include <cstdlib>
 #include <sys/stat.h>
 
@@ -109,6 +110,61 @@ void fixtures(const fs::path& base) {
     fs::remove(root/".kabus22-owned");
     require(fails([&] { verify(root); }), "Verify must refuse a root without the ownership marker");
 }
+
+// Reinstall commit: empty and owned folders are replaced keeping user files, shortcuts are replaced,
+// failures roll back, foreign folders and directory shortcuts are refused untouched.
+void reinstall(const fs::path& base, const std::vector<std::pair<std::string, std::string>>& game) {
+    const auto root = base/"re/kabus22", apps = base/"re/apps/kabus22-native.desktop", desk = base/"re/desktop/kabus22-native.desktop";
+    const auto stage = [&](const fs::path& at, const std::string& extra) {
+        for (const auto& [name, data] : game) put(at/"game"/name, data);
+        put(at/"game"/extra, extra);
+        put(at/"bin/kabus22", "engine"); put(at/"bin/kabus22-launcher", "launcher");
+        put(at/"lib/libdemo.so.1", "library"); put(at/"share/licenses/kabus22/notice", "notice"); put(at/"kabus22.png", "icon");
+        finalizeInstallation(at, {root, base, "iso", "merscom", {apps, desk}});
+        return get(at/".kabus22-inventory.json");
+    };
+    const auto names = [](const fs::path& folder) {
+        std::set<std::string> result;
+        for (const auto& entry : fs::directory_iterator(folder)) result.insert(entry.path().filename().string());
+        return result;
+    };
+    fs::create_directories(root);
+    const auto first = stage(base/"s1", "first-only.k22");
+    const auto owned = names(base/"s1");
+    publish(base/"s1", root, {});
+    require(verify(root).ok() && get(root/".kabus22-inventory.json") == first && !fs::exists(base/"s1"), "Empty folder must receive the installation");
+
+    put(root/"options.k22", "my options"); put(root/"_data/saves/kayit0.sav", "my save"); put(root/".launcher.lock", "");
+    put(apps, "old entry"); fs::create_directories(desk.parent_path()); fs::create_symlink("/nonexistent", desk);
+    put(base/"sc/a", "new entry"); put(base/"sc/b", "new entry");
+    const auto userKept = [&] {
+        return get(root/"options.k22") == "my options" && get(root/"_data/saves/kayit0.sav") == "my save" && fs::exists(root/".launcher.lock");
+    };
+    const auto second = stage(base/"s2", "second-only.k22");
+    require(fails([&] { publish(base/"s2", root, {{base/"sc/a", apps}, {base/"sc/missing", desk}}); }), "Missing staged shortcut must fail");
+    require(get(root/".kabus22-inventory.json") == first && fs::exists(root/"game/first-only.k22") && verify(root).ok() && userKept() &&
+        get(apps) == "old entry" && fs::is_symlink(desk) && get(base/"sc/a") == "new entry" && fs::exists(base/"s2/game/second-only.k22"),
+        "Failed reinstall must restore the old installation, shortcuts and staging");
+
+    publish(base/"s2", root, {{base/"sc/a", apps}, {base/"sc/b", desk}});
+    auto expected = owned;
+    expected.insert({"options.k22", "_data", ".launcher.lock"});
+    require(verify(root).ok() && get(root/".kabus22-inventory.json") == second && !fs::exists(root/"game/first-only.k22") &&
+        fs::exists(root/"game/second-only.k22") && names(root) == expected && userKept(),
+        "Reinstall must leave exactly the new installation plus user files");
+    require(get(apps) == "new entry" && !fs::is_symlink(desk) && get(desk) == "new entry" &&
+        !fs::exists(base/"s2") && !fs::exists(base/"sc/a") && !fs::exists(base/"sc/b"), "Reinstall must replace shortcuts and remove staging");
+
+    put(base/"foreign/notes.txt", "mine");
+    stage(base/"s3", "third.k22");
+    require(fails([&] { publish(base/"s3", base/"foreign", {}); }) && names(base/"foreign") == std::set<std::string>{"notes.txt"} &&
+        get(base/"foreign/notes.txt") == "mine" && fs::exists(base/"s3/.kabus22-owned"), "Foreign non-empty folder must be refused untouched");
+    put(base/"sc/c", "new entry"); fs::create_directories(base/"dirapps/kabus22-native.desktop");
+    require(fails([&] { publish(base/"s3", base/"fresh", {{base/"sc/c", base/"dirapps/kabus22-native.desktop"}}); }) &&
+        !fs::exists(base/"fresh") && fs::exists(base/"s3/.kabus22-owned") && get(base/"sc/c") == "new entry", "Directory shortcut must be refused before changes");
+    publish(base/"s3", base/"fresh", {});
+    require(verify(base/"fresh").ok() && !fs::exists(base/"s3"), "Missing root must receive the installation");
+}
 }
 
 int main() {
@@ -119,6 +175,7 @@ int main() {
         const fs::path base = pattern;
         struct Cleanup { fs::path path; ~Cleanup() { std::error_code error; fs::remove_all(path, error); } } cleanup{base};
         fixtures(base);
+        reinstall(base, {{"K22.wrs", "WRS2 campaign"}, {"Help/Help_Files/fon_LOGO.jpg", "logo"}});
         std::cout << "Installer checks passed.\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
