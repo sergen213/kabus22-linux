@@ -262,6 +262,7 @@ The original scripts never call `game_save`/`game_load`. Saves are written by ha
 **Native:**
 - `file_open_read`/`file_open_write`, `file_asc_*`, `file_var_*` and `file_str_*` are implemented in `Engine::service_builtin`. Paths are confined to `saveRoot`, which is `$XDG_DATA_HOME/kabus22` or `~/.local/share/kabus22` (set in the `Engine::Engine` constructor).
 - The `game_save`/`game_load` names are listed in `native_calls.inc`, but `engine.cpp` contains no implementation. The original scripts do not use them. **CONFIRMED** (grep)
+- Native addition, not in the original: quicksave/quickload (F5/F9) and the developer console ([CONSOLE.md](CONSOLE.md)). A quicksave runs the original `SLG_LevelKaydet`/`YD_OyunuKaydet`/`SLG_Kaydet` at any gameplay moment and adds the player position to the slot's `.meta` sidecar; a quickload goes through `Yukleme_Kontrol`. Save-point and imported slots carry no position and still respawn at `LV_*_G00`. **EXERCISED** for all three characters (`quicksave1_roundtrip`, `quicksave2_restart`, `quicksave3_characters`, `console_commands`).
 
 **Verification:**
 - The original save menu, writer and reader ran through the SourceAPI consumer in the native port: `campaign-save-load-result.json`, exit 0 (`CONTRACT.txt:1682-1685`). **CONFIRMED**

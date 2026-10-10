@@ -1,0 +1,21 @@
+# requires: saves
+# continues: quicksave1_roundtrip
+# After a restart the quicksave (kayit27.sav) is an ordinary entry of the original load menu; loading it there restores the saved
+# spot (-251.6, 16.8) from the sidecar. Loading a script save point afterwards (console "load 10") keeps the original G00 spawn.
+realtime off
+load-save 27
+wait until LY_AktifLevelID == 37 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+frames 2
+assert player.x > -252.6 && player.x < -250.6
+assert player.y > 15.8 && player.y < 17.8
+assert Aktif_SaveNo == 28
+assert SLG_KayitSayisi == 28
+# The native console runs the same quickload for an explicit slot.
+press `
+type load 10
+press Return
+press `
+wait until LY_AktifLevelID == 0 timeout 60
+wait until LY_AktifLevelID == 37 && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
+frames 2
+assert player.x < -262.6 || player.x > -240.6 || player.y < 5.8 || player.y > 27.8

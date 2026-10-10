@@ -1034,6 +1034,7 @@ void Engine::tick(Runtime& runtime,const Input& in){ensure_font_palette(runtime.
  if(nativeDisplay_&&(displayWidth_!=currentWidth_||displayHeight_!=currentHeight_))prepare_display();
  update_input(runtime);make_frame(state.profile!=SemanticProfile::BonusA7);if(renderer)for(auto& c:frame_.cameras)if(c.portalId&&!c.portalTarget)if(auto surface=Renderer::portal_surface(frame_,c,renderer->metrics())){set_field(c.sourceId,"portal_x",surface->position.x);set_field(c.sourceId,"portal_y",surface->position.y);set_field(c.sourceId,"portal_z",surface->position.z);set_field(c.sourceId,"pnormal_x",surface->normal.x);set_field(c.sourceId,"pnormal_y",surface->normal.y);set_field(c.sourceId,"pnormal_z",surface->normal.z);}
  if(state.profile==SemanticProfile::CampaignA6)update_ui(runtime);runtime.tick(timeRaw,global("freeze_mode").raw());if(!viewsPrepared_){prepare(runtime);viewsPrepared_=true;}
+ console_tick(runtime); // native console cheats/quickload position; no-op unless used (native/console.cpp)
  if(global("freeze_mode").raw()<1&&global("debug_mode").raw()<1){const std::size_t particleCount=activeParticles.size();for(std::size_t i=0;i<particleCount&&i<activeParticles.size();++i){auto pd=activeParticles[i];auto* o=state.get(pd.object);if(!o||!o->alive)continue;
  auto integrate=[&](std::string_view p,std::string_view velocity){auto& a=o->field(p).value;auto b=o->field(velocity).value.raw();a=Value::from_raw(std::bit_cast<std::int32_t>(a.bits+std::uint32_t(mul(b,timeRaw))));};
  if(pd.legacy){set_global("my_age",pd.first?Value{}:Value::from_raw(std::bit_cast<std::int32_t>(global("total_ticks").bits-std::uint32_t(pd.birthTick))));set_vector(global_vector("my_pos"),position(pd.object));set_vector(global_vector("my_speed"),{float(field(pd.object,"vel_x")),float(field(pd.object,"vel_y")),float(field(pd.object,"vel_z"))});set_vector(global_vector("my_color"),{float(field(pd.object,"blue")),float(field(pd.object,"green")),float(field(pd.object,"red"))});for(auto [g,f]:{std::pair{"my_size","size"},std::pair{"my_alpha","alpha"},std::pair{"my_flare","flare"},std::pair{"my_transparent","transparent"},std::pair{"my_bright","bright"}})set_global(g,Value::from_double(field(pd.object,f)));set_global("my_map",o->field("bmap").value);set_global("my_action",o->field("function").value);
@@ -1047,6 +1048,7 @@ void Engine::tick(Runtime& runtime,const Input& in){ensure_font_palette(runtime.
  if(state.profile==SemanticProfile::CampaignA6){physics.step(runtime);update_first_person();}
  media.master_volume(number("sound_vol"),number("midi_vol"));media.update();auto camera=global("camera");if(camera.kind==Value::Kind::Object)media.listener(position(camera.bits),field(camera.bits,"pan"));make_frame();
  if(state.profile==SemanticProfile::BonusA7)update_ui(runtime);
+ console_overlay();
  if(state.profile==SemanticProfile::BonusA7&&pendingExit_){pendingExit_=false;quit=true;}
 }
 void Engine::finish_frame(Runtime& runtime){if(state.profile==SemanticProfile::BonusA7)physics.step(runtime);}
@@ -1364,7 +1366,7 @@ std::optional<Value> Engine::service_builtin(Runtime& runtime,ProcessContext&,st
   count(1);auto relative=svc_relative(text(0));auto path=svc_private(saveRoot,relative);FileData data;
   // Save slots/index: rotate the previous file into backups/, then replace atomically at file_close (no truncating pre-flush).
   if(name=="file_open_write"){data.writable=true;data.output=path;if(saves::rotated(relative.filename().string()))saves::backup(saveRoot,relative);else svc_flush(data);}
-  else if(std::filesystem::exists(path)){if(saves::slot_number(relative.filename().string())>=0)saves::migrate_meta(path,{saves::MetaFormat,K22_VERSION,"","","",""},std::cerr);data.bytes=svc_read_file(path);}
+  else if(std::filesystem::exists(path)){if(saves::slot_number(relative.filename().string())>=0){saves::migrate_meta(path,{saves::MetaFormat,K22_VERSION,"","","","",""},std::cerr);read_saved_position(path);}data.bytes=svc_read_file(path);}
   else if(assets.contains(relative.generic_string()))data.bytes=assets.read(relative.generic_string());
   else if(relative.parent_path()=="_data/saves"&&assets.contains(relative.filename().string()))data.bytes=assets.read(relative.filename().string());
   else return Value{};
@@ -1375,7 +1377,7 @@ std::optional<Value> Engine::service_builtin(Runtime& runtime,ProcessContext&,st
   // GA_AyarlariKaydet writes the in-memory native tier; persist the user's authored GA_Cozunurluk instead.
   if(data.writable&&!data.bytes.empty()&&core_equal(data.output.filename().string(),"options.k22")&&display_admitted())data.bytes[0]=authoredResolution_;
   svc_flush(data);
-  if(data.writable&&saves::slot_number(data.output.filename().string())>=0){const auto& entry=runtime.compiler_settings().entry;if(!saveScriptKnown_){if(assets.contains(entry))saveScript_=saves::fnv1a64(assets.read(entry));saveScriptKnown_=true;}saves::write_meta(data.output,{saves::MetaFormat,K22_VERSION,saves::now_utc(),entry,saveScript_,"native"});}
+  if(data.writable&&saves::slot_number(data.output.filename().string())>=0){const auto& entry=runtime.compiler_settings().entry;if(!saveScriptKnown_){if(assets.contains(entry))saveScript_=saves::fnv1a64(assets.read(entry));saveScriptKnown_=true;}saves::write_meta(data.output,{saves::MetaFormat,K22_VERSION,saves::now_utc(),entry,saveScript_,"native",quickSaving?saved_position():""});}
   files.erase(std::uint32_t(integer(0)));return Value{};}
  if(name=="file_asc_read"){count(1);auto& data=file();if(data.writable)throw std::runtime_error("file handle is write-only");if(data.cursor==data.bytes.size())return Value::from_int(-1);return Value::from_int(data.bytes[data.cursor++]);}
  if(name=="file_asc_write"){count(2);auto& data=file();auto byte=std::uint8_t(raw(1)>>10);svc_append(data,std::string_view(reinterpret_cast<const char*>(&byte),1));return Value::from_int(byte);}

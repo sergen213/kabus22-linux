@@ -1,0 +1,125 @@
+# requires: saves
+# Native developer console (docs/CONSOLE.md): every command typed through the real toggle key, SDL text input and Return.
+# Demir, kizic2 (level 37), from original kayit10.sav. Command output goes to stderr ("kabus22: console] ...").
+realtime off
+load-save 10
+wait until LY_AktifLevelID == 37 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+wait until oyun_ilk_basladi == 0 timeout 600
+# F10 is the second toggle (keyboards without a reachable ` key, e.g. Turkish Q).
+press F10
+type help
+press Return
+capture console_help
+type help give
+press Return
+# god: damage (ENERJI = SKILL1) is undone every frame; off again, it stays.
+type god
+press Return
+type set player.skill1 30
+press Return
+frames 2
+assert player.skill1 == 100 && oyn_yaralanma == 100
+type god
+press Return
+type set player.skill1 60
+press Return
+frames 2
+assert player.skill1 < 100
+type give health
+press Return
+frames 1
+assert player.skill1 == 100 && oyn_yaralanma == 100
+# give ammo/weapons through the original inventory state (silah.wdl).
+set S_Kursun_Sayisi[1] 0
+store weapons SilahSayisi
+store reserve Kursun_Sayisi[1]
+type give ammo
+press Return
+assert S_Kursun_Sayisi[1] == Silah_Kapasite[1]
+assert Kursun_Sayisi[1] > @reserve
+type give weapons
+press Return
+assert SilahSayisi > @weapons
+type give all
+press Return
+# get/set: generic WDL globals, array elements, object fields.
+type set OyunZorluk 1
+press Return
+assert OyunZorluk == 1
+type set OyunZorluk 0
+press Return
+type get Silahlar[0]
+press Return
+type get player.pan
+press Return
+type get nosuchvar
+press Return
+type timescale 0.5
+press Return
+assert time_factor == 0.5
+type timescale 1
+press Return
+assert time_factor == 1
+# noclip: player PASSABLE (the A6 mover skips collision for its own PASSABLE entity); gravity keeps it on the floor.
+# Without it the west wall stops the same walk at x -448 (the walk-to times out).
+type noclip
+press Return
+# Escape closes the console without reaching the scripts (KEY_ESC would open the in-game Smartmenu, freeze_mode 1).
+press Escape
+frames 10
+assert freeze_mode == 0
+walk-to -260 25 12 timeout 900
+walk-to -420 25 12 timeout 1200
+walk-to -455 -48 12 timeout 1200
+walk-to -600 -48 12 timeout 600
+assert player.passable == 1
+assert player.x < -560
+assert player.z > -400 && player.z < -390
+walk-to -455 -48 12 timeout 600
+press `
+type noclip
+press Return
+assert player.passable == 0
+# Let the walk's momentum die out first (the console blocks input, the player script keeps its speed for a few frames).
+frames 60
+type tp -300 25 -396.969 90
+press Return
+frames 1
+assert player.x > -301 && player.x < -299 && player.y > 24 && player.y < 26
+type pos
+press Return
+type fps
+press Return
+type fps
+press Return
+type levels
+press Return
+type clear
+press Return
+type save
+press Return
+assert Aktif_SaveNo == 28
+store sx player.x
+store sy player.y
+# level: the original door transition (LY_HedefLevel) to Kizic (36), then quickload back to the saved spot in kizic2.
+type fps
+press Return
+type level kizic
+press Return
+press `
+wait until LY_AktifLevelID == 36 && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
+assert $level == "kizic.wmb"
+press F9
+wait until LY_AktifLevelID == 37 && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
+frames 2
+assert player.x > @sx - 1 && player.x < @sx + 1 && player.y > @sy - 1 && player.y < @sy + 1
+# FPS counter on, "Game loaded" toast (rendered runs only; headless reports SKIP).
+capture quickload_toast
+# kill: the original death and game over.
+press `
+type kill
+press Return
+wait until game_over_start != 0 timeout 300
+type quit
+down Return
+expect-exit timeout 30

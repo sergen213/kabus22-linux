@@ -268,6 +268,7 @@
 !/native/check_modern_box.hpp
 !/native/check_physics.cpp
 !/native/check_render.cpp
+!/native/console.cpp
 !/native/embed_spirv.py
 !/native/engine.cpp
 !/native/engine.hpp
@@ -576,6 +577,7 @@
 !/docs/PATCH_BINARY_DIFF.md
 !/docs/PROGRESS.md
 !/docs/RAYTRACING.md
+!/docs/CONSOLE.md
 !/docs/RELEASE_PROCESS.md
 !/docs/REVERSE_ENGINEERING.md
 !/docs/TEXTURE_RESTORATION.md

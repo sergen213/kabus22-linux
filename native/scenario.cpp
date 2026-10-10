@@ -19,7 +19,7 @@ std::vector<std::string> words(std::string_view line){std::vector<std::string> o
 std::string join(const std::vector<std::string>& w,std::size_t from,std::size_t to){std::string out;for(auto i=from;i<to;++i){if(!out.empty())out+=' ';out+=w[i];}return out;}
 long number(const std::string& text,int line){long n=0;auto [end,error]=std::from_chars(text.data(),text.data()+text.size(),n);if(error!=std::errc{}||end!=text.data()+text.size())throw std::runtime_error("scenario line "+std::to_string(line)+": expected integer, got '"+text+"'");return n;}
 int scancode(const std::string& name,int line){std::string sdl=name;for(auto& c:sdl)if(c=='_')c=' ';auto code=SDL_GetScancodeFromName(sdl.c_str());if(code==SDL_SCANCODE_UNKNOWN)throw std::runtime_error("scenario line "+std::to_string(line)+": unknown SDL scancode name '"+name+"'");return code;}
-enum class Op {Frames,Key,Mouse,MouseButton,JoyButton,JoyAxis,PressUntil,Wait,Assert,Store,Set,Find,List,Capture,Print,Realtime,WalkTo,TurnTo,ExpectExit};
+enum class Op {Frames,Key,Mouse,MouseButton,JoyButton,JoyAxis,PressUntil,Wait,Assert,Store,Set,Find,List,Capture,Print,Realtime,WalkTo,TurnTo,ExpectExit,Type};
 struct Step {Op op;int line=0;std::string source,name,condition;int key=0,index=0;long count=0;float x=0,y=0;bool down=false;float radius=0;std::vector<float> path;};
 struct Val {bool text=false;double number=0;std::string string;};
 // WMB placement and ent_create both store the action in ACTION1 (engine.cpp load_level/create_entity).
@@ -112,6 +112,7 @@ std::vector<float> plan(Engine& e,ObjectId player,Vec3 from,Vec3 goal,float radi
 }
 struct Scenario::Impl {
  std::filesystem::path file,output;std::vector<Step> steps;std::size_t pc=0;long progress=0;bool aborted=false,realtime=true,livePad=false;std::uint32_t seed=0;
+ std::string text; // "type": SDL text input delivered with the next applied frame
  double best=0;long lastImprove=0;int escape=0,escapes=0,replans=0;std::size_t leg=0; // walk-to/route progress
  int passed=0,failed=0,skipped=0;std::ostringstream log;std::map<std::string,Val> stored;
  std::bitset<SDL_NUM_SCANCODES> keys,priorKeys;std::bitset<8> mouse,priorMouse;float mouseX=0,mouseY=0,priorX=0,priorY=0;
@@ -159,6 +160,8 @@ struct Scenario::Impl {
    s.op=Op::WalkTo;s.radius=std::stof(w[1]);for(std::size_t i=2;i<w.size();++i)s.path.push_back(std::stof(w[i]));}
   else if(c=="capture"){need(2);s.op=Op::Capture;s.name=w[1];if(s.name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.")!=std::string::npos||s.name.front()=='.')throw std::runtime_error("scenario line "+std::to_string(line)+": capture name must be a plain file stem");}
   else if(c=="print"){need(2);s.op=Op::Print;s.condition=join(w,1,w.size());}
+  // type TEXT: SDL text input (Input::text) for the next frame, e.g. a native console command line before "press Return".
+  else if(c=="type"){need(2);s.op=Op::Type;s.name=join(w,1,w.size());}
   // A leading realtime (before any step) also covers script bootstrap (main.cpp media clock).
   else if(c=="realtime"){need(2);s.op=Op::Realtime;s.down=w[1]=="on";if(w[1]!="on"&&w[1]!="off")throw std::runtime_error("scenario line "+std::to_string(line)+": realtime on|off");if(steps.empty()){realtime=s.down;return;}}
   // seed N: applies before the scripts start, wherever it appears (main.cpp).
@@ -177,7 +180,7 @@ struct Scenario::Impl {
  void apply(Input& in){
   in.keys=keys;in.pressed=keys&~priorKeys;in.released=priorKeys&~keys;priorKeys=keys;
   in.mouseButtons=mouse;in.mousePressed=mouse&~priorMouse;in.mouseReleased=priorMouse&~mouse;priorMouse=mouse;
-  in.mouseX=mouseX;in.mouseY=mouseY;in.mouseDX=mouseX-priorX;in.mouseDY=mouseY-priorY;priorX=mouseX;priorY=mouseY;in.wheelX=in.wheelY=0;in.text.clear();
+  in.mouseX=mouseX;in.mouseY=mouseY;in.mouseDX=mouseX-priorX;in.mouseDY=mouseY-priorY;priorX=mouseX;priorY=mouseY;in.wheelX=in.wheelY=0;in.text=std::move(text);text.clear();
   if(livePad)return;
   in.controllerButtons.reset();in.controllerPressed.reset();in.controllerReleased.reset();in.controllerAxes.fill(0);
   for(int j=0;j<2;++j){in.joystickConnected[j]=joyUsed[j];in.joystickButtons[j]=joy[j];in.joystickPressed[j]=joy[j]&~priorJoy[j];in.joystickReleased[j]=priorJoy[j]&~joy[j];priorJoy[j]=joy[j];in.joystickAxes[j]=axes[j];}
@@ -204,6 +207,7 @@ bool Scenario::step(Engine& engine,Runtime& runtime,Renderer* renderer,Input& in
    case Op::Key:s.keys.set(std::size_t(step.key),step.down);s.next();break;
    case Op::Mouse:s.mouseX=step.x;s.mouseY=step.y;s.next();break;
    case Op::MouseButton:s.mouse.set(std::size_t(step.key),step.down);s.next();break;
+   case Op::Type:s.text+=step.name;s.next();break;
    case Op::JoyButton:s.joyUsed[step.index]=true;s.joy[step.index].set(std::size_t(step.key),step.down);s.next();break;
    case Op::JoyAxis:s.joyUsed[step.index]=true;s.axes[step.index][step.key]=step.x;s.next();break;
    case Op::Realtime:s.realtime=step.down;s.next();break;

@@ -20,12 +20,14 @@ bool rotated(std::string_view filename);    // slot saves and the kysd.sav index
 void backup(const fs::path& root,const fs::path& relative,int keep=3);
 constexpr int MetaFormat=1;
 // Sidecar kayitN.sav.meta; the 2030-byte original payload is never extended. Format 0 = no sidecar (original save).
-struct Meta {int format=MetaFormat;std::string engine,written,entry,script,origin;};
+// position: native quicksave only (docs/CONSOLE.md), "LEVELID X Y Z PAN"; empty for script save points (original G00 spawn).
+struct Meta {int format=MetaFormat;std::string engine,written,entry,script,origin,position;};
 std::optional<Meta> parse_meta(std::string_view);
 std::string format_meta(const Meta&);
 std::string now_utc();
 std::string fnv1a64(std::span<const std::uint8_t>);
 void write_meta(const fs::path& save,const Meta&);
+std::optional<Meta> read_meta(const fs::path& save); // nullopt when the sidecar is missing or malformed
 // Version-keyed migration hook run before a slot is read; false if the sidecar is newer/malformed (left untouched).
 bool migrate_meta(const fs::path& save,const Meta& current,std::ostream& warnings);
 // "" when the original-format file is acceptable, otherwise the refusal reason.

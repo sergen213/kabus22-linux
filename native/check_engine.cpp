@@ -1803,6 +1803,21 @@ void input_saves_contracts(){
         const std::array closing{Argument{handle,{}}};engine.builtin(runtime,context,"file_close",closing);
         meta=saves::parse_meta(text_of(root/"kayit5.sav.meta"));assert(meta&&meta->format==1&&meta->origin=="legacy"&&meta->entry.empty()&&meta->script.empty());
         assert(!std::filesystem::exists(root/"backups/kayit5.sav.1")&&file_bytes(root/"kayit5.sav")==slot_payload(9)); // Reading never rewrites the payload.
+        // Native quicksave (docs/CONSOLE.md): only a slot written while quickSaving carries the player position; reading it arms the
+        // restore, which applies once LevelYukle has cleared and set level_yuklendi_ok again for that level, until the player has control.
+        assert(text_of(root/"kayit3.sav.meta").find("position=")==std::string::npos);
+        engine.set_global("LY_AktifLevelID",Value::from_int(37));engine.set_position(player,{10.5f,-20,3});engine.set_field(player,"pan",90);
+        write_bytes(root/"kayit4.sav",slot_payload(1));engine.quickSaving=true;save("kayit4.sav",2);engine.quickSaving=false;
+        meta=saves::parse_meta(text_of(root/"kayit4.sav.meta"));assert(meta&&meta->position=="37 10.5 -20 3 90"&&meta->origin=="native");
+        assert(saves::parse_meta(saves::format_meta(*meta))->position==meta->position);
+        auto load=[&](std::string_view name){const std::array open{Argument{engine.new_string(std::string(name)),{}}};auto h=engine.builtin(runtime,context,"file_open_read",open);const std::array closing{Argument{h,{}}};engine.builtin(runtime,context,"file_close",closing);};
+        load("kayit4.sav");assert(engine.positionRestore&&engine.positionRestore->level==37&&engine.positionRestore->position.x==10.5f&&engine.positionRestore->pan==90);
+        load("kayit5.sav");assert(!engine.positionRestore); // a script save point keeps the original G00 spawn
+        load("kayit4.sav");engine.set_position(player,{0,0,0});engine.set_global("oyuncu_pasif",Value::from_int(1));
+        engine.tick(runtime,frame);engine.finish_frame(runtime);assert(engine.positionRestore&&engine.positionRestore->started); // level_yuklendi_ok 0: the load has begun
+        engine.set_global("level_yuklendi_ok",Value::from_int(1));engine.tick(runtime,frame);engine.finish_frame(runtime);
+        close_vector(engine.position(player),{10.5f,-20,3},1e-4);assert(engine.positionRestore); // re-applied while the player is passive
+        engine.set_global("oyuncu_pasif",Value{});engine.tick(runtime,frame);engine.finish_frame(runtime);assert(!engine.positionRestore&&engine.field(player,"pan")==90);
     }
     std::ostringstream migration;const auto future="kabus22-save-meta 2\nengine=9.9.9\n";write_bytes(root/"kayit6.sav.meta",{future,future+std::strlen(future)});
     assert(!saves::migrate_meta(root/"kayit6.sav",{1,"x"},migration)&&text_of(root/"kayit6.sav.meta")==future&&migration.str().find("newer")!=std::string::npos);

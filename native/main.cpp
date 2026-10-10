@@ -59,7 +59,7 @@ int import_saves(int argc,char** argv){
  // Patched K22Widescreen scripts read slots from _data/saves; the original K22.wdl reads them beside the game.
  bool patched=false;if(!data.empty()){k22::Assets probe(data,false);patched=probe.contains("K22Widescreen.wrs");}
  const auto root=k22::saves::root();const auto slots=patched?std::filesystem::path("_data/saves"):std::filesystem::path{};
- auto result=k22::saves::import_windows(source,root,slots,{k22::saves::MetaFormat,K22_VERSION,k22::saves::now_utc(),"","","import:"+std::filesystem::absolute(source).lexically_normal().string()});
+ auto result=k22::saves::import_windows(source,root,slots,{k22::saves::MetaFormat,K22_VERSION,k22::saves::now_utc(),"","","import:"+std::filesystem::absolute(source).lexically_normal().string(),""});
  for(const auto& name:result.backedUp)std::cout<<"backup "<<(root/"backups"/name).string()<<".1\n";
  for(const auto& name:result.imported)std::cout<<"imported "<<(root/name).string()<<'\n';
  std::cout<<"Imported "<<result.imported.size()<<" original save files from "<<result.source.string()<<'\n';return 0;
@@ -134,7 +134,7 @@ int main(int argc,char** argv){try{
   }
   if(renderer)renderer->poll(input);else input.dt=1.0/60;
   if(scenario){input.dt=1.0/60;if(!scenario->step(engine,runtime,renderer.get(),input,count))break;if(scenario->realtime())media.real_clock();else media.advance_clock(1.0/60);}
-  engine.tick(runtime,engine.skip_intro(runtime,input));
+  engine.tick(runtime,engine.skip_intro(runtime,engine.console(runtime,input)));
   if(renderer)renderer->draw(engine.frame());
   engine.finish_frame(runtime);++count;
  }

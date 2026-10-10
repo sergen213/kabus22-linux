@@ -37,6 +37,7 @@ Related: [Gameplay systems](GAMEPLAY_SYSTEMS.md) · [Camera system](CAMERA_SYSTE
 | `turn-to @NAME\|X Y [DEG=8]` | turn in place |
 | `load-save N` | drives the original main menu → `YukleMenu` with ordinary keys and loads `kayitN.sav` (menu slot `N+1`) |
 | `capture NAME`, `realtime on\|off` | |
+| `type TEXT` | SDL text input (`Input::text`) delivered with the next frame, e.g. `type god` before `press Return` in the native console ([CONSOLE.md](CONSOLE.md)) |
 | `seed N` | `random()` seed for the whole run (default 0), applied before the scripts start; position in the file does not matter |
 | `pad live` | whole file: real controller/joystick input passes through (rendered runs with a pad) |
 | `expect-exit [timeout N]` | last step: passes when the original scripts end the process (for example `CikisMenu.wdl` Exit) |

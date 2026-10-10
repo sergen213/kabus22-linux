@@ -106,10 +106,24 @@ public:
  // Optional community-patch 1.8.5 first-person camera (cam.wdl fps_camera_control), engine-side for original scripts.
  enum class CameraMode {Original,FirstPerson};CameraMode cameraMode=CameraMode::Original;
  bool first_person_active()const{return firstPersonActive_;}
+ // Native developer console, quicksave/quickload and cheats (docs/CONSOLE.md, native/console.cpp); not in the original.
+ // console(): call before skip_intro/tick; handles the toggle, line editing and F5/F9, returns the input the game sees.
+ const Input& console(Runtime&,const Input&);
+ std::string console_command(Runtime&,std::string_view line); // one command line; returns its output
+ std::string quicksave(Runtime&);
+ std::string quickload(Runtime&,int slot=-1); // -1: the newest slot (Aktif_SaveNo-1)
+ bool quickSaving=false; // file_close adds the player position to the slot sidecar while set
+ struct PositionRestore {int level=0;Vec3 position{};float pan=0;bool started=false;int ticks=0;};
+ std::optional<PositionRestore> positionRestore; // set by a quicksave slot read; applied once its level is in play
 private:
  friend class Physics;
  friend std::optional<Value> worldModelBuiltin(Engine&,Runtime&,ProcessContext&,std::string_view,std::span<const Argument>);
  void initialize_globals();void make_frame(bool mouseOutput=true);void update_input(Runtime&);void update_ui(Runtime&);void update_first_person();
+ void console_tick(Runtime&);void console_overlay();void console_print(std::string_view);void notify(std::string);
+ std::string gameplay_blocked(const Runtime&)const;ObjectId live_player()const;std::string saved_position()const;void read_saved_position(const std::filesystem::path& slot);
+ bool consoleOpen_=false,consoleRelease_=false,god_=false,noclip_=false,fpsOverlay_=false;ObjectId noclipPlayer_=0;
+ std::string consoleLine_,consolePrompt_,toast_,fpsText_;std::deque<std::string> consoleLog_;std::vector<std::string> consoleHistory_;std::size_t historyCursor_=0;
+ double toastUntil_=0,fpsTime_=0;int fpsFrames_=0;Input consoleInput_;
  bool display_admitted();void prepare_display();float display_aspect(float authored)const;
  bool firstPersonActive_=false;double firstPersonTilt_=0;std::array<double,7> firstPersonWritten_{},firstPersonScript_{};
  std::array<float,2> mouseForcePrior_{}; // A6 006bb5e4/006bb5e0: last frame's scaled mickeys (x, -y).

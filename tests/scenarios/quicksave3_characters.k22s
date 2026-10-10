@@ -1,0 +1,55 @@
+# requires: saves
+# Quicksave/quickload and god for the other two characters: Inzar (koruyucu_pasif, koru_yaralanma 200, kayit15.sav Tnel24) and
+# Ebru (oyuncu_pasif, ebru_yaralanma 100, kayit6.sav Ev), reached from Inzar through the console "load 6".
+realtime off
+load-save 15
+wait until LY_AktifLevelID == 39 && level_yuklendi_ok == 1 && player != 0 && koruyucu_pasif == 0 timeout 7200
+assert Aktif_Player == 2
+wait until oyun_ilk_basladi == 0 timeout 600
+store x player.x
+store y player.y
+press F5
+assert Aktif_SaveNo == 28
+down Up
+frames 60
+up Up
+frames 30
+assert player.x < @x - 20 || player.x > @x + 20 || player.y < @y - 20 || player.y > @y + 20
+press F9
+wait until LY_AktifLevelID == 0 timeout 60
+wait until LY_AktifLevelID == 39 && level_yuklendi_ok == 1 && koruyucu_pasif == 0 timeout 3600
+frames 2
+assert player.x > @x - 1 && player.x < @x + 1 && player.y > @y - 1 && player.y < @y + 1
+# Inzar moves only while koru_yaralanma == ENERJI (koruyucu.wdl:688); god keeps both at 200.
+press `
+type god
+press Return
+type set player.skill1 120
+press Return
+frames 2
+assert player.skill1 == 200 && koru_yaralanma == 200
+type god
+press Return
+type load 6
+press Return
+press `
+wait until LY_AktifLevelID == 0 timeout 60
+wait until LY_AktifLevelID == 27 && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 7200
+assert Aktif_Player == 1
+wait until oyun_ilk_basladi == 0 timeout 600
+store ex player.x
+store ey player.y
+press F5
+assert Aktif_SaveNo == 29
+# Ev's spawn faces a wall: walk backwards.
+down Down
+frames 90
+up Down
+frames 30
+assert player.x < @ex - 20 || player.x > @ex + 20 || player.y < @ey - 20 || player.y > @ey + 20
+press F9
+wait until LY_AktifLevelID == 0 timeout 60
+wait until LY_AktifLevelID == 27 && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
+frames 2
+assert player.x > @ex - 1 && player.x < @ex + 1 && player.y > @ey - 1 && player.y < @ey + 1
+assert Aktif_Player == 1
