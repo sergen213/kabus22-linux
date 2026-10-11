@@ -7,6 +7,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdlib>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -132,11 +133,18 @@ int main(int argc,char** argv){try{
    // Anchor to the actual start, not completion or an overdue scheduled start.
    frameStart=std::chrono::steady_clock::now();
   }
+  // K22_FRAME_TIMING=FILE: one line per frame, microseconds: frame poll+scenario tick draw finish_frame, then live particles.
+  static std::FILE* timingLog=[]{const char* p=std::getenv("K22_FRAME_TIMING");return p&&*p?std::fopen(p,"w"):nullptr;}();
+  const auto t0=timingLog?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
   if(renderer)renderer->poll(input);else input.dt=1.0/60;
   if(scenario){input.dt=step;if(!scenario->step(engine,runtime,renderer.get(),input,count))break;if(scenario->realtime())media.real_clock();else media.advance_clock(step);}
+  const auto t1=timingLog?std::chrono::steady_clock::now():t0;
   engine.tick(runtime,engine.skip_intro(runtime,engine.console(runtime,input)));
+  const auto t2=timingLog?std::chrono::steady_clock::now():t0;
   if(renderer)renderer->draw(engine.frame());
+  const auto t3=timingLog?std::chrono::steady_clock::now():t0;
   engine.finish_frame(runtime);++count;
+  if(timingLog){const auto t4=std::chrono::steady_clock::now();auto us=[](auto d){return (long long)std::chrono::duration_cast<std::chrono::microseconds>(d).count();};std::fprintf(timingLog,"%llu %lld %lld %lld %lld %zu\n",(unsigned long long)count-1,us(t1-t0),us(t2-t1),us(t3-t2),us(t4-t3),engine.activeParticles.size());}
  }
  if(renderer&&!capture.empty())renderer->capture(capture.string());std::cout<<"Native frames="<<count<<" live_processes="<<runtime.processes()<<" entities="<<engine.entities.size()<<" save_root="<<engine.saveRoot.string()<<'\n';return scenario?scenario->finish(std::cout,count,engine.quit):0;
  }catch(const std::exception& e){std::cerr<<"kabus22: "<<e.what()<<'\n';return 1;}}

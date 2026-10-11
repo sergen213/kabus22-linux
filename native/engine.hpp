@@ -82,7 +82,7 @@ public:
  // Slice-owned implementations share the actual VM object/state store, never shadow gameplay state.
  Assets& assets;Renderer* renderer;Media& media;State& state;Physics physics;
  const World* world=nullptr;std::unordered_map<ObjectId,EntityData> entities;
- std::deque<std::vector<ObjectId>> worldQueryScratch;std::size_t worldQueryDepth=0;
+ std::deque<std::vector<ObjectId>> worldQueryScratch;std::size_t worldQueryDepth=0;std::vector<ObjectId> collideScratch_;
  std::vector<ParticleData> activeParticles;
  std::unordered_map<const Model*,std::unordered_map<std::size_t,MeshOverride>> meshOverrides;std::uint32_t nextMeshId=1;
  std::unordered_map<const Image*,ObjectId> skinBitmapObjects;

@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 namespace k22 {
@@ -51,7 +52,13 @@ struct Ref {Slot* slot=nullptr;ObjectId owner=0;std::string_view field;std::size
 struct Argument {Value value;Ref ref;void* evaluatorContext=nullptr;const void* expression=nullptr;Value(*evaluator)(void*,const void*)=nullptr;bool captured=false;Value current()const{return captured?value:evaluator?evaluator(evaluatorContext,expression):ref.slot?ref.get():value;}};
 struct Property {std::string name;std::vector<Argument> arguments;};
 struct CaseLess {using is_transparent=void;bool operator()(std::string_view a,std::string_view b)const{std::size_t i=0;for(;i<a.size()&&i<b.size();++i){auto lower=[](unsigned char c){return c>='A'&&c<='Z'?c+32:c;};auto x=lower(a[i]),y=lower(b[i]);if(x!=y)return x<y;}return a.size()<b.size();}};
-using Fields=std::map<std::string,Slot,CaseLess>;
+// ASCII case-insensitive equality; same result as !CaseLess(a,b)&&!CaseLess(b,a) in one pass.
+inline bool case_equal(std::string_view a,std::string_view b){if(a.size()!=b.size())return false;for(std::size_t i=0;i<a.size();++i){auto lower=[](unsigned char c){return c>='A'&&c<='Z'?c+32:c;};if(lower(a[i])!=lower(b[i]))return false;}return true;}
+struct CaseHash {using is_transparent=void;std::size_t operator()(std::string_view s)const{std::size_t h=14695981039346656037ull;for(unsigned char c:s){h^=c>='A'&&c<='Z'?c+32:c;h*=1099511628211ull;}return h;}};
+struct CaseEqual {using is_transparent=void;bool operator()(std::string_view a,std::string_view b)const{return case_equal(a,b);}};
+// Hashed (not ordered): field/global/local lookups are the interpreter's and frame builder's hottest path. Slot addresses stay
+// stable across rehash (Refs hold Slot*); nothing depends on iteration order.
+using Fields=std::unordered_map<std::string,Slot,CaseHash,CaseEqual>;
 struct Object {
  enum class Kind { Name,String,Vector,Bmap,Sound,Font,Entity,Panel,Text,View,Material,Window,Particle,NativeText };
  Kind kind=Kind::Name;ObjectId id=0;std::string name;bool alive=true;Fields fields;std::deque<Slot> array;std::string text;std::vector<Property> properties;Slot* scalar=nullptr;
@@ -60,7 +67,7 @@ struct Object {
 };
 struct State {
  SemanticProfile profile=SemanticProfile::CampaignA6;
- Fields globals;std::deque<Object> objects;std::map<std::string,ObjectId,CaseLess> numericGlobals;std::map<std::string,std::string,CaseLess> compilerMacros;
+ Fields globals;std::deque<Object> objects;std::unordered_map<std::string,ObjectId,CaseHash,CaseEqual> numericGlobals;std::map<std::string,std::string,CaseLess> compilerMacros;
  // Handles never alias later births; only this pointer-sized tombstone table grows with history.
  std::vector<Object*> handles,freePayloads;
  std::vector<ObjectId> uiCandidates;
