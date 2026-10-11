@@ -126,7 +126,8 @@ public:
  std::optional<PositionRestore> positionRestore; // set by a quicksave slot read; applied once its level is in play
  // Native seamless doors (docs/SEAMLESS_DOORS.md, native/seamless_doors.cpp); false = the original LevelYukle fade exactly.
  bool seamlessDoors=false;
- bool hold_presentation()const{return door_.phase==DoorPhase::Holding;} // main loop: do not present (last frame stays up)
+ // main loop: do not present (last frame stays up); an open switch prompt pauses door_tick, so it must stay visible.
+ bool hold_presentation()const{return door_.phase==DoorPhase::Holding&&switchPrompt_<0;}
  int door_phase()const; // 0 idle, 1 opening, 2 crossing, 3 holding, 4 revealing
  std::uint32_t doorSwaps=0,fadeFrames=0; // completed seamless swaps; presented frames with a visible LYP_Fade (scenario $fadeframes)
  void door_scan(Runtime&,ObjectId trigger); // after a scan event: an LY_Kapi request may become a doorway preview
