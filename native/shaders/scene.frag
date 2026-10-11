@@ -157,6 +157,13 @@ vec3 ordinaryOcclusion(vec3 p,vec3 n){
     return lost;
 }
 void main(){
+    if(u.dataDoor[0].w!=0.0){
+        // X: the view line's crossing of the doorway's wall plane (render.hpp DoorPortal clip rule).
+        vec3 center=u.dataDoor[0].xyz,n=u.dataDoor[1].xyz;float sC=dot(cameraPosition-center,n),sP=dot(worldPosition-center,n);
+        vec3 x=cameraPosition+(worldPosition-cameraPosition)*(sC/(sC-sP))-center;
+        bool inRect=abs(dot(x,u.dataDoor[2].xyz))<=u.dataDoor[1].w&&abs(dot(x,u.dataDoor[3].xyz))<=u.dataDoor[2].w;
+        if(u.dataDoor[0].w==1.0?sP<1.0&&sC-sP>0.0&&inRect:!(sP<-2.0&&inRect))discard;
+    }
     if(skyMask){color=vec4(1);return;}
     if(k22SmoothNormals&&k22Pass==2){facet=cross(dFdx(worldPosition),dFdy(worldPosition));if(dot(facet,cameraPosition-worldPosition)<0.0)facet=-facet;}
     vec2 coord=uv*uvScale+uvOffset;vec4 texel;
