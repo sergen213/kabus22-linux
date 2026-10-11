@@ -53,6 +53,7 @@ void help(){std::cout<<"kabus22 native engine\nUsage: kabus22 --data GAME_ROOT [
  "Testing: --scenario FILE [--scenario-out DIR] runs a scripted gameplay scenario (docs/GAMEPLAY_TESTING.md) with a fixed 1/60 s step, headless or rendered; exit code 0 only if every step passed.\n"
  "Graphics: kabus22 --list-capabilities prints backend/option/texture-pack JSON without game data. kabus22 --dump-textures DIR --data GAME_ROOT [--mode campaign|bonus] writes every decodable original texture as DIR/<key>.png plus DIR/index.tsv.\n"
  "  --preset original|enhanced|ultra|custom (absent = original), --graphics KEY=VALUE (repeatable; backend, pbr, anisotropy, msaa, texture_packs, fps_limit=original|30..240|unlimited, ... see --list-capabilities), --texture-pack NAME (repeatable, priority order; ${XDG_DATA_HOME:-~/.local/share}/kabus22/packs/NAME). Preset backends degrade with a notice; explicit --renderer/--ray-tracing/--graphics backend fail hard.\n"
+ "Seamless doors: --graphics seamless_doors=on|off (default on). kabus22 --door-table LEVELS.tsv --data GAME_ROOT prints every LY_Kapi doorway and whether it is seamless (docs/SEAMLESS_DOORS.md).\n"
  "Controller: ${XDG_CONFIG_HOME:-~/.config}/kabus22/controller.ini mode=original|modern (absent = original).\n";}
 int import_saves(int argc,char** argv){
  std::filesystem::path source,data;
@@ -69,7 +70,7 @@ int import_saves(int argc,char** argv){
 int main(int argc,char** argv){try{
  std::filesystem::path data,entry,capture;bool headless=false;std::uint64_t frames=0;bool frameLimit=false;std::string mode="campaign",language,audioLanguage,rendererName="opengl",rayTracing,display="native";std::vector<std::string> defines;int displayWidth=0,displayHeight=0;k22::WindowMode windowMode=k22::WindowMode::Borderless;bool displayDimensions=false,displayMode=false;
  for(int i=1;i<argc;++i)if(std::string_view(argv[i])=="--import-saves")return import_saves(argc,argv);
- for(int i=1;i<argc;++i){std::string_view a=argv[i];if(a=="--list-capabilities"){if(argc!=2)throw std::runtime_error("--list-capabilities takes no other options");return k22::graphics_cli::list_capabilities();}if(a=="--dump-textures")return k22::graphics_cli::dump(argc,argv);}
+ for(int i=1;i<argc;++i){std::string_view a=argv[i];if(a=="--list-capabilities"){if(argc!=2)throw std::runtime_error("--list-capabilities takes no other options");return k22::graphics_cli::list_capabilities();}if(a=="--dump-textures")return k22::graphics_cli::dump(argc,argv);if(a=="--door-table")return k22::door_table(argc,argv);}
  auto graphics=k22::graphics_cli::extract(argc,argv);
  std::filesystem::path scenarioFile,scenarioOut=".";{int kept=1;for(int i=1;i<argc;++i){std::string_view a=argv[i];if(a=="--scenario"||a=="--scenario-out"){if(i+1>=argc)throw std::runtime_error("missing value for "+std::string(a));(a=="--scenario"?scenarioFile:scenarioOut)=argv[++i];continue;}argv[kept++]=argv[i];}argc=kept;}
  std::string cameraName="original";{int kept=1;for(int i=1;i<argc;++i){if(std::string_view(argv[i])=="--camera"){if(i+1>=argc)throw std::runtime_error("missing value for --camera");cameraName=argv[++i];if(cameraName!="original"&&cameraName!="first-person")throw std::runtime_error("--camera requires original or first-person");continue;}argv[kept++]=argv[i];}argc=kept;}

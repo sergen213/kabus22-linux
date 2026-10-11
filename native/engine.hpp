@@ -36,6 +36,7 @@ struct DoorLink {DoorSide a,b;Vec3 position{},angles{};};
 std::optional<DoorSide> door_side(const World&,std::span<const Vec3> triggers);
 std::vector<std::vector<Vec3>> door_clusters(const World&,int target); // LY_Kapi triggers with LevelID target, grouped per doorway
 std::optional<DoorLink> door_link(const World& from,std::span<const Vec3> triggers,const World& to,int fromId);
+int door_table(int argc,char** argv); // kabus22 --door-table LEVELS.tsv --data GAME_ROOT
 class Engine {
 public:
  Engine(Assets&,Renderer*,Media&,State&);
