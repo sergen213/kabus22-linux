@@ -81,6 +81,9 @@ inline Matrix planar_projection(const DrawInstance&d,const NativeShadowState&sha
     return {1,0,n.x,0,0,1,n.y,0,-s.x,-s.y,-s.x*n.x-s.y*n.y,0,
         s.x*h,s.y*h,frame.shadowOffset+h-(d.position.x-s.x*h)*n.x-(d.position.y-s.y*h)*n.y,1};
 }
+// Direction toward the light that casts the planar shadow: planar_projection moves a point h above its plane by -shadowSun*h.
+// shadows=rt actor shadows fall back to it where no traced light reaches the receiver (rt_signals.comp actorShadow).
+inline Vec3 planar_light_direction(Vec2 shadowSun){return unit({shadowSun.x,shadowSun.y,1});}
 inline bool centroid_lighting(const RenderFrame&frame){
     bool enabled=false;
     for(const auto&light:frame.lights)if(!light.synthetic&&(light.type==1||light.type==2))enabled=frame.lightResRaw!=0||light.type==2;

@@ -22,8 +22,9 @@
   - *Visibility* (`shadows=rt` only): sun and dynamic-light shadow rays (`rtVisibility`) scale the
     native per-vertex dynamic lighting by the per-channel visible/unshadowed ratio. The sun is used only
     on non-lightmapped surfaces. Models with the original SHADOW flag also shadow lightmapped level geometry
-    from the baked WMB lights, native point/spot lights and the sun ([actor shadows](#actor-shadows)); where that shadow
-    is drawn it replaces their fixed-direction A6 planar shadow. Without `shadows=rt` the ray-traced backend does not occlude any light:
+    from the baked WMB lights, native point/spot lights and the sun ([actor shadows](#actor-shadows)), which replaces
+    their fixed-direction A6 planar shadow (never drawn under `shadows=rt`); models are shadowed by themselves and other
+    models and get ray-traced ambient occlusion ([model shadows and AO](#model-shadows-and-ambient-occlusion)). Without `shadows=rt` the ray-traced backend does not occlude any light:
     A6 point/spot lights and the sun are D3D9 fixed-function hardware lights (`D3DLIGHT` slots enabled
     with `LightEnable`, the sun as `D3DLIGHT` type 3; `reverse/decompiled/runtime/graphics-settings-source/a6-worldlight-contract.txt`),
     which never cast shadows; static shadows exist only in the baked lightmaps. Default RT lighting is
@@ -43,8 +44,9 @@ RX 7900 XTX with RADV, Mesa 26.2.4:
 
 - `--list-capabilities` reports `vulkan-rt` available ("KHR ray query").
 - The `k22-render-check FX --vulkan-rt` consumer suite passes. It checks that `shadows=rt` occludes the
-  sun with an actor, that an actor's shadow on a lightmapped floor follows a baked light and replaces its planar
-  shadow, and that the default RT path lights exactly like Vulkan raster.
+  sun with an actor, that an actor's shadow on a lightmapped floor follows a baked light, that the planar shadow is never
+  drawn (with no light in range the actor shadow falls toward the planar shadow's light instead), that models shadow
+  themselves and receive ambient occlusion, and that the default RT path lights exactly like Vulkan raster.
 - Default RT captures are byte-identical to Vulkan raster on the 2560x1377 Start4 test view and on
   imported original saves 1, 8 and 21 (no reflective surface in view). Before this fix the default RT
   Start4 test view had mean 4.36 against 13.66 in raster: the script light (60,40,20) sits inside a solid
@@ -73,8 +75,10 @@ Screen-space signals of the primary view (`native/render_vulkan_raster.cpp` `rt_
 2. **Signals** (compute + ray query, 1 sample/pixel/frame):
    - *Soft shadows*: one ray per contributing light to a random point on a sphere of radius
      clamp(0.03 range, 2, 12) units; sun inside a 0.02 rad cone; output is the shadowed/unshadowed ratio of
-     the dynamic-light sum and the sun visibility. *Contact shadows*: one 40-unit cosine ray against models
-     only (TLAS instance mask 2; level geometry is mask 1), so actors darken baked lightmaps. The TLAS
+     the dynamic-light sum and the sun visibility. *Ambient occlusion*: one 40-unit cosine ray. On lightmapped
+     pixels it sees models only (TLAS instance mask 2; level geometry is mask 1), so actors darken baked lightmaps
+     (floor 0.3, as it scales the whole lightmap); on model and vertex-lit pixels it sees all geometry, the model itself
+     included, and scales their ambient term ([model shadows and AO](#model-shadows-and-ambient-occlusion)). The TLAS
      already contains every visible non-view-space model; animated poses are re-deformed on the GPU and
      their BLAS updated (`rt_pose`/`rt_scene` version check) every frame. Without `denoise=1` the shadow
      signal is visibly 1-sample noisy (`ultra` enables the denoiser).
@@ -83,7 +87,7 @@ Screen-space signals of the primary view (`native/render_vulkan_raster.cpp` `rt_
      back-face-culled shadow-map caster pass. A one-sided face blocks only when its front faces the light,
      so a light inside a closed brush or emitter model is not self-occluded. Geometry within 16 units of a
      point/spot light (`rtLightClearance`, the shadow cube near plane) does not occlude it, and additive
-     (glow) surfaces add light without blocking it. Contact-shadow rays are alpha-tested like the raster
+     (glow) surfaces add light without blocking it. Ambient-occlusion rays are alpha-tested like the raster
      pass.
    - *GI*: one cosine ray (1500 units); the hit is lit from its lightmap (`RtMaterial.lightState.z`,
      only when `gi=1`) or native ambient plus unshadowed dynamic lights, linearized; misses return 0. The
@@ -98,26 +102,27 @@ Screen-space signals of the primary view (`native/render_vulkan_raster.cpp` `rt_
      camtuvalet bathroom mirror, type 3, received no reflection before this fix). Checked on that mirror:
      roughness 0 matches the default inline reflection, roughness 0.35 (test pack, `pbr=1`) is noisy and
      blurred, and `denoise=1` smooths it.
-   - *Smoothed models* (`smooth_normals=1` or `tessellation=1`, `docs/GRAPHICS_ROADMAP.md` Geometry upgrades): hit
-     shading already interpolated vertex normals with the hit barycentrics (`hitRadiance`, explicit-material hits); the
-     pose buffers now carry the smoothed normals. Shading a low-poly model with smooth normals while tracing against its
-     flat triangles lets shadow and contact rays leaving a facet near the terminator re-enter the neighbouring facets
-     (the shadow-terminator problem: dark triangle-shaped blocks). For lit, non-lightmapped pixels `rt_signals.comp`
-     therefore re-finds the base triangle under the pixel with a camera ray (within `max(4 bias, 0.4% distance)` of the
-     G-buffer depth) and starts the rays from the surface its vertex normals describe (Hanika 2021: barycentric blend of
-     the hit projected outward onto each vertex tangent plane), offset along the camera-facing geometric normal. The
-     G-buffer orients the stored normal by the camera-facing facet normal (from `worldPosition` derivatives) instead of
-     flipping any normal facing away from the camera, which inverted smooth normals at model silhouettes. Tessellated
-     PN surfaces are traced as their base mesh (the BLAS is not tessellated): a tessellated pixel whose base triangle
-     lies within the camera-ray window starts its rays from that triangle's lifted surface; where the PN bulge exceeds
-     the window (large patches close to the camera) the pixel keeps the previous origin, offset along its shading
-     normal. Lightmapped (world) pixels keep the previous origin.
+   - *Shadow-terminator origin* (lit, non-lightmapped pixels, with or without `smooth_normals`): hit shading already
+     interpolated vertex normals with the hit barycentrics (`hitRadiance`, explicit-material hits); with
+     `smooth_normals=1` or `tessellation=1` (`docs/GRAPHICS_ROADMAP.md` Geometry upgrades) the pose buffers carry the
+     smoothed normals. Shading a low-poly model with vertex normals while tracing against its flat triangles lets shadow
+     and occlusion rays leaving a facet near the terminator re-enter the neighbouring facets (the shadow-terminator
+     problem: dark triangle-shaped blocks, acne in self-shadow). `rt_signals.comp` therefore re-finds the base triangle
+     under the pixel with a camera ray (within `max(4 bias, 0.4% distance)` of the G-buffer depth) and starts the rays
+     from the surface its vertex normals describe (Hanika 2021: barycentric blend of the hit projected outward onto each
+     vertex tangent plane), offset along the camera-facing geometric normal. With smoothing the G-buffer orients the
+     stored normal by the camera-facing facet normal (from `worldPosition` derivatives) instead of flipping any normal
+     facing away from the camera, which inverted smooth normals at model silhouettes. Tessellated PN surfaces are traced
+     as their base mesh (the BLAS is not tessellated): a tessellated pixel whose base triangle lies within the camera-ray
+     window starts its rays from that triangle's lifted surface; where the PN bulge exceeds the window (large patches
+     close to the camera) the pixel keeps the previous origin, offset along its shading normal. Lightmapped (world)
+     pixels keep the previous origin.
 3. **Denoise** (`denoise=1`): temporal accumulation (reprojection with the previous unjittered
    view-projection, or with the per-pixel motion vector where a moving/animated entity is visible; rejected on
    >5% view-depth change or normal cosine < 0.9; history clipped to the current 3x3 raw signal mean +- 2 sigma
    so a shadow or bounce does not linger where its caster left; alpha max(1/(n+1), 0.15 shadows/reflections,
    0.06 GI)), then three a-trous B3 iterations (strides 1/2/4) with depth/normal edge stopping; mirror-smooth
-   reflections are not blurred.
+   reflections and the lightmapped actor-shadow alpha are not blurred (model-pixel alpha is, among model pixels).
 4. **Motion vectors** (`taa=1`, or `denoise=1` with signals): after the G-buffer, entities whose transform
    (keyed by entity id, previous frame only) or GPU-deformed pose (the same actor's pose in the other frame
    slot, `rt_previous_pose`) changed are drawn again (scene pass 3) into an RGBA16F target: previous-minus-current
@@ -187,15 +192,20 @@ With `shadows=rt` (`rt_signals.comp` `actorShadow`, in the alpha of the shadow s
   receiver (otherwise the lightmap holds none of it); native lights shine through walls like the D3D lights they are
   (and `ev`'s sits inside its wall fixture). The sun counts only where the level lets it through, so indoor levels get no
   sun shadow.
-- **Darkness**: SHADOW_ALPHA/100 x min(occluded weight / strongest weight, 1), faded where the strongest weight is below
-  0.02. Blocking the dominant light darkens the surface exactly like the original planar shadow (`rgb *=` the factor
-  after lighting, PBR and GI, before fog: the planar shadow is black alpha-blended over the lit surface); a weaker light
-  gives a proportionally lighter shadow, several lights several shadows. The signal is accumulated over frames like the
-  other shadow signals but not blurred spatially (the a-trous blur halved a body's shadow strip).
-- **Planar shadow**: kept unless the actor shadow was drawn. Each caster that darkens a pixel by at least SHADOW_ALPHA/2
-  counts it per TLAS instance (`casterPixels`, a host-visible buffer per frame slot, read when the slot comes round, two
-  frames later); a visible caster with at least 64 such pixels at signal resolution loses its planar shadow in the
-  primary view. A caster whose shadow would fall only on models, or that has no light in range, keeps it.
+- **Darkness**: SHADOW_ALPHA/100 x min(occluded weight / strongest weight, 1). Blocking the dominant light darkens the
+  surface exactly like the original planar shadow (`rgb *=` the factor after lighting, PBR and GI, before fog: the planar
+  shadow is black alpha-blended over the lit surface); a weaker light gives a proportionally lighter shadow, several
+  lights several shadows. The signal is accumulated over frames like the other shadow signals but not blurred spatially
+  (the a-trous blur halved a body's shadow strip).
+- **No light**: where the strongest weight is below 0.02 (no traced light in range, or too faint), the shadow blends
+  into one cast at SHADOW_ALPHA toward the planar shadow's own light (`render_policy::planar_light_direction`, from
+  `frame.shadowSun`: the direction along which `planar_projection` flattens the caster), against the casters only, like
+  the planar shadow that ignores the level. So every caster has a shadow, in the original's direction where nothing
+  else lights the floor.
+- **Planar shadow**: never drawn under `shadows=rt`, in any view, and its shadow-LOD poses are not prepared. (0.4.0
+  removed it only after the GPU reported at least 64 shadow pixels per caster, read back two frames later, so a caster
+  without a light in range, or with a small shadow, showed the original fixed-direction shadow, and it flickered as the
+  count crossed the threshold.)
 
 Unchanged: default ray tracing, Vulkan raster, `shadows=shadowmap` and OpenGL draw the planar shadow as before. Lamp-walk
 captures (level5, save slot 01, 4 positions) are byte-identical between 0.3.0 and this build for OpenGL default, Vulkan
@@ -223,13 +233,50 @@ blob in the fixed sun direction; in level5 Demir's shadow points away from the 5
 round it; tnel24's floor was too dark for any planar shadow and now shows the player's. Captures (private, game assets):
 `reverse/rt-actor-shadows/*-{raster,rt}.png`, `*-crop-raster-vs-rt.png` and `darkness-maps-*.png` (raster/RT frames
 above, planar/actor darkness below). `k22-render-check --vulkan-rt` checks it on a lightmapped floor with one baked
-light: the floor 22 units beside the caster drops from 255 to 126/128 on the side away from the light, the shadow changes
-sides with the light, the planar control shadow (128 by default RT) is gone, and with the light out of range the
-planar shadow stays.
+light: the floor 22 units beside the caster drops from 255 to 126/128 on the side away from the light and the shadow
+changes sides with the light; the planar control shadow (128 by default RT, from a copy placed so it falls on the other
+side) is never drawn; with the light out of range the floor on the planar light's far side drops to 125/252 (actor shadow
+toward `shadowSun`) while the planar control's side stays 252.
 
 Cost (`K22_GPU_TIMING=1`, level5 bench, `ultra`, two runs each): `rt_signals` 0.76 -> 0.99-1.00 ms, GPU frame
 3.17-3.18 -> 3.34-3.38 ms, 307 -> 289-292 FPS. Tracing every weighted light instead of the dominant one plus one sampled
 light cost 1.10 ms (305 -> 275 FPS).
+
+## Model shadows and ambient occlusion
+
+Every campaign model carries a script material (A6 assigns `mat_model`, `mat_sprite`, `mat_terrain` to entities
+without one; `engine.cpp`), so it is lit as an *ordinary* D3D material: Gouraud vertex lighting from the material's
+ambient x the floor-light ambient (the A6 lightmap sample under the entity), the sun (`materialSunStrength`) and the
+native lights; baked WMB lights do not light it. 0.4.0 marked these pixels unlit/explicit (G-buffer flag 4), so no RT
+signal reached any character. They now have their own flag (16):
+
+- `rt_signals.comp` computes the dynamic-light (D3D attenuation) and sun visibility for them against the SHADOW-flag
+  models only (instance mask 4: actors, and the receiver itself when it is one, so an arm shadows the torso). In the
+  original those lights shone through the level and every prop, and only SHADOW models cast shadows; the level's static
+  shadow already reaches them through the floor light they sample. Tracing the level took the sun off every character
+  indoors; tracing all models let curtains and radiators block a sun that passes through the walls.
+- Ambient occlusion sees all geometry (level and models, the model itself) within 40 units: occlusion =
+  1 - (1 - d/40)^2 for a hit at distance d (full darkness at contact, little from distant geometry).
+- `scene.frag` `ordinaryOcclusion` takes the occluded light off the vertex lighting: ambient x (1 - AO), the sun x
+  (1 - its visibility), other native lights x (1 - their visibility). Where nothing is occluded the original vertex
+  lighting is unchanged. Ray origins use the terminator origin above, which keeps self-shadow free of acne.
+- Models without a script material (Bonus/A7 profile) and non-lightmapped level surfaces use the per-pixel model
+  lighting: the ambient term x AO, the sun and native lights as before, and the baked WMB lights (`enhancedBaked`, the
+  model light loop) x their visibility (`bakedVisibility`: the dominant baked light and one other picked by weight,
+  traced against all geometry, in the mask alpha, blurred among model pixels only).
+
+`k22-render-check --vulkan-rt` renders a floor model at z=2 under the actor-shadow fixture's camera. With an overhang in
+the same model, the floor point in its shadow drops from 78.9 to 27 (luma; the lit side 149.9 -> 149.5) for a baked lamp
+(per-pixel model lighting) and from 199.4 to 0 for a native lamp on an ordinary material (SHADOW-flag model); a wall
+5 units beside a floor point lowers it from 127 to 90 (per-pixel ambient) and from 128 to 100 (ordinary material).
+
+In the game (`--preset ultra`, `vulkan-rt`, 1920x1080, original saves 01 and 07): Demir in level5 drops from mean luma
+27.7 to 26.6 over his body column, Ebru in `ev` (standing by the radiator, under the wall lamp) from 49.3 to 43.6, with
+the darkening under the arms, between the legs, at the collar and the hands. Cost (`K22_GPU_TIMING=1`, level5, 900
+steady frames per run, two runs each, 0.4.0 -> this): `rt_signals` 1.01-1.03 -> 1.13 ms, scene 0.52-0.53 -> 0.56 ms
+(`ordinaryOcclusion`), GPU frame 3.33-3.38 -> 3.49-3.51 ms; the planar shadow draws are gone.
+
+Lightmapped surfaces keep the models-only occlusion term: their lightmaps already hold the level's occlusion.
 
 ## Performance
 
@@ -272,7 +319,8 @@ Root causes found and fixed:
 
 - Sun shadows (`shadows=rt` and `shadows=shadowmap` alike) make non-lightmapped models indoors much darker
   than the original. The sun is the main light on those models, and ceilings occlude it, for example the
-  bed in save 8 and the pit grate in save 26. In the original the sun was never occluded.
+  bed in save 8 and the pit grate in save 26. In the original the sun was never occluded. Ordinary-material models
+  (D3D-lit, flag 16) are exempt under `shadows=rt`: only SHADOW casters occlude their sun.
 - A light placed inside solid level geometry (as in the Start4 test scene) is still occluded by
   `shadows=rt` for receivers whose path crosses another brush toward it.
 - One bounce, one sample per pixel; reflections hit with legacy shading.
@@ -280,10 +328,13 @@ Root causes found and fixed:
 - Particles, view-space entities and billboards are not in the acceleration structure.
 - With `tessellation=1` the BLAS still holds the base mesh: ray-traced shadows, GI and reflections see model
   silhouettes without the PN bulge.
-- Actor shadows fall only on lightmapped level surfaces. Models (radiators, curtains, other actors) and decal models
-  (the level5 blood pool) receive none; a caster keeps its planar shadow only when no actor shadow of it is drawn at all,
-  so a shadow split between floor and furniture shows only its floor part.
-- Mirror/portal views, SHADOW entities that are themselves invisible, translucent and MSAA-edge pixels keep the old
-  behaviour (planar shadow, or no actor shadow); a baked light inside solid geometry casts no actor shadow (its level
-  ray is blocked). The planar decision lags two frames. `shadows=shadowmap` has no actor shadows from baked lights (one
-  cube map for one dynamic light).
+- Actor shadows on lightmapped surfaces come from SHADOW casters only. Ordinary-material models (every campaign model)
+  are shadowed only by SHADOW casters (themselves included) from their D3D lights; props without the flag occlude only
+  their ambient (AO). Decal models (the level5 blood pool) take actor shadows as models do, not as the floor below.
+- Mirror/portal views have no actor shadows (the planar shadow is not drawn there either; the game sets `noshadow` on its
+  mirror view); SHADOW entities that are themselves invisible are not in the acceleration structure and cast none
+  (the scripts turn SHADOW off with INVISIBLE). Translucent and MSAA-edge pixels keep the inline path without actor
+  shadows or AO. A baked light inside solid geometry casts no actor shadow (its level ray is blocked).
+  `shadows=shadowmap` has no actor shadows from baked lights (one cube map for one dynamic light).
+- Ordinary materials subtract the occluded light from their clamped Gouraud lighting, so a vertex saturated above 1
+  darkens less than the occluded share; their specular is not shadowed.

@@ -27,7 +27,6 @@
     X(vkCmdDispatch) \
     X(vkCmdDraw) \
     X(vkCmdDrawIndexed) \
-    X(vkCmdFillBuffer) \
     X(vkCmdEndRendering) \
     X(vkCmdPipelineBarrier) \
     X(vkCmdPipelineBarrier2) \

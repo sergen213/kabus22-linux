@@ -39,7 +39,7 @@ layout(set=0,binding=4) uniform sampler2D normalSkin;
 // Wave-2: shadow maps (raster fallback) and denoised screen-space ray-traced signals of the primary view.
 layout(set=0,binding=9) uniform sampler2DShadow sunShadowMap;
 layout(set=0,binding=10) uniform samplerCubeShadow cubeShadowMap;
-layout(set=0,binding=11) uniform sampler2D rtMask; // r dynamic-light visibility, g sun visibility, b contact shadow, a lightmap actor shadow.
+layout(set=0,binding=11) uniform sampler2D rtMask; // r dynamic-light visibility, g sun visibility, b ambient occlusion, a lightmap actor shadow / model baked-light visibility.
 layout(set=0,binding=12) uniform sampler2D rtGi; // linear one-bounce irradiance (albedo applied here).
 layout(set=0,binding=13) uniform sampler2D rtReflect; // rgb reflected radiance, a transmitted fraction.
 layout(set=0,binding=14) uniform sampler2D gbufferDepth;
@@ -73,7 +73,7 @@ vec4 gbufferData(vec2 coord){
     vec3 n=normalize(worldNormal);if(dot(n,cameraPosition-worldPosition)<0.0)n=-n;
     if(k22SmoothNormals){n=normalize(worldNormal);if(dot(n,facet)<0.0)n=-n;}
     vec2 o=n.xy/(abs(n.x)+abs(n.y)+abs(n.z));if(n.z<0.0)o=(1.0-abs(o.yx))*vec2(o.x>=0.0?1.0:-1.0,o.y>=0.0?1.0:-1.0);
-    float flags=(hasLightmap?1.0:0.0)+(worldVertexLighting?2.0:0.0)+((unlit||explicitMaterial||effectKind!=0)?4.0:0.0)+(!portalEnabled&&reflectionWeight>0.0?8.0:0.0);
+    float flags=(hasLightmap?1.0:0.0)+(worldVertexLighting?2.0:0.0)+((unlit||effectKind!=0)?4.0:explicitMaterial?16.0:0.0)+(!portalEnabled&&reflectionWeight>0.0?8.0:0.0);
     return vec4(o,k22PbrOn&&k22RoughnessMap?texture(pbrOrm,coord).g:0.0,flags);
 }
 // Motion-vector pass (3): xy previous minus current UV, z current view depth (clip w), w previous view depth (<=0: behind
@@ -137,6 +137,23 @@ vec3 enhancedBaked(vec3 p,vec3 n){
     }
     return result;
 }
+// shadows=rt on ordinary (D3D-lit, e.g. the A6 default mat_model) materials: the light the signal mask occludes, taken off
+// their Gouraud vertex lighting (scene.vert ordinaryMaterial): ambient x (1 - ambient occlusion, b), the sun x (1 - its
+// visibility, g), other lights x (1 - the dynamic-light visibility, r). Unoccluded pixels keep the original lighting.
+vec3 ordinaryOcclusion(vec3 p,vec3 n){
+    vec3 lost=preparedAmbient.rgb*ambientLight*(1.0-mask.b);float sun=length(sunDirection);
+    for(int i=0;i<lightCount;++i){
+        vec4 a=lightData[i*5],b=lightData[i*5+1],d=lightData[i*5+2],e=lightData[i*5+3],c=lightData[i*5+4];
+        if(b.a<0)continue;
+        vec3 delta=a.xyz-p;float distance=length(delta);
+        vec3 direction=d.w==3?-d.xyz:delta/max(distance,.0001);
+        float attenuation=d.w==3?1:(distance<=a.w?1/max(e.x+e.y*distance+e.z*distance*distance,.0001):0);
+        if(d.w==2){float rho=dot(-direction,d.xyz);attenuation*=rho>=c.x?1:rho<=c.y?0:pow((rho-c.y)/max(c.x-c.y,.0001),e.w);}
+        float visible=c.z<=0.5?mask.r:d.w==3&&sun>0&&dot(direction,sunDirection)>0.999*sun?mask.g:1.0;
+        lost+=preparedDiffuse*b.rgb*b.a*attenuation*(i==selectedLight?materialSunStrength:1)*max(dot(n,direction),0)*(1-visible);
+    }
+    return lost;
+}
 void main(){
     if(skyMask){color=vec4(1);return;}
     if(k22SmoothNormals&&k22Pass==2){facet=cross(dFdx(worldPosition),dFdy(worldPosition));if(dot(facet,cameraPosition-worldPosition)<0.0)facet=-facet;}
@@ -180,7 +197,7 @@ void main(){
         }
         if(worldVertexLighting){
 #if K22_RAY_QUERY
-            if(signalShadows)illumination+=vertexDynamicLight*mask.r+enhancedBaked(worldPosition,n);
+            if(signalShadows)illumination+=vertexDynamicLight*mask.r+enhancedBaked(worldPosition,n)*mask.a;
             else if(k22ShadowMaps)illumination+=shadowMappedNativeDynamic(worldPosition,n)+enhancedBaked(worldPosition,n);
             else illumination+=(k22RtShadowMode?visibleNativeDynamic(worldPosition,n):vertexDynamicLight)+enhancedBaked(worldPosition,n);
 #else
@@ -193,6 +210,7 @@ void main(){
             vec3 contribution=b.rgb*abs(b.a)*attenuation*attenuation*max(dot(n,d/max(distance,0.0001)),0);
 #if K22_RAY_QUERY
             if(b.a>=0&&attenuation>0)contribution*=signalShadows?mask.r:k22ShadowMaps?cubeMapVisibility(i,n):lightVisibility(d,distance);
+            else if(signalShadows)contribution*=mask.a; // Baked lights on models: rt_signals.comp bakedVisibility.
 #else
             if(k22ShadowMaps&&b.a>=0&&attenuation>0)contribution*=cubeMapVisibility(i,n);
 #endif
@@ -202,7 +220,11 @@ void main(){
         if(signals&&(k22RtSignals&2)!=0)illumination=k22Gamma(k22Linear(illumination)+texelFetch(rtGi,ivec2(gl_FragCoord.xy),0).rgb);
 #endif
     }
-    vec3 rgb=explicitMaterial?clamp(clamp(t.rgb*vertexMaterialDiffuse*2,0,1)+vertexMaterialSpecular,0,1):t.rgb*illumination;
+    vec3 materialDiffuse=vertexMaterialDiffuse;
+#if K22_RAY_QUERY
+    if(signalShadows&&explicitMaterial&&!unlit)materialDiffuse=max(materialDiffuse-ordinaryOcclusion(worldPosition,normalize(worldNormal)),0);
+#endif
+    vec3 rgb=explicitMaterial?clamp(clamp(t.rgb*materialDiffuse*2,0,1)+vertexMaterialSpecular,0,1):t.rgb*illumination;
     if(k22PbrOn&&!unlit&&!explicitMaterial){
 #if K22_RAY_QUERY
         float sunVisibility=hasLightmap?1.0:signalShadows?mask.g:k22ShadowMaps?sunMapVisibility(normalize(worldNormal)):directVisibility(sunDirection,rayMaxDistance());

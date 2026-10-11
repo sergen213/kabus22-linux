@@ -105,8 +105,7 @@ std::unique_ptr<RayTracing,RayDelete> rt_create(VulkanBackend::State&);
 void rt_destroy(RayTracing*);
 Pose& rt_pose(RayTracing&,const DrawInstance&,std::span<const Vertex> expandedVertices={},std::span<const Vec3> expandedTangents={},bool needsTangents=false);
 Pose* rt_previous_pose(RayTracing&,Pose& current);
-// instanceObjects (optional): receives the DrawInstance::objectId of every TLAS instance in custom-index order.
-void rt_scene(RayTracing&,std::span<const RayGeometry>,std::vector<std::uint32_t>* instanceObjects=nullptr);
+void rt_scene(RayTracing&,std::span<const RayGeometry>);
 VkDescriptorSetLayout rt_layout(const RayTracing&); VkDescriptorSet rt_set(const RayTracing&);
 void rt_replace_texture(RayTracing&,VkImageView previous,VkImageView replacement);
 void rt_release(RayTracing&); void rt_purge_model(RayTracing&,const Model*); void rt_purge_image(RayTracing&,const k22::Image*);
