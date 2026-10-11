@@ -482,7 +482,9 @@ std::vector<std::string> command(const Settings& s, const std::optional<unsigned
         const auto& c=*s.capabilities;bool packs=false;
         if(p.preset!="original"){require(std::count(c.presets.begin(),c.presets.end(),p.preset)==1,"Graphics preset "+p.preset+" is not offered by this engine; choose another on Rendering");args.insert(args.end(),{"--preset",p.preset});}
         // backend and texture_packs have dedicated controls; stale or inapplicable custom values fall back to the engine default.
-        if(p.preset=="custom")for(const auto& [key,value]:p.graphics){
+        // fps_limit (its own Rendering row) applies under every preset; the other keys only under custom.
+        for(const auto& [key,value]:p.graphics){
+            if(p.preset!="custom"&&key!="fps_limit")continue;
             auto o=std::find_if(c.options.begin(),c.options.end(),[&](const Option& o){return o.key==key;});
             if(o==c.options.end()||key=="backend"||key=="texture_packs"||value==o->fallback||std::count(o->values.begin(),o->values.end(),value)!=1||std::count(o->backends.begin(),o->backends.end(),p.renderer)!=1)continue;
             args.insert(args.end(),{"--graphics",key+"="+value});
@@ -566,10 +568,11 @@ void selfCheck() {
         const std::string caps=R"({"version":"0.2.0","backends":{"opengl":{"available":true,"detail":"Mesa"},"vulkan-raster":{"available":true,"detail":"RADV"},"vulkan-rt":{"available":false,"detail":"no ray query"}},"presets":["original","enhanced","ultra","custom"],)"
             R"("options":[{"key":"backend","values":["opengl","vulkan-raster","vulkan-rt"],"default":"opengl","backends":["opengl","vulkan-raster","vulkan-rt"],"label":"Backend"},{"key":"pbr","values":["0","1"],"default":"0","backends":["opengl","vulkan-raster","vulkan-rt"],"label":"PBR materials"},)"
             R"({"key":"msaa","values":["1","2","4","8"],"default":"4","backends":["opengl","vulkan-raster","vulkan-rt"],"label":"MSAA"},{"key":"rt_only","values":["0","1"],"default":"0","backends":["vulkan-rt"],"label":"RT only"},)"
-            R"({"key":"texture_packs","values":["0","1"],"default":"0","backends":["opengl","vulkan-raster","vulkan-rt"],"label":"Texture packs"}],)"
+            R"({"key":"texture_packs","values":["0","1"],"default":"0","backends":["opengl","vulkan-raster","vulkan-rt"],"label":"Texture packs"},)"
+            R"({"key":"fps_limit","values":["original","60","144","unlimited"],"default":"original","backends":["opengl","vulkan-raster","vulkan-rt"],"label":"FPS limit"}],)"
             R"("texture_packs":[{"name":"hd pack","display_name":"HD Pack","path":"/packs/hd pack","valid":true,"detail":"ok"},{"name":"broken","display_name":"","path":"/packs/broken","valid":false,"detail":"bad manifest"}]})";
         auto capabilities=parseCapabilities(caps);
-        require(capabilities.version=="0.2.0"&&capabilities.available("opengl")&&!capabilities.available("vulkan-rt")&&!capabilities.available("missing")&&capabilities.options.size()==5&&capabilities.options[2].fallback=="4"&&capabilities.packs.size()==2&&capabilities.packs[0].display=="HD Pack"&&!capabilities.packs[1].valid,"Capabilities parsing regression");
+        require(capabilities.version=="0.2.0"&&capabilities.available("opengl")&&!capabilities.available("vulkan-rt")&&!capabilities.available("missing")&&capabilities.options.size()==6&&capabilities.options[2].fallback=="4"&&capabilities.packs.size()==2&&capabilities.packs[0].display=="HD Pack"&&!capabilities.packs[1].valid,"Capabilities parsing regression");
         for(const std::string invalid:{"not json","[]","{}",R"({"version":"x","backends":{"d3d9":{"available":true}},"presets":[],"options":[]})",
             R"({"version":"x","backends":{},"presets":["original"],"options":[{"key":"pbr","values":["0","1"],"default":"2","backends":["opengl"]}]})",
             R"({"version":"x","backends":{},"presets":["original"],"options":[{"key":"p r","values":["0"],"default":"0","backends":["opengl"]}]})",
@@ -579,12 +582,15 @@ void selfCheck() {
         launch.preferences.preset="ultra";launch.preferences.packs={"hd pack"};require(tail()==Args{"--renderer","opengl"},"Graphics arguments emitted to an engine without capabilities");
         launch.capabilities=capabilities;launch.preferences.preset="original";launch.preferences.packs.clear();require(tail()==Args{"--renderer","opengl"},"Original preset changed the legacy command line");
         launch.preferences.preset="ultra";require(tail()==Args{"--renderer","opengl","--preset","ultra","--graphics","texture_packs=0"},"Unchecked packs did not stay disabled under a preset");
+        launch.preferences.graphics={{"fps_limit","144"},{"pbr","1"}};require(tail()==Args{"--renderer","opengl","--preset","ultra","--graphics","fps_limit=144","--graphics","texture_packs=0"},"FPS limit dropped under a preset");
+        launch.preferences.preset="original";require(tail()==Args{"--renderer","opengl","--graphics","fps_limit=144"},"FPS limit dropped under the original preset");
+        for(auto fps:{"original","1000"}){launch.preferences.graphics={{"fps_limit",fps}};require(tail()==Args{"--renderer","opengl"},"Original or unsupported FPS limit changed the legacy command line");}
         launch.preferences.preset="custom";launch.preferences.graphics={{"pbr","1"},{"msaa","4"},{"rt_only","1"},{"backend","vulkan-rt"},{"stale","1"},{"texture_packs","0"}};launch.preferences.packs={"broken","hd pack","absent"};
         require(tail()==Args{"--renderer","opengl","--preset","custom","--graphics","pbr=1","--texture-pack","hd pack"},"Custom graphics argument composition regression");
         launch.preferences.renderer="vulkan-rt";require(tail()==Args{"--renderer","vulkan","--ray-tracing","on","--preset","custom","--graphics","pbr=1","--graphics","rt_only=1","--texture-pack","hd pack"},"Ray-tracing option composition regression");
         launch.capabilities->presets={"original","custom"};launch.preferences.preset="ultra";rejects([&]{command(launch);});
         launch.capabilities.reset();launch.preferences=Preferences{};launch.preferences.language="tr";
-        Preferences graphics;graphics.preset="custom";graphics.graphics={{"pbr","1"},{"msaa","8"}};graphics.packs={"hd pack","semi;colon"};
+        Preferences graphics;graphics.preset="custom";graphics.graphics={{"pbr","1"},{"msaa","8"},{"fps_limit","unlimited"}};graphics.packs={"hd pack","semi;colon"};
         auto back=parsePreferences(encodePreferences(graphics));require(back.preset==graphics.preset&&back.graphics==graphics.graphics&&back.packs==graphics.packs,"Graphics preference roundtrip regression");
         rejects([&]{parsePreferences("[Launcher]\npreset=extreme\n");});rejects([&]{parsePreferences("[Launcher]\ntexture-packs=../x;\n");});rejects([&]{parsePreferences("[Graphics]\npbr=1 2\n");});
         // Contract F controller.ini: exact roundtrip, engine-equivalent lenient reading, strict writing.

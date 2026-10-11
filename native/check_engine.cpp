@@ -232,6 +232,17 @@ void a6_movement_consumers() {
     close_vector(engine.vector(engine.global_vector("bounce")), {4, 0, 4});
     assert(engine.number("contacts") == 1 && engine.number("blocked") == 0);
     close(engine.number("contact_x"), 0); close(engine.number("contact_z"), 2);
+    // Per-call slide deadband .2*(1-friction): a .1125 slide is dropped at the 72 FPS cap but kept when an fps_limit
+    // frame (TIME_FRAME raw 68, 240 FPS) shrinks the deadband with the frame.
+    move({0, 0, 2}, {.15f, 0, -4}, .25);
+    assert(engine.position(mover).x < .08f);
+    engine.set_global("time_frame", Value::from_raw(227));
+    move({0, 0, 2}, {.15f, 0, -4}, .25);
+    assert(engine.position(mover).x < .08f);
+    engine.set_global("time_frame", Value::from_raw(68));
+    move({0, 0, 2}, {.15f, 0, -4}, .25);
+    assert(engine.position(mover).x > .1f);
+    engine.set_global("time_frame", {});
     // The original helper does not clamp friction. Reversal stops at the contact,
     // before VGLIDE accumulation, and sends STUCK before final position publication.
     move({0, 0, 2}, {4, 0, -4}, 1.25);

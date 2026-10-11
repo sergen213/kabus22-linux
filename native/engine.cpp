@@ -2152,8 +2152,12 @@ Engine::Hit Engine::move_a6_legacy(Runtime& runtime,ProcessContext& query,Object
  auto block=[&](ObjectId other){if(std::uint32_t(field(id,"event_flags"))&8u){invoke_event(runtime,id,other,3);blocked=true;}};
  auto clip=[&](Vec3 v,Vec3 n){
   // 004537a0: unclamped MOVE_FRICTION, 1.01 overclip, strict .2*(1-friction) deadband.
+  // The deadband is per call: frames clearly shorter than the campaign's 72 FPS cap (TIME_FRAME raw below 216, ~76 FPS,
+  // margin for pacing jitter; only reachable with --graphics fps_limit) shrink it with the frame, so wall slides keep about
+  // their 72 FPS threshold instead of sticking at high rates. At the original cap or slower it is A6 exactly.
   const float keep=float(1.L-static_cast<long double>(float(global("move_friction").raw()))/1024.L);
-  const float dead=float(static_cast<long double>(keep)*.2);
+  const auto frameRaw=global("time_frame").raw();
+  const float dead=float(static_cast<long double>(keep)*.2*(frameRaw>0&&frameRaw<216?frameRaw/216.L:1.L));
   const float back=float(((static_cast<long double>(v.x)*n.x+static_cast<long double>(v.y)*n.y)+static_cast<long double>(v.z)*n.z)*1.01);
   auto component=[&](float value,float normal){float out=float((static_cast<long double>(value)-static_cast<long double>(back)*normal)*keep);return out>-dead&&out<dead?0.f:out;};
   return Vec3{component(v.x,n.x),component(v.y,n.y),component(v.z,n.z)};

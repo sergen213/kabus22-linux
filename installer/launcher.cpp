@@ -88,7 +88,7 @@ struct UI {
     GtkWidget *launchPage=nullptr,*campaignPage=nullptr,*renderPage=nullptr,*audioPage=nullptr,*keysPage=nullptr,*joyPage=nullptr,*padPage=nullptr,*bonusPage=nullptr,*logsPage=nullptr;
     std::array<GtkWidget*,31> campaign{};std::array<GtkWidget*,5> bonus{};
     // Rendering (Contract D)
-    GtkWidget *preset=nullptr,*backends=nullptr,*customGrid=nullptr,*packView=nullptr,*packUp=nullptr,*packDown=nullptr;GtkListStore* packs=nullptr;
+    GtkWidget *preset=nullptr,*backends=nullptr,*customGrid=nullptr,*packView=nullptr,*packUp=nullptr,*packDown=nullptr,*fpsLimit=nullptr;GtkListStore* packs=nullptr;
     std::vector<std::pair<Option,GtkWidget*>> optionWidgets;std::string capsNote="Load an installation to query engine capabilities.";
     // Controller (Contract F)
     GtkWidget *padMode=nullptr,*deadzone=nullptr,*sensitivity=nullptr,*vibration=nullptr;std::vector<GtkWidget*> padButtons;
@@ -123,7 +123,7 @@ struct UI {
         gtk_widget_set_tooltip_text(display,settings->originalCampaign?"Native widescreen or original authored resolution services":"Patched/custom campaign and Bonus retain their authored display. Native overrides are inapplicable.");
         const auto& caps=settings->capabilities;bool custom=caps&&gtk_combo_box_get_active_id(GTK_COMBO_BOX(preset))&&selected(preset)=="custom";
         gtk_widget_set_sensitive(preset,caps.has_value());for(auto* w:{packView,packUp,packDown})gtk_widget_set_sensitive(w,caps.has_value());
-        for(auto& [o,w]:optionWidgets)gtk_widget_set_sensitive(w,custom&&std::any_of(o.backends.begin(),o.backends.end(),[&](const std::string& b){return caps->available(b);}));
+        for(auto& [o,w]:optionWidgets)gtk_widget_set_sensitive(w,(custom||o.key=="fps_limit")&&std::any_of(o.backends.begin(),o.backends.end(),[&](const std::string& b){return caps->available(b);}));
         bool modern=selected(padMode)=="modern";for(auto* w:{deadzone,sensitivity,vibration})gtk_widget_set_sensitive(w,modern);for(auto* w:padButtons)gtk_widget_set_sensitive(w,modern);
     }
     void populate() {
@@ -149,7 +149,7 @@ struct UI {
     void populateRendering() {
         populating=true;
         gtk_container_foreach(GTK_CONTAINER(customGrid),+[](GtkWidget* w,gpointer){gtk_widget_destroy(w);},nullptr);optionWidgets.clear();gtk_list_store_clear(packs);
-        gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(preset));
+        gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(preset));gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(fpsLimit));gtk_widget_set_sensitive(fpsLimit,false);
         const Capabilities* caps=settings&&settings->capabilities?&*settings->capabilities:nullptr;
         if(!caps){gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(preset),"original","Original");select(preset,"original");gtk_label_set_text(GTK_LABEL(backends),valid(capsNote).c_str());populating=false;if(settings)availability();return;}
         for(const auto& name:caps->presets){std::string label=name;label[0]=g_ascii_toupper(label[0]);gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(preset),name.c_str(),label.c_str());}
@@ -161,12 +161,14 @@ struct UI {
         for(int pass=0;pass<2;++pass)for(const auto& o:caps->options) {
             if(o.key=="backend"||o.key=="texture_packs"||(pass==1)!=(o.backends==std::vector<std::string>{"vulkan-rt"}))continue;
             if(pass==1&&y>=0&&!std::any_of(optionWidgets.begin(),optionWidgets.end(),[](const auto& w){return w.first.backends==std::vector<std::string>{"vulkan-rt"};})){auto* h=gtk_label_new(nullptr);gtk_label_set_markup(GTK_LABEL(h),"<b>Ray tracing (Vulkan RT only)</b>");gtk_label_set_xalign(GTK_LABEL(h),0);gtk_grid_attach(GTK_GRID(customGrid),h,0,y++,2,1);}
-            auto* w=gtk_combo_box_text_new();bool toggle=o.values==std::vector<std::string>{"0","1"};
-            for(const auto& v:o.values)gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(w),v.c_str(),toggle?(v=="1"?"On":"Off"):v.c_str());
+            // fps_limit has its own Rendering row and applies under every preset.
+            const bool fps=o.key=="fps_limit";auto* w=fps?fpsLimit:gtk_combo_box_text_new();bool toggle=o.values==std::vector<std::string>{"0","1"};
+            for(const auto& v:o.values)gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(w),v.c_str(),toggle?(v=="1"?"On":"Off"):!fps?v.c_str():v=="original"?"Original (campaign 72, Bonus 60)":v=="unlimited"?"Unlimited (vsync off)":(v+" FPS").c_str());
             auto saved=std::find_if(p.graphics.begin(),p.graphics.end(),[&](const auto& g){return g.first==o.key;});
             select(w,saved!=p.graphics.end()&&std::count(o.values.begin(),o.values.end(),saved->second)?saved->second:o.fallback);
             std::string tip="Engine key "+o.key+", default "+o.fallback+". Backends:";for(const auto& b:o.backends)tip+=" "+b;
-            row(customGrid,y++,o.label.c_str(),w,tip.c_str());optionWidgets.emplace_back(o,w);
+            if(!fps)row(customGrid,y++,o.label.c_str(),w,tip.c_str());
+            optionWidgets.emplace_back(o,w);
         }
         if(optionWidgets.empty())gtk_grid_attach(GTK_GRID(customGrid),note("This engine offers no custom graphics options."),0,0,2,1);
         std::vector<const Pack*> ordered;
@@ -465,6 +467,7 @@ struct UI {
         packUp=gtk_button_new_with_mnemonic("Move _up");packDown=gtk_button_new_with_mnemonic("Move _down");gtk_box_pack_start(GTK_BOX(packButtons),packUp,false,false,0);gtk_box_pack_start(GTK_BOX(packButtons),packDown,false,false,0);
         g_signal_connect(packUp,"clicked",G_CALLBACK(+[](GtkButton*,gpointer data){decltype(move){}(*static_cast<UI*>(data),true);}),this);g_signal_connect(packDown,"clicked",G_CALLBACK(+[](GtkButton*,gpointer data){decltype(move){}(*static_cast<UI*>(data),false);}),this);
         gtk_grid_attach(GTK_GRID(grid),note("Packs live in ~/.local/share/kabus22/packs/<name>/pack.txt and never replace original files. Ray tracing is the Launch tab's Vulkan RT API; its availability is listed above."),0,7,2,1);
+        fpsLimit=gtk_combo_box_text_new();gtk_grid_insert_row(GTK_GRID(grid),1);row(grid,1,"_FPS limit",fpsLimit,"Applies under every preset. Original keeps the game's own cap (campaign 72, Bonus 60). Game speed stays correct at every listed rate. With vsync the display refresh rate still caps higher values; Unlimited turns vsync off and stops at about 321 FPS, the original engine's game-clock floor.");
         for(auto* w:{preset,renderer})g_signal_connect(w,"changed",G_CALLBACK(+[](GtkComboBox*,gpointer data){auto& ui=*static_cast<UI*>(data);if(ui.settings&&!ui.populating)ui.availability();}),this);
         audioPage=page(book,"Audio",grid);const char* volumes[]={"Effects volume","Music volume","Dialogue volume"};for(int i=12;i<=14;++i){campaign[i]=gtk_spin_button_new_with_range(0,100,5);row(grid,i-12,volumes[i-12],campaign[i]);}
         gtk_grid_attach(GTK_GRID(grid),note("Original scripts floor some gains above zero; 0 is not a guaranteed exact mute. Playback uses the system's current SDL audio output; this launcher does not change system routing."),0,3,2,1);
