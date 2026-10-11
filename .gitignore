@@ -582,6 +582,7 @@
 !/docs/CONSOLE.md
 !/docs/RELEASE_PROCESS.md
 !/docs/REVERSE_ENGINEERING.md
+!/docs/SEAMLESS_DOORS.md
 !/docs/TEXTURE_RESTORATION.md
 !/docs/WIDESCREEN_IMPLEMENTATION.md
 !/docs/WRS_FORMAT.md
@@ -613,6 +614,7 @@
 !/native/graphics_cli.hpp
 !/native/saves.cpp
 !/native/saves.hpp
+!/native/seamless_doors.cpp
 !/native/scenario.cpp
 !/native/scenario.hpp
 !/native/shaders/effects.frag
