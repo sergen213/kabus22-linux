@@ -1838,6 +1838,14 @@ void graphics_policy_checks() {
     {const std::vector<std::pair<std::string,std::string>>off{{"fsr","off"}},native{{"fsr","native"}},ultraPerformance{{"fsr","ultra_performance"}};
      require(resolve_graphics("ultra",off).features.fsr==0&&resolve_graphics("custom",native).features.fsr==1&&resolve_graphics("custom",ultraPerformance).features.fsr==5,"fsr values map to quality modes");
      const std::vector<std::pair<std::string,std::string>>bad{{"fsr","1"}};rejects([&]{resolve_graphics("custom",bad);},"fsr=1 accepted");}
+    {using Overrides=std::vector<std::pair<std::string,std::string>>;
+     require(enhanced.fpsLimit==0&&ultra.fpsLimit==0&&resolve_graphics("custom",Overrides{{"fps_limit","original"}}).fpsLimit==0,"presets keep the script fps_max");
+     require(resolve_graphics("original",Overrides{{"fps_limit","144"}}).fpsLimit==144&&resolve_graphics("ultra",Overrides{{"fps_limit","unlimited"}}).fpsLimit==-1,"fps_limit values map to rates");
+     for(auto bad:{"0","360","75","-1","max"})rejects([&]{resolve_graphics("custom",Overrides{{"fps_limit",bad}});},"unsupported fps_limit accepted");
+     require(frame_period_raw(0,72*1024)==1000LL*1024*1024/(72*1024)&&frame_period_raw(0,0)==1000LL*1024*1024/1024,"original pacing is A6 00414650 on script fps_max");
+     require(frame_period_raw(72,0)==frame_period_raw(0,72*1024)&&frame_period_raw(240,72*1024)==1000LL*1024/240,"fps_limit replaces script fps_max");
+     require(frame_period_raw(-1,72*1024)==3188&&frame_period_raw(-1,0)*16*1024>=51LL*1000*1024,"unlimited stops at the A6 TIME floor (raw 51)");
+     for(auto&option:graphicsOptions)if(option.key=="fps_limit")for(std::size_t v=1;v+1<option.count;++v)require(frame_period_raw(std::stoi(std::string(option.values[v])),0)>3188,"every listed rate stays above the TIME floor");}
     {const std::vector<std::pair<std::string,std::string>>set{{"shadows","rt"},{"gi","1"},{"reflections","rough"},{"bloom","1"},{"volumetric_fog","1"},{"shadows","shadowmap"},{"ssao","1"},{"fxaa","1"},{"taa","1"},{"denoise","1"}};auto f=resolve_graphics("custom",set).features;
      require(f.shadows==ShadowMode::ShadowMap&&f.gi&&f.roughReflections&&f.bloom&&f.fog&&f.ssao&&f.fxaa&&f.taa&&f.denoise,"later --graphics keys win");
      auto g=resolve_graphics("ultra",std::vector<std::pair<std::string,std::string>>{{"gi","0"},{"shadows","original"},{"taa","0"}}).features;require(!g.gi&&g.shadows==ShadowMode::Original&&!g.taa&&g.bloom,"overrides disable preset effects");}

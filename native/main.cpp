@@ -51,7 +51,7 @@ void help(){std::cout<<"kabus22 native engine\nUsage: kabus22 --data GAME_ROOT [
  "kabus22 --import-saves WINDOWS_GAME_DIR [--data GAME_ROOT] imports a validated original Windows save set (kayit*.sav, kysd.sav, ftz.k22) into the private save root, rotating replaced files into backups/.\n"
  "Testing: --scenario FILE [--scenario-out DIR] runs a scripted gameplay scenario (docs/GAMEPLAY_TESTING.md) with a fixed 1/60 s step, headless or rendered; exit code 0 only if every step passed.\n"
  "Graphics: kabus22 --list-capabilities prints backend/option/texture-pack JSON without game data. kabus22 --dump-textures DIR --data GAME_ROOT [--mode campaign|bonus] writes every decodable original texture as DIR/<key>.png plus DIR/index.tsv.\n"
- "  --preset original|enhanced|ultra|custom (absent = original), --graphics KEY=VALUE (repeatable; backend, pbr, anisotropy, msaa, texture_packs), --texture-pack NAME (repeatable, priority order; ${XDG_DATA_HOME:-~/.local/share}/kabus22/packs/NAME). Preset backends degrade with a notice; explicit --renderer/--ray-tracing/--graphics backend fail hard.\n"
+ "  --preset original|enhanced|ultra|custom (absent = original), --graphics KEY=VALUE (repeatable; backend, pbr, anisotropy, msaa, texture_packs, fps_limit=original|30..240|unlimited, ... see --list-capabilities), --texture-pack NAME (repeatable, priority order; ${XDG_DATA_HOME:-~/.local/share}/kabus22/packs/NAME). Preset backends degrade with a notice; explicit --renderer/--ray-tracing/--graphics backend fail hard.\n"
  "Controller: ${XDG_CONFIG_HOME:-~/.config}/kabus22/controller.ini mode=original|modern (absent = original).\n";}
 int import_saves(int argc,char** argv){
  std::filesystem::path source,data;
@@ -121,19 +121,19 @@ int main(int argc,char** argv){try{
  const auto& pm=runtime.metrics();std::cout<<"Parsed "<<pm.files<<" WDL files, "<<pm.functions<<" functions, "<<pm.statements<<" statements\n";for(auto& d:runtime.diagnostics())std::cerr<<"WDL: "<<d<<'\n';runtime.bootstrap();
  k22::Input input;std::uint64_t count=0;
  auto frameStart=renderer||scenario?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+ const double step=graphics.fpsLimit?double(k22::render_policy::frame_period_raw(graphics.fpsLimit,0))/1024000:1.0/60;
  while(!engine.quit&&(!frameLimit||count<frames)){
-  // Scenarios use a fixed 1/60 s step; "realtime on" paces it to the wall clock so movies/sounds keep their timing.
+  // Scenarios use a fixed step (1/60 s, or the --graphics fps_limit period); "realtime on" paces it to the wall clock so movies/sounds keep their timing.
   if(scenario?scenario->realtime():renderer!=nullptr){
-   // A6 00414650: floor(1000*1024*1024 / max(FPS_MAX raw,1024)) raw milliseconds.
-   const auto fpsRaw=scenario?60*1024:std::max<std::int32_t>(1024,engine.global("fps_max").raw());
-   const auto periodRaw=1000LL*1024*1024/fpsRaw;
+   // A6 00414650: floor(1000*1024*1024 / max(FPS_MAX raw,1024)) raw milliseconds, unless fps_limit overrides it.
+   const auto periodRaw=scenario&&!graphics.fpsLimit?1000LL*1024*1024/(60*1024):k22::render_policy::frame_period_raw(graphics.fpsLimit,engine.global("fps_max").raw());
    const auto deadline=frameStart+std::chrono::nanoseconds(periodRaw*1'000'000/1024);
    if(std::chrono::steady_clock::now()<deadline)std::this_thread::sleep_until(deadline);
    // Anchor to the actual start, not completion or an overdue scheduled start.
    frameStart=std::chrono::steady_clock::now();
   }
   if(renderer)renderer->poll(input);else input.dt=1.0/60;
-  if(scenario){input.dt=1.0/60;if(!scenario->step(engine,runtime,renderer.get(),input,count))break;if(scenario->realtime())media.real_clock();else media.advance_clock(1.0/60);}
+  if(scenario){input.dt=step;if(!scenario->step(engine,runtime,renderer.get(),input,count))break;if(scenario->realtime())media.real_clock();else media.advance_clock(step);}
   engine.tick(runtime,engine.skip_intro(runtime,engine.console(runtime,input)));
   if(renderer)renderer->draw(engine.frame());
   engine.finish_frame(runtime);++count;

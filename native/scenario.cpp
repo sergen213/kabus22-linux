@@ -251,10 +251,12 @@ bool Scenario::step(Engine& engine,Runtime& runtime,Renderer* renderer,Input& in
     if(done){release();++s.passed;s.report(step,"PASS",frame,"after "+std::to_string(s.progress)+" frames"+where);s.next();break;}
     if(s.progress>=step.count){release();++s.failed;s.report(step,"FAIL",frame,"timeout, distance "+std::to_string(int(d))+" facing "+std::to_string(int(f))+where);s.aborted=true;break;}
     // ponytail: greedy steering plus a blind sidestep (alternating sides) after 40 frames without 2 units of progress; "path" re-plans (5x max), routes re-anchor.
-    if(!turn){if(s.progress==0||d<s.best-2){s.best=d;s.lastImprove=s.progress;}if(!s.escape&&s.progress-s.lastImprove>40){s.escape=45;++s.escapes;s.lastImprove=s.progress;
+    // Frame counts are 1/60 s frames, scaled to the step (fps_limit), so a turn in place is not taken for "stuck" at high rates.
+    const auto frames60=[&](double n){return long(std::lround(n/(60*in.dt)));};
+    if(!turn){if(s.progress==0||d<s.best-2){s.best=d;s.lastImprove=s.progress;}if(!s.escape&&s.progress-s.lastImprove>frames60(40)){s.escape=int(frames60(45));++s.escapes;s.lastImprove=s.progress;
      if(planned){if(s.replans++<5&&!replan())break;}
      else if(!step.path.empty()){auto nearest=s.leg;for(std::size_t i=0;2*i<step.path.size();++i)if(at.dist(Vec3{step.path[2*i],step.path[2*i+1],pos.z})<at.dist(Vec3{step.path[2*nearest],step.path[2*nearest+1],pos.z}))nearest=i;if(nearest!=s.leg){s.leg=nearest;s.best=INFINITY;s.report(step,"INFO",frame,"stuck, re-anchored on leg "+std::to_string(s.leg)+where);}}}}
-    if(s.escape){--s.escape;const bool steer=s.escape>=30,side=s.escapes%2;s.keys.set(left,steer&&side);s.keys.set(right,steer&&!side);s.keys.set(up,true);s.keys.set(run,step.down);}
+    if(s.escape){--s.escape;const bool steer=s.escape>=frames60(30),side=s.escapes%2;s.keys.set(left,steer&&side);s.keys.set(right,steer&&!side);s.keys.set(up,true);s.keys.set(run,step.down);}
     else{s.keys.set(left,f>band);s.keys.set(right,f< -band);s.keys.set(up,!turn&&std::fabs(f)<60);s.keys.set(run,!turn&&step.down);}
     ++s.progress;s.apply(in);return true;}
    case Op::Find:{
