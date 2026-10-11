@@ -19,6 +19,8 @@ Honest list of what is not established or not implemented. See [PROGRESS.md](PRO
 - Legacy `emit` particle SIZE follows A6 `00443950` (screen pixels at the selected video mode's width, `CONTRACT.txt` §43) in the campaign only. Not reproduced: the original's per-pixel truncation of very small particles, and per-view ARC (all views use the camera's ARC). Bonus (A7 `acknex.dll`) emit SIZE stays in quants because its legacy path has not been recovered.
 - Sprite strips wider than 16384 px are re-laid out as a frame grid (one original asset, `s_alev+61.tga`); GPUs with a smaller texture limit are not handled.
 
+- Character lock ([CHARACTER_LOCK.md](CHARACTER_LOCK.md#limitations)): cutscenes and movies still show the story's character, so a locked character can meet itself as an NPC (Saraygir `video_ebrumefta`, the final `boss_ebru_ai` with Ebru); story voice lines (Demir's "it's locked") are not replaced; Ebru fires Demir's firearms in her magnum pose and cannot throw grenades or lay mines. A full locked playthrough of every story section beyond each level's entry is not established.
+
 ## Rendering
 
 - Nondefault stencil shadows, software world light and VIEW render-to-bitmap remain unsupported.

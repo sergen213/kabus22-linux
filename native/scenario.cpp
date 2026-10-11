@@ -52,6 +52,8 @@ struct Eval {
    // Seamless doors (docs/SEAMLESS_DOORS.md): phase 0 idle/1 opening/2 crossing/3 holding/4 revealing, completed swaps, presented LYP_Fade frames.
    if(name=="door")return {false,double(engine.door_phase()),{}};if(name=="doorswaps")return {false,double(engine.doorSwaps),{}};if(name=="fadeframes")return {false,double(engine.fadeFrames),{}};
    if(name=="movie")return {false,engine.movie&&engine.media.movie_playing(engine.movie)?1.0:0.0,{}}; // full-screen media_play (no target bitmap)
+   if(name=="character")return {false,double(engine.characterLock),{}}; // native character lock: -1 original, 0 Demir, 1 Ebru, 2 Inzar
+   if(name=="prompt")return {false,double(engine.character_prompt()),{}}; // story-switch prompt: the story's character, -1 when closed
    if(name=="movieframe")return {false,engine.movie?engine.media.movie_status(engine.movie):0.0,{}}; // media_playing: 1-based decoded frame, 0 when stopped
    if(name=="wall"){static const auto start=std::chrono::steady_clock::now();return {false,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count(),{}};} // seconds since first $wall read
    if(name=="count"){if(!take("("))fail("expected (");auto action=runtime.function(ident());if(!take(")"))fail("expected )");if(!action)fail("unknown action");int n=0;for(const auto& [id,data]:engine.entities)n+=runs(engine,id,action);return {false,double(n),{}};}

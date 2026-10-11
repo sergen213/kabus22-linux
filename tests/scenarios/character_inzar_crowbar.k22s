@@ -1,0 +1,62 @@
+# requires: saves
+# Character lock (docs/CHARACTER_LOCK.md): an Ebru-only progression chain played by Inzar. Ebru's story (kayit6.sav, Ev, after her
+# Ev scene v_ebru_ev_ok) needs the crowbar by Start4's burning car (Nesneler.wdl NS_AlTarama: item 16, unic 10, refused before
+# v_ebru_ev_ok) and pries the Kk door with it (Ornek_Yasin.wdl v_kapikanirt_Tarama, cinematic.wdl video_kanirt_ebru:
+# Aktif_Player==Player_Ebru && nesne_varmi(16)). Inzar takes it by holding D (koruyucu.wdl energy channel -> PL_KapiTara), and
+# M opens the item inventory outside her own story (k22_menu_player). Aktif_Player stays 1 throughout.
+realtime off
+load-save 6
+wait until LY_AktifLevelID == 27 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+assert Aktif_Player == 1 && v_ebru_ev_ok == 1 && unic_obje_dizi[10] == 0
+press F10
+type character inzar
+press Return
+press F10
+frames 4
+assert $character == 2
+# Start4 the way Ebru enters it from Sd (LV_Start4_Giris GE02), through Sd itself.
+set LY_AktifLevelID 1
+set LY_HedefLevel 2
+wait until LY_AktifLevelID == 2 timeout 3000
+wait until LY_HedefLevel == 0 && level_yuklendi_ok == 1 && LYP_Fade.visible == 0 timeout 1200
+assert $count(oyuncu_koruyucu) == 1 && $count(Oyuncu_Ebru) == 0
+set LY_HedefLevel 1
+wait until LY_AktifLevelID == 1 timeout 3000
+wait until LY_HedefLevel == 0 && level_yuklendi_ok == 1 && koruyucu_pasif == 0 && LYP_Fade.visible == 0 timeout 1200
+assert $level == "start4.wmb" && Aktif_Player == 1
+assert $count(oyuncu_koruyucu) == 1 && $count(Oyuncu_Ebru) + $count(Oyuncu_Demir) == 0
+assert koru_efektbas_ok == 1
+capture inzar_start4
+store n0 NS_NesneSayisi
+walk-to -338 175 20 path run timeout 4000
+route 20 -169 182 -42 160 156 195 206 230 run timeout 4000
+turn-to 239 253
+down D
+wait until unic_obje_dizi[10] == 1 timeout 600
+up D
+assert NS_NesneSayisi == @n0 + 1
+# Kk (Ebru's level 13, entered from Yuy) and the pried door.
+wait until koruyucu_pasif == 0 timeout 600
+set LY_AktifLevelID 8
+set LY_HedefLevel 13
+wait until LY_AktifLevelID == 13 timeout 3000
+wait until LY_HedefLevel == 0 && level_yuklendi_ok == 1 && koruyucu_pasif == 0 && LYP_Fade.visible == 0 timeout 1200
+assert $count(oyuncu_koruyucu) == 1
+wait until EnvaterAcilabilirmi == 1 timeout 1200
+walk-to -1414 -202 15 path run timeout 5000
+turn-to -1465 -207 6
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+press-until Down EM_CursorSiNeDo == 1 timeout 120
+press Return
+wait until EM_Bolge == 3 timeout 300
+press-until Right EM_CursorNesne+EM_NesneKafa >= @n0 timeout 600
+press Return
+wait until EM_Bolge == 7 && EM_CursorKuBiGo == 0 timeout 300
+press Return
+wait until v_ebrukanirt_start == 1 timeout 300
+frames 60
+capture kk_kanirt_cutscene
+wait until v_ebrukanirt_ok == 1 timeout 6000
+wait until oyuncu_pasif == 0 && koruyucu_pasif == 0 timeout 3000
+assert Aktif_Player == 1 && $count(oyuncu_koruyucu) == 1 && player != 0

@@ -63,8 +63,9 @@ Command names are case-insensitive. Output also goes to stderr (`kabus22: consol
 |---|---|
 | `help [COMMAND]` | List all commands, or one command's usage. |
 | `save` | Quicksave (as F5). |
+| `character [original\|demir\|ebru\|inzar]` | Print or set the character lock ([Character lock](CHARACTER_LOCK.md)). It applies from the next level entry (a door, `level ID` or a load); `original` lets the body follow the story again. |
 | `load [SLOT]` | Quickload the newest slot, or `kayitSLOT.sav` (0-98; the load menu shows slot N as entry N+1). |
-| `god` | Toggle invulnerability: after every frame the active character's `ENERJI` (`SKILL1`) and health VAR are refilled (Demir `oyn_yaralanma` 100, Ebru `ebru_yaralanma` 100, Inzar `koru_yaralanma` 200, the new-game values). A hit can still play its flinch animation. |
+| `god` | Toggle invulnerability: after every frame the played character's `ENERJI` (`SKILL1`) and health VAR are refilled (Demir `oyn_yaralanma` 100, Ebru `ebru_yaralanma` 100, Inzar `koru_yaralanma` 200, the new-game values). A hit can still play its flinch animation. |
 | `noclip` | Toggle walking through walls and entities: the player gets `PASSABLE`, which the A6 mover treats as "move without collision". Gravity and floor tracing still apply, so it walks, not flies. |
 | `give health` | Refill health as above. |
 | `give mana` | Inzar's `koruyucu_mana` to 230. |

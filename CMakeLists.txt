@@ -84,7 +84,8 @@ target_compile_options(kabus22_fsr3 PRIVATE -include "${CMAKE_CURRENT_SOURCE_DIR
 install(FILES "${K22_FFX}/LICENSE.txt" DESTINATION share/doc/kabus22/third_party RENAME FidelityFX-SDK-LICENSE.txt)
 add_library(kabus22_core native/engine.cpp native/wdl.cpp native/assets.cpp native/render.cpp
   native/render_gl.cpp native/render_vulkan.cpp native/render_vulkan_raster.cpp native/render_vulkan_rt.cpp native/vulkan_loader.cpp
-  native/media.cpp native/physics.cpp native/texture_pack.cpp native/controller.cpp native/saves.cpp native/console.cpp native/seamless_doors.cpp "${K22_SHADER_HEADER}")
+  native/media.cpp native/physics.cpp native/texture_pack.cpp native/controller.cpp native/saves.cpp native/console.cpp native/seamless_doors.cpp
+  native/character.cpp "${K22_SHADER_HEADER}")
 target_include_directories(kabus22_core PUBLIC native PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${Vulkan_INCLUDE_DIRS})
 target_link_libraries(kabus22_core PUBLIC PkgConfig::SDL2 PkgConfig::EPOXY PkgConfig::AV PkgConfig::FREETYPE PkgConfig::FONTCONFIG Threads::Threads ODE ${CMAKE_DL_LIBS} PRIVATE kabus22_fsr3)
 target_compile_options(kabus22_core PRIVATE -Wall -Wextra -Wpedantic)
@@ -148,6 +149,12 @@ if(BUILD_TESTING)
       add_test(NAME level_sweep COMMAND "${CMAKE_COMMAND}" "-DK22=$<TARGET_FILE:kabus22>" "-DGAME=${K22_GAME_DATA}" "-DSAVES=${K22_ORIGINAL_SAVES}"
         "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/level-sweep" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/levels/sweep.cmake")
       set_tests_properties(level_sweep PROPERTIES TIMEOUT 1200)
+      # The same sweep with each character lock (docs/CHARACTER_LOCK.md): every level's player is the locked character.
+      foreach(character demir ebru inzar)
+        add_test(NAME level_sweep_${character} COMMAND "${CMAKE_COMMAND}" "-DK22=$<TARGET_FILE:kabus22>" "-DGAME=${K22_GAME_DATA}" "-DSAVES=${K22_ORIGINAL_SAVES}"
+          "-DCHARACTER=${character}" "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/level-sweep-${character}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/levels/sweep.cmake")
+        set_tests_properties(level_sweep_${character} PROPERTIES TIMEOUT 1200)
+      endforeach()
     endif()
     # Native captures of tests/reference/*.k22s against the original's captures (tools/wine-reference/, docs/GAMEPLAY_TESTING.md#reference-comparison).
     # Renders with OpenGL in a window, so it needs DISPLAY; thresholds in tests/reference/thresholds.tsv.
