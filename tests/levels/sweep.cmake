@@ -6,6 +6,8 @@
 # Then 600 frames of play (Up held for the first 120), checking that the player stays above the level geometry.
 # Headless by default; ARGS replaces --headless (for example --renderer;opengl;--window-mode;windowed;--resolution;1280x720) and
 # then each run writes OUT/<id>/out/level-<id>.ppm. Writes OUT/summary.tsv. Engine/script errors end the process (non-zero exit).
+# -DCHARACTER=demir|ebru|inzar: after the load, the native console sets that character lock (docs/CHARACTER_LOCK.md), so both
+# transitions place the locked character's player action, and the run asserts it is the one live player action.
 if(NOT ARGS)
   set(ARGS --headless)
 endif()
@@ -49,6 +51,18 @@ foreach(row IN LISTS rows)
   elseif(who STREQUAL "Inzar")
     set(who_id 2)
   endif()
+  set(lock "")
+  set(lockcheck "")
+  if(CHARACTER)
+    set(body Oyuncu_Demir)
+    if(CHARACTER STREQUAL "ebru")
+      set(body Oyuncu_Ebru)
+    elseif(CHARACTER STREQUAL "inzar")
+      set(body oyuncu_koruyucu)
+    endif()
+    set(lock "press F10\ntype character ${CHARACTER}\npress Return\npress F10\nframes 4\n")
+    set(lockcheck "assert $count(${body}) == 1\nassert $count(Oyuncu_Demir) + $count(Oyuncu_Ebru) + $count(oyuncu_koruyucu) == 1\n")
+  endif()
   set(checks "")
   foreach(i RANGE 1 6)
     if(i EQUAL 1)
@@ -67,7 +81,7 @@ realtime off
 load-save ${save}
 wait until LY_HedefLevel == 0 && level_yuklendi_ok == 1 && LYP_Fade.visible == 0 timeout 6000
 assert Aktif_Player == ${who_id}
-set LY_AktifLevelID ${via}
+${lock}set LY_AktifLevelID ${via}
 set LY_HedefLevel ${from}
 wait until LY_AktifLevelID == ${from} timeout 3000
 wait until LY_HedefLevel == 0 && level_yuklendi_ok == 1 && LYP_Fade.visible == 0 || LY_HedefLevel == 0 && ${hold_${from}} timeout 1200
@@ -75,7 +89,7 @@ set LY_HedefLevel ${id}
 wait until LY_AktifLevelID == ${id} timeout 3000
 assert $level == \"${wmb}\"
 wait until oyuncu_pasif == 0 && koruyucu_pasif == 0 && LYP_Fade.visible == 0 || ${hold_${id}} timeout 1200
-store x0 player.x
+${lockcheck}store x0 player.x
 store y0 player.y
 print player.z
 print $levelminz

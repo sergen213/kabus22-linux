@@ -50,6 +50,8 @@ struct Eval {
    if(name=="level")return {true,0,lower(engine.currentLevel)};if(name=="frame")return {false,double(frame),{}};
    if(name=="levelminz"||name=="levelmaxz"){if(!engine.world)fail("no level loaded");return {false,name=="levelminz"?engine.world->mesh.min.z:engine.world->mesh.max.z,{}};} // WMB geometry bounds
    if(name=="movie")return {false,engine.movie&&engine.media.movie_playing(engine.movie)?1.0:0.0,{}}; // full-screen media_play (no target bitmap)
+   if(name=="character")return {false,double(engine.characterLock),{}}; // native character lock: -1 original, 0 Demir, 1 Ebru, 2 Inzar
+   if(name=="prompt")return {false,double(engine.character_prompt()),{}}; // story-switch prompt: the story's character, -1 when closed
    if(name=="movieframe")return {false,engine.movie?engine.media.movie_status(engine.movie):0.0,{}}; // media_playing: 1-based decoded frame, 0 when stopped
    if(name=="wall"){static const auto start=std::chrono::steady_clock::now();return {false,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count(),{}};} // seconds since first $wall read
    if(name=="count"){if(!take("("))fail("expected (");auto action=runtime.function(ident());if(!take(")"))fail("expected )");if(!action)fail("unknown action");int n=0;for(const auto& [id,data]:engine.entities)n+=runs(engine,id,action);return {false,double(n),{}};}
