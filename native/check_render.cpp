@@ -770,6 +770,11 @@ void gl_checks(std::span<const std::byte> mix,std::span<const std::byte> sunMix,
     particle.alphaRaw=0;
     particle.color.a=0;
     shot("Opaque CPU particle ignores raw and color alpha",{255,255,255});
+    // Two particles sharing image and blend draw as one batch (GL and Vulkan instancing): each keeps its own tint and pose.
+    std::array<Particle,2> pair{particle,particle};pair[0].size=pair[1].size=4;pair[0].color={1,0,0,1};pair[1].color={0,1,0,1};pair[0].position={10,5,0};pair[1].position={10,-5,0};
+    frame.particles=std::span(pair);
+    shot("Batched CPU particle 1 keeps its tint and pose",{255,0,0},.25f);
+    shot("Batched CPU particle 2 keeps its tint and pose",{0,255,0},.75f);
     frame.particles={};
     camera.alpha=1;
     camera.opacityByte=255;

@@ -17,6 +17,8 @@ layout(location=7) out vec3 vertexMaterialDiffuse;
 layout(location=8) out vec3 vertexMaterialSpecular;
 layout(location=9) out vec3 worldTangent;
 layout(location=10) out vec4 previousClip; // Motion-vector pass (3): previous-frame clip position.
+layout(location=11) flat out vec4 instanceTint;  // particleInstanced: per-particle tint, else the uniform tint.
+layout(location=12) flat out vec4 instanceFlags; // particleInstanced: flare, overlay, invertFlare.
 layout(set=0,binding=5,std430) readonly buffer Lights { vec4 lightData[]; };
 // Pass 3 with dataPass.y set: the previous frame's GPU-deformed pose (PackedVertex, 13 floats per vertex).
 layout(set=0,binding=6,std430) readonly buffer PreviousPose { float previousPose[]; };
@@ -57,7 +59,10 @@ void ordinaryMaterial(vec3 p,vec3 n,out vec3 diffuse,out vec3 specular){
 }
 void main(){
     vertexDynamicLight=vec3(0);vertexMaterialDiffuse=vec3(0);vertexMaterialSpecular=vec3(0);effectLight=vec3(0);effectView=vec3(0);
-    vec4 w=model*vec4(position,1);worldPosition=w.xyz;worldNormal=normalize(normalMatrix*normal)*normalOrientation;worldTangent=mat3(model)*tangent;
+    mat4 drawModel=model;instanceTint=tint;instanceFlags=vec4(0);
+    if(particleInstanced){int b=gl_InstanceIndex*24;drawModel=mat4(previousPose[b],previousPose[b+1],previousPose[b+2],previousPose[b+3],previousPose[b+4],previousPose[b+5],previousPose[b+6],previousPose[b+7],previousPose[b+8],previousPose[b+9],previousPose[b+10],previousPose[b+11],previousPose[b+12],previousPose[b+13],previousPose[b+14],previousPose[b+15]);
+        instanceTint=vec4(previousPose[b+16],previousPose[b+17],previousPose[b+18],previousPose[b+19]);instanceFlags=vec4(previousPose[b+20],previousPose[b+21],previousPose[b+22],0);}
+    vec4 w=drawModel*vec4(position,1);worldPosition=w.xyz;worldNormal=normalize(normalMatrix*normal)*normalOrientation;worldTangent=mat3(drawModel)*tangent;
     if(worldVertexLighting)vertexDynamicLight=nativeDynamic(worldPosition,worldNormal);
     if(explicitMaterial&&effectKind==0)ordinaryMaterial(worldPosition,worldNormal,vertexMaterialDiffuse,vertexMaterialSpecular);
     if(effectKind!=0){mat3 basis=transpose(mat3(mat3(model)*tangent,mat3(model)*cross(tangent,normal),mat3(model)*normal));effectLight=normalize(basis*-(sunDirection+(effectKind==1?skillExtra.xyz:vec3(0))));effectView=normalize(basis*(cameraPosition-w.xyz));}
