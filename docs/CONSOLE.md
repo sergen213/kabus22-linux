@@ -92,6 +92,48 @@ The Bonus game (`--mode bonus`) has no campaign save system or level table: `sav
 that, and `god`/`give`/`kill` (campaign health and weapon variables) are campaign only. `get`/`set`/`timescale`/`fps`/`clear`/
 `quit` work there; `noclip`/`pos`/`tp` need a `player` entity.
 
+## Levels
+
+All 101 campaign levels from the original level table (`LevelYonetim.wdl LVSL_Olustur`). Use `level ID` or `level WMB`
+(e.g. `level 22` or `level level5`). IDs 63 and 96 are empty. 33 and 34 reuse `kriz`. Character: who the level places as the player.
+
+| ID | WMB | Character | ID | WMB | Character | ID | WMB | Character |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `start4` | Demir | 35 | `kizic3` | Demir | 70 | `saraygir` | Demir |
+| 2 | `sd` | Demir | 36 | `kizic` | Demir | 71 | `saraygiralt` | Demir |
+| 3 | `start5` | Demir | 37 | `kizic2` | Demir | 72 | `masso_lg` | Demir |
+| 4 | `level4` | Demir | 38 | `krizkuyu` | Demir | 73 | `massotaltkat` | Demir |
+| 5 | `start3` | Demir | 39 | `tnel24` | Inzar | 74 | `kolidorsag` | Demir |
+| 6 | `nstart7` | Demir | 40 | `tnel12` | Inzar | 75 | `ayinyeri` | Demir |
+| 7 | `cam1` | Demir | 41 | `tnel66` | Inzar | 76 | `kutuphane` | Demir |
+| 8 | `yuy` | Demir | 42 | `tnel13` | Inzar | 77 | `yemekodasi` | Demir |
+| 9 | `mekke` | Demir | 43 | `tnel10` | Inzar | 78 | `kanodasi` | Demir |
+| 10 | `start7` | Demir | 44 | `tnel15` | Inzar | 79 | `saatodasi` | Demir |
+| 11 | `mezarlik` | Demir | 45 | `tnel19` | Inzar | 80 | `dumur` | Demir |
+| 12 | `start1` | Demir | 46 | `tnel16` | Inzar | 81 | `kolidorsol` | Demir |
+| 13 | `kk` | Ebru | 47 | `tnel14` | Inzar | 82 | `dumurek1` | Demir |
+| 14 | `start2` | Demir | 48 | `tnel7` | Inzar | 83 | `bedkorgel` | Demir |
+| 15 | `untitled44` | Demir | 49 | `tnel21` | Inzar | 84 | `buyukes` | Demir |
+| 16 | `iceri1` | Demir | 50 | `tnel17` | Inzar | 85 | `massotsoloda` | Demir |
+| 17 | `fiinis` | Ebru | 51 | `tnel6` | Inzar | 86 | `massotsolodad1` | Demir |
+| 18 | `start6` | Demir | 52 | `tnel11` | Inzar | 87 | `massotsolodad2` | Demir |
+| 19 | `startwc` | Demir | 53 | `tnel18` | Inzar | 88 | `massotsolodad3` | Demir |
+| 20 | `level7` | Demir | 54 | `tnel5` | Inzar | 89 | `massotmerdiven` | Demir |
+| 21 | `start10` | Demir | 55 | `tnel22` | Inzar | 90 | `massotsagoda` | Demir |
+| 22 | `level5` | Demir | 56 | `tnel20` | Inzar | 91 | `solustoda` | Demir |
+| 23 | `kazankol` | Demir | 57 | `tnel23` | Inzar | 92 | `solustodad1` | Demir |
+| 24 | `camtuvalet` | Demir | 58 | `tnel25` | Inzar | 93 | `hapisane` | Demir |
+| 25 | `iceri2` | Demir | 59 | `tnel26` | Inzar | 94 | `hapisaned1` | Demir |
+| 26 | `binaici` | Ebru | 60 | `tnel27` | Ebru | 95 | `hapisaned2` | Demir |
+| 27 | `ev` | Ebru | 61 | `tnel28` | Inzar | 97 | `hapisaned4` | Demir |
+| 28 | `ev2` | Ebru | 62 | `seytan_k` | Inzar | 98 | `kotukoru_d` | Demir |
+| 29 | `arasokak` | Ebru | 64 | `seytan_e` | Demir | 99 | `ev3` | Demir |
+| 30 | `aralevel` | Ebru | 65 | `ebrudus` | Ebru | 100 | `bosskoli` | Demir |
+| 31 | `kriz` | Demir | 66 | `tnel8` | Ebru | 101 | `boss` | Demir |
+| 32 | `kizicyolwmp` | Demir | 67 | `tnel9` | Ebru | 102 | `yereson` | Ebru |
+| 33 | `kriz` | Demir | 68 | `tttg2` | Ebru | 103 | `hapisane_dark` | Ebru |
+| 34 | `kriz` | Demir | 69 | `ttn3` | Ebru |  |  |  |
+
 ## Tests
 
 - `tests/scenarios/quicksave1_roundtrip.k22s`: F5 in kizic2, walk away, change ammo, F9: position (±1), pan and ammo restored;
