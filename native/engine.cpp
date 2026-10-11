@@ -1081,6 +1081,16 @@ Value Engine::builtin(Runtime& runtime,ProcessContext& ctx,std::string_view name
  if(name=="k22_body_player")return Value::from_int(body_character());
  if(name=="k22_menu_player")return Value::from_int(menu_character());
  if(name=="k22_weapon_player")return Value::from_int(weapon_character());
+ if(name=="k22_body_oyuncu_pasif"||name=="k22_body_koruyucu_pasif"){ // a locked body obeys the story character's control gate
+  const bool koru=characterLock>=0?story_character()==2:name=="k22_body_koruyucu_pasif";
+  return global(koru?"koruyucu_pasif":"oyuncu_pasif");
+ }
+ if(name=="k22_bullet_hit_kind"){ // silah.wdl:680 you.skill3=aktif_silah; Lain handles one firearm kind (character.cpp)
+  const auto lain=runtime.function("kotukoru_ai");
+  if(characterLock>=0&&lain&&ctx.you&&state.get(ctx.you)&&callback(ctx.you,"action1")==lain)return Value::from_int(2);
+  return global("Aktif_Silah");
+ }
+ if(name=="k22_pose_weapon"){const double w=number("Aktif_Silah");return characterLock>=0&&(w<0||w>7)?Value::from_int(1):global("Aktif_Silah");} // oy_Oynat: Demir's t_Silah has weapons 0-7
  if(state.profile==SemanticProfile::BonusA7){
   auto count=[&](std::size_t n){if(args.size()!=n)throw std::runtime_error(std::string(name)+": invalid argument count");};
   auto numeric=[&](std::size_t i){auto v=args[i].current();if(v.kind!=Value::Kind::Number)throw std::runtime_error(std::string(name)+": numeric argument required");return v.raw();};

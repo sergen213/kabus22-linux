@@ -1,0 +1,204 @@
+# requires: saves
+# character: demir
+# Character lock (docs/CHARACTER_LOCK.md): Demir, a gun body, fights Lain (kotukoru_ai), Inzar's boss in the story (slot 26 =
+# kayit25.sav, Kotukoru_d, as inzar_lain_boss). Lain's intro releases only Inzar's control gate (koruyucu_pasif, kotu_koruyucu.wdl:6486);
+# the locked body obeys the story's gate (k22_body_*_pasif). Lain gets enemy type 1 for the bullet blood table (Ates_Et kan_mertip,
+# skill2) and its bullet hits are recorded as firearm kind 2, the one Kotukoru_Yaralan handles. The body keeps the story's firearm
+# (Aktif_Silah at entry), held with S and fired with D in rounds that re-aim; Return reloads. Kotukoru_Ol (lain_sona_erdi 1)
+# returns the story to Demir and LY_HedefLevel 84 (Buyukes).
+realtime off
+load-save 25
+wait until LY_AktifLevelID == 98 && level_yuklendi_ok == 1 && player != 0 timeout 7200
+assert $level == "kotukoru_d.wmb"
+assert Aktif_Player == 2 && lain_sona_erdi == 0
+assert $character == 0 && $count(Oyuncu_Demir) == 1 && $count(oyuncu_koruyucu) == 0
+find boss kotukoru_ai
+assert @boss.skill2 == 1
+wait until $movie timeout 1200
+press Escape
+wait until koruyucu_pasif == 0 && $movie == 0 timeout 1200
+store w Aktif_Silah
+assert @w >= 1 && @w <= 8
+print S_Kursun_Sayisi[@w] + Kursun_Sayisi[@w]
+store hp0 $health
+wait until $health < @hp0 timeout 1800
+capture lain_attacks_gun_body
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 600
+store b0 @boss.skill1
+press-until D @boss.skill1 < @b0 timeout 900
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[@w] > 0 || Kursun_Sayisi[@w] == 0 || @boss.skill1 <= 0 timeout 300
+up S
+assert @boss.skill1 <= 0 && player.skill1 > 0
+wait until @boss.skill21 == 9 || lain_sona_erdi >= 1 timeout 600
+frames 90
+capture lain_death_gun_body
+wait until lain_sona_erdi == 1 timeout 3000
+wait until LY_AktifLevelID == 84 && level_yuklendi_ok == 1 && lain_sona_erdi == 2 timeout 3000
+assert Aktif_Player == 0
+assert $level == "buyukes.wmb"
+assert $character == 0 && $count(Oyuncu_Demir) == 1
+frames 120
+capture lain_buyukes_gun_body
+# Buyukes autosave after buyukes_koruses (as inzar_lain_boss).
+wait until OSN_OtoSave_dizi[14] == 1 timeout 3600
+wait until Aktif_SaveNo == 28 timeout 1200

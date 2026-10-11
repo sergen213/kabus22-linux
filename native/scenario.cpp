@@ -52,13 +52,14 @@ struct Eval {
    if(name=="movie")return {false,engine.movie&&engine.media.movie_playing(engine.movie)?1.0:0.0,{}}; // full-screen media_play (no target bitmap)
    if(name=="character")return {false,double(engine.characterLock),{}}; // native character lock: -1 original, 0 Demir, 1 Ebru, 2 Inzar
    if(name=="prompt")return {false,double(engine.character_prompt()),{}}; // story-switch prompt: the story's character, -1 when closed
+   if(name=="health"){static constexpr std::string_view vars[]{"oyn_yaralanma","ebru_yaralanma","koru_yaralanma"};return {false,engine.number(vars[engine.body_character()]),{}};} // the played body's health variable
    if(name=="movieframe")return {false,engine.movie?engine.media.movie_status(engine.movie):0.0,{}}; // media_playing: 1-based decoded frame, 0 when stopped
    if(name=="wall"){static const auto start=std::chrono::steady_clock::now();return {false,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count(),{}};} // seconds since first $wall read
    if(name=="count"){if(!take("("))fail("expected (");auto action=runtime.function(ident());if(!take(")"))fail("expected )");if(!action)fail("unknown action");int n=0;for(const auto& [id,data]:engine.entities)n+=runs(engine,id,action);return {false,double(n),{}};}
    if(name=="dist"||name=="facing"){if(!take("(")||!take("@"))fail("expected (@name)");auto v=stored_term();if(!take(")"))fail("expected )");auto id=ObjectId(v.number);return {false,name=="dist"?dist(id):facing(id),{}};}
    fail("unknown $"+name);}
   auto name=ident();auto it=engine.state.globals.find(name);if(it==engine.state.globals.end())fail("unknown WDL global "+name);Value v=it->second.value;
-  if(take("[")){space();auto b=p;while(p<s.size()&&std::isdigit(static_cast<unsigned char>(s[p])))++p;auto index=std::stoul(std::string(s.substr(b,p-b)));if(!take("]"))fail("expected ]");auto* o=v.kind==Value::Kind::Object?object(v.bits):nullptr;if(!o||index>=o->array.size())fail(name+"["+std::to_string(index)+"] is not an array element");v=o->array[index].value;}
+  if(take("[")){space();std::size_t index=0;if(take("@"))index=std::size_t(stored_term().number);else{auto b=p;while(p<s.size()&&std::isdigit(static_cast<unsigned char>(s[p])))++p;index=std::stoul(std::string(s.substr(b,p-b)));}if(!take("]"))fail("expected ]");auto* o=v.kind==Value::Kind::Object?object(v.bits):nullptr;if(!o||index>=o->array.size())fail(name+"["+std::to_string(index)+"] is not an array element");v=o->array[index].value;}
   // WDL VAR arrays carry pointers as raw words (Number bits), globals as Object handles.
   if(take("."))return {false,field(v.bits,ident()),{}};
   if(v.kind==Value::Kind::Object)if(auto* o=object(v.bits);o&&o->kind==Object::Kind::String)return {true,0,o->text};

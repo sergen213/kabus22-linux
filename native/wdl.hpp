@@ -26,8 +26,11 @@ public:
  const CompilerSettings& compiler_settings()const;
  std::size_t processes()const;
  bool running(FunctionId)const; // a live suspended process of this function is queued
- // Native override: reads of GLOBAL in FUNCTIONS, and in the index of ARRAYS[...] anywhere, become the native call CALL(); returns the count.
- std::size_t reroute_reads(std::string_view global,std::string_view call,std::span<const std::string_view> functions,std::span<const std::string_view> arrays={});
+ // Native override: reads of GLOBAL in FUNCTIONS, in every function defined in FILES (script file names), and in the index of
+ // ARRAYS[...] anywhere, become the native call CALL(); returns the count.
+ std::size_t reroute_reads(std::string_view global,std::string_view call,std::span<const std::string_view> functions,std::span<const std::string_view> arrays={},std::span<const std::string_view> files={});
+ // Native override: in FUNCTION, a statement `X.FIELD = GLOBAL` assigns the native call CALL() instead; returns the count.
+ std::size_t reroute_assigned_read(std::string_view function,std::string_view field,std::string_view global,std::string_view call);
 private: struct Impl;std::unique_ptr<Impl> impl_;
 };
 }

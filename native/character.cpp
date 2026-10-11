@@ -17,6 +17,12 @@ constexpr std::array<std::string_view,14> bodyFunctions{
 constexpr std::array<std::string_view,1> bodyArrays{"player_yuksekli"}; // LV_*_Giris: player.z-=player_yuksekli[Aktif_Player]
 constexpr std::array<std::string_view,1> menuFunctions{"EM_Kernel"};      // M: item inventory or Inzar's spell menu
 constexpr std::array<std::string_view,1> weaponFunctions{"EM_KuBiGoSMenu"}; // weapon chosen: Demir morphs his gun model
+// Control gate: Demir's and Ebru's actions stop on oyuncu_pasif, Inzar's (and her spells) on koruyucu_pasif. The story scripts hold
+// and release the story character's gate (Lain and Seytan_k release only koruyucu_pasif, the final boss only oyuncu_pasif), so a
+// locked body reads the story's gate instead of its own. No body action writes its gate.
+constexpr std::array<std::string_view,2> demirEbruFiles{"oyuncu2.wdl","oyuncu2_ebru.wdl"};
+constexpr std::array<std::string_view,2> inzarFiles{"koruyucu.wdl","koru_buyuler.wdl"};
+constexpr std::array<std::string_view,2> posingFunctions{"oy_Oynat","Hareket_Hizi"};
 // Glyph cells of the original language-independent menu atlas (TusYonetim.wdl TYI_Tus*): 170x32 cells, one key label each.
 struct Cell {char c;int x,y;};
 constexpr std::array<Cell,28> cells{{{'Q',0,320},{'W',0,352},{'E',0,384},{'R',0,416},{'T',0,448},{'Y',0,480},{'U',0,512},{'I',0,544},{'O',0,576},{'P',0,608},
@@ -36,6 +42,16 @@ void Engine::configure_characters(Runtime& runtime,int defaultLock){
  runtime.reroute_reads("Aktif_Player","k22_body_player",bodyFunctions,bodyArrays);
  runtime.reroute_reads("Aktif_Player","k22_menu_player",menuFunctions);
  runtime.reroute_reads("Aktif_Player","k22_weapon_player",weaponFunctions);
+ runtime.reroute_reads("oyuncu_pasif","k22_body_oyuncu_pasif",{},{},demirEbruFiles);
+ runtime.reroute_reads("koruyucu_pasif","k22_body_koruyucu_pasif",{},{},inzarFiles);
+ // Lain's hit reaction (kotu_koruyucu.wdl Kotukoru_Yaralan:5291) branches on the attack kind in skill3: Inzar's sword and spell
+ // kinds and firearm 2. Ates_Et (silah.wdl:680) records the firearm number there, so any other gun fell through every branch and
+ // ended Lain's AI with its Enerji below 0 (no Kotukoru_Ol, no progression). A locked game records Lain's bullet hits as kind 2.
+ runtime.reroute_assigned_read("Ates_Et","skill3","aktif_silah","k22_bullet_hit_kind");
+ // Demir's story scenes pose the player through oy_Oynat and Hareket_Hizi (oyuncu2.wdl:540/396: t_Silah.String[Aktif_Silah], 8
+ // strings; Action_Zaman[Aktif_Silah*20+n], 160), called from cinematic.wdl, BUL_Saat.wdl and kotu_koruyucu.wdl buyukes_koruses.
+ // An Ebru body there may still hold her magnum (8): those reads see the pistol (1).
+ runtime.reroute_reads("Aktif_Silah","k22_pose_weapon",posingFunctions);
 }
 void Engine::set_character_lock(int character){characterLock=std::clamp(character,-1,2);storyAtLevel_=story_character();adoptStory_=false;switchPrompt_=-1;}
 // load_level, before the placed actions start. The entity that would become the player for the story character runs the locked
@@ -59,6 +75,11 @@ void Engine::apply_character_lock(Runtime& runtime,std::vector<std::pair<ObjectI
  // Ebru's action selects her magnum (Aktif_Silah 8) at every spawn; outside her story she keeps the firearm the story carried.
  if(body&&b==1){const int w=int(number("Aktif_Silah"));ebruWeapon_=w>=1&&w<=5?w:0;}
  if(body&&b==0)character_weapons(runtime,true); // before his action's Silah_Ekle reads Aktif_Silah
+ // A bullet hit (silah.wdl Ates_Et:651-658) reads the blood table kan_mertip[3*(you.skill2-1)+n] by enemy type, skill2 1-6. Every
+ // enemy action sets its type except Lain's and Seytan's, which only Inzar fights in the story: a gun body would index -2. All six
+ // kan_mertip rows are equal, so they get type 1 (skill2 is otherwise only compared with 4: hedef.wdl:78, oyuncu2.wdl:628).
+ if(b!=2){const auto lain=runtime.function("kotukoru_ai"),devil=runtime.function("devil_ai");
+  for(auto& [id,action]:actions)if(action&&(action==lain||action==devil))if(auto& t=state.require(id).field("skill2").value;t.raw()==0)t=Value::from_int(1);}
 }
 // Weapons a locked body can hold (every frame while locked). Demir's tables (Silah_isimleri, t_Silah) stop at weapon 7: in Ebru's
 // inventory he fires her magnum rounds from his pistol. Ebru's model has one pose set; she fires the story's firearms 1-5 or her
