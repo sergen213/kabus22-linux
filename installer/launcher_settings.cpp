@@ -482,9 +482,9 @@ std::vector<std::string> command(const Settings& s, const std::optional<unsigned
         const auto& c=*s.capabilities;bool packs=false;
         if(p.preset!="original"){require(std::count(c.presets.begin(),c.presets.end(),p.preset)==1,"Graphics preset "+p.preset+" is not offered by this engine; choose another on Rendering");args.insert(args.end(),{"--preset",p.preset});}
         // backend and texture_packs have dedicated controls; stale or inapplicable custom values fall back to the engine default.
-        // fps_limit (its own Rendering row) applies under every preset; the other keys only under custom.
+        // fps_limit (its own Rendering row) and seamless_doors apply under every preset; the other keys only under custom.
         for(const auto& [key,value]:p.graphics){
-            if(p.preset!="custom"&&key!="fps_limit")continue;
+            if(p.preset!="custom"&&key!="fps_limit"&&key!="seamless_doors")continue;
             auto o=std::find_if(c.options.begin(),c.options.end(),[&](const Option& o){return o.key==key;});
             if(o==c.options.end()||key=="backend"||key=="texture_packs"||value==o->fallback||std::count(o->values.begin(),o->values.end(),value)!=1||std::count(o->backends.begin(),o->backends.end(),p.renderer)!=1)continue;
             args.insert(args.end(),{"--graphics",key+"="+value});

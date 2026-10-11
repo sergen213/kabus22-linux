@@ -290,6 +290,7 @@ The original scripts never call `game_save`/`game_load`. Saves are written by ha
   - `LVSL_Olustur` :147 maps level IDs 1-103 to WMB names; 63 and 96 are null, leaving 101 levels.
   - `LVPL_Olustur` :549 builds the per-level function tables `LVPL_Acikmi`/`Giris`/`Cikis`.
   - `LevelYukle` :665 plays the transition movie (`media_play`, `media_layer`=900, :772ff) and calls `Level_Load` :756.
+  - Native `seamless_doors` (default on) turns eligible LY_Kapi transitions into a doorway preview plus a fadeless run of this same LevelYukle ([SEAMLESS_DOORS.md](SEAMLESS_DOORS.md)).
   - Starter `LY_YuklemeTakip` :1058 polls `LY_HedefLevel`.
   - **CONFIRMED**
 - Each of the 101 `LV_*.wdl` files has the same shape: `LV_<Name>_Giris(_EskiLevel)` sets the spawn point by previous level, `_Cikis` handles exit, `_Acikmi` decides whether entry is allowed (for example `LV_Start4.wdl:14/51/61`). **CONFIRMED**
