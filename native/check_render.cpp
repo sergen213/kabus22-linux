@@ -1777,9 +1777,10 @@ void rt_reflection_checks(std::span<const std::byte> mix,std::span<const std::by
 }
 
 // shadows=rt actor shadows (rt_signals.comp actorShadow): a SHADOW-flag model between a baked WMB light and a lightmapped
-// floor shadows the floor on the side away from the light, the shadow changes sides when the light does, and the caster's
-// fixed-direction planar shadow (drawn by default ray tracing, the positive control) is replaced once the GPU reports the
-// actor shadow drawn (two frames later). A caster without a light in range keeps its planar shadow.
+// floor shadows the floor on the side away from the light, the shadow changes sides when the light does, and the planar
+// shadow (drawn by default ray tracing, the positive control, from a copy placed so it falls on the other side) is never
+// drawn. Without a light in range the actor shadow falls toward the planar shadow's own light (shadowSun). Models receive
+// baked-light shadows from their own geometry, and ambient occlusion from nearby geometry.
 void rt_actor_shadow_checks() {
     using namespace k22;
     TempDirectory captures;
@@ -1792,9 +1793,10 @@ void rt_actor_shadow_checks() {
     auto&surface=mesh.materials[0];surface.texture=white;surface.lightmap=gray;surface.raw.resize(64);surface.raw[43]=100;
     Model blocker;blocker.formatVersion=4;
     blocker.vertices={{{-12,12,24},{0,0,1},{0,0},{}},{{12,12,24},{0,0,1},{1,0},{}},{{12,-12,24},{0,0,1},{1,1},{}},{{-12,-12,24},{0,0,1},{0,1},{}}};
-    blocker.triangles={{{0,2,1},0,0},{{0,3,2},0,0}};blocker.materials.resize(1); // Front faces up, as the planar pass culls.blocker.materials[0].texture=white;
+    blocker.triangles={{{0,2,1},0,0},{{0,3,2},0,0}};blocker.materials.resize(1);blocker.materials[0].texture=white; // Front faces up, as the planar pass culls.
     DrawInstance caster;caster.model=&blocker;caster.objectId=500;caster.shadowRequested=caster.doubleSided=caster.noFog=true;
-    DrawInstance planar=caster;planar.nativeShadow={true,0,{0,0,-1}};
+    // shadowSun +x: a caster's planar shadow falls 24 units toward -x; this copy's, from x=44, onto the +x sample point.
+    DrawInstance planar=caster;planar.nativeShadow={true,0,{0,0,-1}};planar.position.x=44;
     RenderLight lamp;lamp.position={-32,0,48};lamp.range=160;lamp.baked=lamp.synthetic=true;
     Camera camera;camera.position={0,0,80};camera.angles={0,-90,0};camera.farClip=400;camera.widescreen=false;camera.perDrawOpacity=camera.noCull=true;
     RenderFrame frame;frame.cameras=std::span(&camera,1);frame.world=&floor;frame.sunDirection={};frame.instances=std::span(&caster,1);
@@ -1802,9 +1804,9 @@ void rt_actor_shadow_checks() {
     RenderOptions options;options.backend=RendererBackend::Vulkan;options.rayTracing=true;
     options.width=options.height=64;options.samples=1;options.vsync=false;options.title="Kabus 22 RT actor shadow consumer";
     // Floor points 22 units either side of the caster along x (screen vertical; 60 units half view), outside its silhouette;
-    // 5x5 mean luma against the 1-sample stochastic signal.
+    // 5x5 mean luma of the converged 1-sample stochastic signal. [0] is +x, [1] is -x.
     auto sides=[&](Renderer&renderer,const char*name){
-        for(int i=0;i<3;++i)renderer.draw(frame); // The caster feedback of a frame slot is read when the slot comes round again.
+        for(int i=0;i<3;++i)renderer.draw(frame);
         const auto pixels=captured_pixels(renderer,frame,captures.path/name);const auto m=renderer.metrics();
         if(auto*keep=std::getenv("K22_CAPTURE_DIR"))std::filesystem::copy_file(captures.path/name,std::filesystem::path(keep)/name,std::filesystem::copy_options::overwrite_existing);
         auto mean=[&](float y){double sum=0;for(int dy=-2;dy<=2;++dy)for(int dx=-2;dx<=2;++dx){auto p=capture_pixel(pixels,m,.5f+dx/float(m.drawableWidth),y+dy/float(m.drawableHeight));sum+=.299*p[0]+.587*p[1]+.114*p[2];}return sum/25;};
@@ -1814,18 +1816,53 @@ void rt_actor_shadow_checks() {
     auto plainOptions=options;plainOptions.title="Kabus 22 default RT planar shadow control";
     Renderer plain(plainOptions);
     const auto control=sides(plain,"actor-plain.ppm");
-    if(!shadowed(control,0)&&!shadowed(control,1))throw std::runtime_error("Planar shadow control is not visible on the default ray-traced path: "+std::to_string(control[0])+"/"+std::to_string(control[1]));
+    if(!shadowed(control,0))throw std::runtime_error("Planar shadow control is not visible on the default ray-traced path: "+std::to_string(control[0])+"/"+std::to_string(control[1]));
     options.features.shadows=ShadowMode::RayTraced;
     Renderer renderer(options);
     const auto left=sides(renderer,"actor-left.ppm");
     lamp.position.x=32;
     const auto right=sides(renderer,"actor-right.ppm");
-    std::cout<<"RT actor shadow: planar control "<<control[0]<<"/"<<control[1]<<", light -x "<<left[0]<<"/"<<left[1]<<", light +x "<<right[0]<<"/"<<right[1]<<std::endl;
-    if(!(shadowed(left,0)&&shadowed(right,1))&&!(shadowed(left,1)&&shadowed(right,0)))
-        throw std::runtime_error("shadows=rt actor shadow does not follow the baked light, or the fixed planar shadow is still drawn");
     lamp.range=10;
     const auto unlit=sides(renderer,"actor-unlit.ppm");
-    if(!shadowed(unlit,shadowed(control,0)?0:1))throw std::runtime_error("shadows=rt removed a planar shadow without drawing an actor shadow");
+    std::cout<<"RT actor shadow: planar control "<<control[0]<<"/"<<control[1]<<", light -x "<<left[0]<<"/"<<left[1]<<", light +x "<<right[0]<<"/"<<right[1]<<", no light "<<unlit[0]<<"/"<<unlit[1]<<std::endl;
+    if(!shadowed(left,0)||!shadowed(right,1))
+        throw std::runtime_error("shadows=rt actor shadow does not follow the baked light, or the planar shadow is still drawn");
+    if(!shadowed(unlit,1))throw std::runtime_error("shadows=rt drew the planar shadow, or no actor shadow toward the planar light, for a caster without a light in range");
+    // Model receivers: a floor model (no lightmap) at z=2. With a SHADOW-less overhang in the same model (the blocker's quad),
+    // the lamp at -x leaves its floor's +x point in the model's own shadow; the overhang's ambient occlusion is symmetric.
+    Model ground;ground.formatVersion=4;ground.materials.resize(1);ground.materials[0].texture=white;
+    ground.vertices={{{-32,32,2},{0,0,1},{0,0},{}},{{32,32,2},{0,0,1},{1,0},{}},{{32,-32,2},{0,0,1},{1,1},{}},{{-32,-32,2},{0,0,1},{0,1},{}}};
+    ground.triangles={{{0,2,1},0,0},{{0,3,2},0,0}};
+    Model roofed=ground;for(auto v:blocker.vertices)roofed.vertices.push_back(v);roofed.triangles.push_back({{4,6,5},0,0});roofed.triangles.push_back({{4,7,6},0,0});
+    DrawInstance receiver;receiver.model=&ground;receiver.objectId=501;receiver.noFog=true;receiver.ambient=-100;
+    frame.instances=std::span(&receiver,1);frame.shadows={};lamp.position.x=-32;lamp.range=160;
+    const auto open=sides(renderer,"model-open.ppm");
+    receiver.model=&roofed;
+    const auto roof=sides(renderer,"model-roof.ppm");
+    std::cout<<"RT model self-shadow: open "<<open[0]<<"/"<<open[1]<<", roofed "<<roof[0]<<"/"<<roof[1]<<std::endl;
+    if(!(roof[0]/open[0]<.8*(roof[1]/open[1])))throw std::runtime_error("shadows=rt model does not receive its own shadow from a baked light");
+    // Ambient occlusion on a model: a wall (two outward faces) 5 units beyond the +x point, only ambient light (lamp out of range).
+    Model walled=ground;receiver.model=&walled;receiver.ambient=0;lamp.range=10;
+    for(float x:{27.f,28.f}){const auto base=std::uint32_t(walled.vertices.size());const float n=x<27.5f?-1.f:1.f;
+        for(auto [y,z]:{std::pair{32.f,2.f},{-32.f,2.f},{-32.f,32.f},{32.f,32.f}})walled.vertices.push_back({{x,y,z},{n,0,0},{0,0},{}});
+        if(n<0){walled.triangles.push_back({{base,base+1,base+2},0,0});walled.triangles.push_back({{base,base+2,base+3},0,0});}
+        else{walled.triangles.push_back({{base,base+2,base+1},0,0});walled.triangles.push_back({{base,base+3,base+2},0,0});}}
+    const auto occluded=sides(renderer,"model-ao.ppm");
+    std::cout<<"RT model ambient occlusion: wall side "<<occluded[0]<<", open side "<<occluded[1]<<std::endl;
+    if(!(occluded[0]<.85*occluded[1]&&occluded[1]>20))throw std::runtime_error("shadows=rt ambient occlusion does not darken an occluded model pixel");
+    // The game path: campaign models carry an ordinary D3D material (A6 default mat_model), Gouraud-lit by native lights and
+    // the floor-light ambient. Ambient occlusion takes off that ambient; the native lamp is shadowed by the roof of the
+    // model itself, a SHADOW-flag actor (only those occlude D3D lights, as only they cast shadows in the original).
+    ScriptMaterialState ordinary;ordinary.ambient=ordinary.diffuse={255,255,255,1};
+    frame.materials=std::span(&ordinary,1);receiver.materialIndex=0;receiver.nativeLightScalar=64;receiver.shadowRequested=true;
+    const auto ordinaryOccluded=sides(renderer,"ordinary-ao.ppm");
+    RenderLight bulb=lamp;bulb.baked=bulb.synthetic=false;bulb.range=160;frame.lights=std::span(&bulb,1);receiver.nativeLightScalar=0;
+    receiver.model=&ground;const auto ordinaryOpen=sides(renderer,"ordinary-open.ppm");
+    receiver.model=&roofed;const auto ordinaryRoof=sides(renderer,"ordinary-roof.ppm");
+    std::cout<<"RT ordinary-material model: ambient occlusion wall side "<<ordinaryOccluded[0]<<", open side "<<ordinaryOccluded[1]
+             <<"; native lamp open "<<ordinaryOpen[0]<<"/"<<ordinaryOpen[1]<<", roofed "<<ordinaryRoof[0]<<"/"<<ordinaryRoof[1]<<std::endl;
+    if(!(ordinaryOccluded[0]<.85*ordinaryOccluded[1]&&ordinaryOccluded[1]>20))throw std::runtime_error("shadows=rt ambient occlusion does not darken an ordinary-material model");
+    if(!(ordinaryOpen[0]>20&&ordinaryRoof[0]/ordinaryOpen[0]<.8*(ordinaryRoof[1]/ordinaryOpen[1])))throw std::runtime_error("shadows=rt ordinary-material model does not receive its own shadow");
 }
 
 // A moving, vertex-animated actor under a following camera with the full temporal stack (TAA, and RT shadows/GI/
@@ -1931,6 +1968,9 @@ void graphics_policy_checks() {
      // Ranges that hold a caster: native point (gap -500) and baked lights at x 20i < 100 from the first caster.
      require(picked==std::vector<std::uint32_t>{0,4,1},"actor shadows trace the lights whose range holds a caster, deepest first, then the sun");
      require(actor_shadow_lights(lights,{}).empty(),"no SHADOW caster, no actor-shadow lights");}
+    {RenderFrame f;f.shadowSun={.5f,-.25f};DrawInstance d;const NativeShadowState plane{true,0,{0,0,-1}};const Vec3 point{3,4,8};
+     const auto planarHit=transformed_point(planar_projection(d,plane,f),point);const auto L=planar_light_direction(f.shadowSun);const float t=point.z/L.z;
+     require(std::abs(point.x-L.x*t-planarHit.x)<1e-4f&&std::abs(point.y-L.y*t-planarHit.y)<1e-4f,"actor-shadow fallback light points where the planar shadow comes from");}
     {std::array<Vec2,8>seen{};for(int i=0;i<8;++i){seen[i]=taa_jitter(i);require(std::abs(seen[i].x)<=.5f&&std::abs(seen[i].y)<=.5f,"jitter within one pixel");for(int j=0;j<i;++j)require(seen[i].x!=seen[j].x||seen[i].y!=seen[j].y,"8 distinct jitter offsets");}
      require(taa_jitter(8).x==seen[0].x&&std::abs(halton(1,2)-.5f)<1e-6f&&std::abs(halton(2,3)-2/3.f)<1e-6f&&std::abs(halton(4,3)-4/9.f)<1e-6f,"Halton(2,3) sequence");
      Camera c;auto vp=camera_matrix(c,16/9.f);auto j=jittered(vp,{.25f,-.5f},1920,1080);Vec3 p{200,30,10};auto a=project_ndc(vp,p),b=project_ndc(j,p);require(std::abs(b.x-a.x-.5f/1920)<1e-5f&&std::abs(b.y-a.y+1.f/1080)<1e-5f&&std::abs(b.z-a.z)<1e-6f,"jitter moves clip XY by whole sub-pixel offsets only");}
