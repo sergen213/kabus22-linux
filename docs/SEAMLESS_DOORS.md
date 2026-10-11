@@ -192,6 +192,7 @@ Seamless only for an LY_Kapi scan transition that is not one of LevelYukle's spe
 ## Verification
 
 - Headless scenarios (`gameplay_scenarios`): `world_door_kizic` (kizic2 <-> kizic, both directions), `world_door_ev3` (Ev3 -> Ev2 via the Giris arrival), `world_door_tunnel` (Tnel24 -> Tnel12; the FLAG1 return door is refused with LV_HataGoster and opens nothing), `world_door_fade_off` (`# graphics: seamless_doors=off`: the original fade, no preview). They assert `LY_AktifLevelID`, `level_yuklendi_ok`, `harita_anagrup`/`harita_no` from Giris, control (`oyuncu_pasif`/`koruyucu_pasif`), `$doorswaps` and `$fadeframes` (presented frames with a visible LYP_Fade: unchanged). Scenario terms: `$door` (0 idle, 1 opening, 2 crossing, 3 holding, 4 revealing), `$doorswaps`, `$fadeframes`.
+- With the character lock ([CHARACTER_LOCK.md](CHARACTER_LOCK.md)): `world_door_character` (a story switch while the doorway is open shows the switch prompt and the door waits for the answer; both swaps place the locked body, Ebru, on Demir's story levels). `world_door_kizic` and `world_door_ev3` also pass with `run.cmake -DCHARACTER=ebru|inzar`.
 - `k22-render-check --gl|--vulkan|--vulkan-rt`: synthetic door portal checks (doorway shows the door world, outside unchanged, closed/behind/no-door frames identical to the original, `release_scene(keep)`).
 
 ## Limitations

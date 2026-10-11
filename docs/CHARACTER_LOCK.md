@@ -107,6 +107,7 @@ All headless unless noted (`docs/GAMEPLAY_TESTING.md`):
 - `character_ebru_new_game`: selector (Right twice), Demir's opening as Ebru, Demir-only magazine pickups, the crowbar refused as in the story, Demir's pistol chosen in the original inventory and fired, grenade refused, quicksave/quickload keeps the lock (`character=ebru`).
 - `character_inzar_crowbar`: Ebru's crowbar chain played by Inzar (Sd, Start4, item 16, Kk door pried, `v_ebrukanirt_ok`).
 - `character_switch_prompt`: prompt opens on a story write, scripts paused, keep and switch both work, the next level places the chosen body.
+- `world_door_character`: the prompt during an open seamless doorway pauses the door; the seamless swaps place the locked body ([SEAMLESS_DOORS.md](SEAMLESS_DOORS.md)).
 - With `run.cmake -DCHARACTER=ebru|inzar`: `world_item_combine`, `quicksave1_roundtrip`, `quicksave2_restart`, `demir_level5_camera` and `combat_kriz_game_over` pass for both, `combat_kriz_aa_gun` for Inzar. The other runs stop at assertions written for Demir's body (`oyn_yaralanma`, `koruyucu_pasif`) or at harness steering (`walk-to`/`route` timeouts with Ebru's and Inzar's movement), not at script errors.
 - On the desktop (`DISPLAY=:0`, OpenGL 1280x720): the three `character_*` scenarios pass with captures of the selector, Ebru at Start4's burning car, the switch prompt, and Inzar at Start4 and the Kk cutscene.
 
