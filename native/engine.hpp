@@ -35,7 +35,8 @@ struct DoorSide {Vec3 center{},normal{},right{};float halfWidth{},halfHeight{},f
 struct DoorLink {DoorSide a,b;Vec3 position{},angles{};};
 std::optional<DoorSide> door_side(const World&,std::span<const Vec3> triggers);
 std::vector<std::vector<Vec3>> door_clusters(const World&,int target); // LY_Kapi triggers with LevelID target, grouped per doorway
-std::optional<DoorLink> door_link(const World& from,std::span<const Vec3> triggers,const World& to,int fromId);
+// arrival: the destination's original Giris placement for this transition (x,y,z,pan), if known.
+std::optional<DoorLink> door_link(const World& from,std::span<const Vec3> triggers,const World& to,int fromId,const std::array<float,4>* arrival);
 int door_table(int argc,char** argv); // kabus22 --door-table LEVELS.tsv --data GAME_ROOT
 class Engine {
 public:
@@ -136,7 +137,8 @@ private:
   const World* world=nullptr;std::string wmb;int from=0,target=0,ticks=0,held=0;float open=0,openTime=0;} door_;
  bool fadeHidden_=false,fadeVisible_=false;
  void door_tick(Runtime&);void door_frame();void door_reset();void door_level();const World* door_load(std::string_view level);
- const World* door_world(DoorGroup&,bool wait);bool door_scripted(int from,int to)const;std::string level_wmb(int id)const;
+ const World* door_world(Runtime&,DoorGroup&,bool wait);std::optional<std::array<float,4>> door_arrival(Runtime&,int to,int from);
+ bool girisParsed_=false;std::unordered_map<std::string,std::vector<std::pair<int,std::string>>> girisPlacements_;bool door_scripted(int from,int to)const;std::string level_wmb(int id)const;
  friend class Physics;
  friend std::optional<Value> worldModelBuiltin(Engine&,Runtime&,ProcessContext&,std::string_view,std::span<const Argument>);
  void initialize_globals();void make_frame(bool mouseOutput=true);void update_input(Runtime&);void update_ui(Runtime&);void update_first_person();

@@ -1,0 +1,18 @@
+# requires: saves
+# graphics: seamless_doors=off
+# seamless_doors=off is the original path: the same kizic2 -> Kizic door fades through LYP_Fade and no doorway preview opens.
+realtime off
+load-save 10
+wait until LY_AktifLevelID == 37 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+wait until oyun_ilk_basladi == 0 timeout 600
+store fade $fadeframes
+walk-to -260 25 12 timeout 900
+walk-to -420 25 12 timeout 1200
+walk-to -455 -48 12 timeout 1200
+turn-to -500 -48 6
+press-until D LY_HedefLevel > 0 timeout 300
+assert $door == 0
+wait until LYP_Fade.visible == 1 timeout 60
+wait until $level == "kizic.wmb" && level_yuklendi_ok == 1 && oyuncu_pasif == 0 && LYP_Fade.visible == 0 timeout 3600
+assert $doorswaps == 0
+assert $fadeframes > @fade + 40
