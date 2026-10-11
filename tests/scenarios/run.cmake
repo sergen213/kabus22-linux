@@ -2,6 +2,7 @@
 # Every scenario runs headless in a fresh private XDG tree. "# requires: saves" scenarios need the original Windows save set.
 # "# continues: OTHER" reuses OTHER's tree without a fresh import (a restart of the same installation); OTHER must sort first.
 # "# mode: bonus" runs the Bonus game (--mode bonus --data "GAME_ROOT/Kabus 22 Mode").
+# "# graphics: KEY=VALUE" passes --graphics KEY=VALUE (for example seamless_doors=off).
 file(GLOB scenarios "${SCENARIOS}/*.k22s")
 list(SORT scenarios)
 set(failed "")
@@ -38,6 +39,9 @@ foreach(scenario IN LISTS scenarios)
   if(text MATCHES "# mode: bonus")
     set(data "${GAME}/Kabus 22 Mode")
     set(mode --mode bonus)
+  endif()
+  if(text MATCHES "# graphics: ([a-z_]+=[a-z0-9_]+)")
+    list(APPEND mode --graphics "${CMAKE_MATCH_1}")
   endif()
   execute_process(COMMAND "${K22}" --data "${data}" ${mode} --headless --scenario "${scenario}" --scenario-out "${root}/out-${name}"
     RESULT_VARIABLE code OUTPUT_FILE "${root}/log-${name}.txt" ERROR_FILE "${root}/stderr-${name}.txt" TIMEOUT 1800)

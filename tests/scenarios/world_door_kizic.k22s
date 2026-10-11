@@ -1,0 +1,41 @@
+# requires: saves
+# Seamless doors (docs/SEAMLESS_DOORS.md), interior pair: Kız Kulesi Kafe (kizic2, 37) <-> Kizic (36), Demir, original kayit10.sav.
+# The LY_Kapi use opens the doorway preview ($door 1); the original LevelYukle then runs (Acikmi/Cikis/Level_Load/Giris) with the
+# LYP_Fade panel hidden: no presented fade frame ($fadeframes unchanged) and one completed swap per door ($doorswaps).
+realtime off
+load-save 10
+wait until LY_AktifLevelID == 37 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+wait until oyun_ilk_basladi == 0 timeout 600
+store fade $fadeframes
+# kizic2 -> Kizic: LY_Kapi (-477,-51) skill1 36 (same route as world_save1_point).
+walk-to -260 25 12 timeout 900
+walk-to -420 25 12 timeout 1200
+walk-to -455 -48 12 timeout 1200
+turn-to -500 -48 6
+press-until D $door == 1 timeout 300
+assert LY_HedefLevel == 0
+assert LY_AktifLevelID == 37
+wait until $door == 2 timeout 120
+wait until LY_AktifLevelID == 36 timeout 600
+wait until $door == 0 timeout 600
+assert $level == "kizic.wmb"
+assert level_yuklendi_ok == 1
+assert oyuncu_pasif == 0
+assert LYP_Fade.visible == 0
+assert $doorswaps == 1
+assert $fadeframes == @fade
+capture kizic_arrival
+# Kizic -> kizic2: LY_Kapi (-42,-378,-195) skill1 37, in place from the LV_Kizic_G37 arrival.
+turn-to -20 -378 4
+press-until D $door == 1 timeout 600
+wait until LY_AktifLevelID == 37 timeout 600
+wait until $door == 0 timeout 600
+assert $level == "kizic2.wmb"
+assert harita_anagrup == 8
+assert harita_no == 0
+assert oyuncu_pasif == 0
+assert $doorswaps == 2
+assert $fadeframes == @fade
+capture kizic2_arrival
+frames 120
+assert player != 0

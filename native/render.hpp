@@ -80,6 +80,7 @@ struct Camera {
     Vec3 portalPosition{}, portalNormal{};
     bool portalTarget{}, portalClip{}, noCull{};
     bool noShadow{}, noEntities{};
+    bool doorPortal{}; // Apply RenderFrame::door to this view (the game's main camera only).
 };
 struct NativeShadowState {
     bool caster{};
@@ -125,6 +126,20 @@ struct DrawInstance {
     bool shadowRequested{};
 };
 struct PortalSurface { Vec3 position{}, normal{}; };
+// Native seamless door preview (docs/SEAMLESS_DOORS.md), not an A6 VIEW portal. world==nullptr: none this frame.
+// For a doorPortal camera at C with sC=dot(C-center,normal)>0 and an open rect (halfWidth,halfHeight>0), let sP=dot(P-center,normal)
+// for a fragment's world position P and X=C+(P-C)*sC/(sC-sP) the view line's crossing of the wall plane;
+// inRect(X): |dot(X-center,right)|<=halfWidth && |dot(X-center,up)|<=halfHeight.
+// Current-level fragments are discarded when sP<1 && sC-sP>0 && inRect(X) (cuts the doorway, including the door face itself).
+// The door world (static mesh only, lightmapped, no entities/dynamic lights/ray queries; not in any acceleration structure)
+// is drawn with transform(position,angles,{1,1,1}) and kept only where sP<-2 && inRect(X). sC<=0 or a closed rect: draw
+// nothing extra and clip nothing, but keep the door world's GPU resources prepared.
+struct DoorPortal {
+    const World* world{};
+    Vec3 position{}, angles{}; // door world -> current level, DrawInstance convention
+    Vec3 center{}, normal{}, right{}, up{}; // doorway centre on the wall plane; unit normal points into the current room
+    float halfWidth{}, halfHeight{};
+};
 struct RenderLight {
     Vec3 position{}; Color color{1,1,1,1}; float range{100}, intensity{1}; bool baked{};
     std::uint32_t type{1}; bool synthetic{};
@@ -202,6 +217,7 @@ struct RenderFrame {
     const Image* video{};
     std::uint64_t videoSerial{};
     Rect videoRect{};
+    DoorPortal door{};
 };
 struct PresentationState {
     unsigned limit{1}, pending{};
@@ -223,7 +239,7 @@ public:
     void set_mouse_mode(bool visible, bool relative = false);
     void rumble(float strength, std::uint32_t milliseconds); // Opened game controller only; unsupported pads ignore it.
     void request_quit();
-    void release_scene();
+    void release_scene(const Model* keep = nullptr); // keep: this model's GPU mesh and textures survive (seamless door world)
     void purge_model(const Model* model);
     void purge_image(const Image* image);
     int shader_version() const;

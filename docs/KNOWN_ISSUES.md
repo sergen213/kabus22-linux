@@ -46,3 +46,4 @@ Honest list of what is not established or not implemented. See [PROGRESS.md](PRO
 ## Rights
 
 - No project-wide license is assigned. The game, its media and the community patch are not distributed; users supply their own. The iseeeva/kabus22 repository has no license; nothing from it is copied. See [COMMUNITY_CREDITS.md](COMMUNITY_CREDITS.md).
+- Seamless doors: the camera cuts to the destination's authored camera, held frames (Level_Load to Giris) instead of interpolation; Cikis door sound plays at the crossing; the preview shows geometry only. See [SEAMLESS_DOORS.md](SEAMLESS_DOORS.md).

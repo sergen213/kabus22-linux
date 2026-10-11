@@ -399,19 +399,46 @@ bool Assets::purge_model(std::string_view name) {
     for(const auto&[key,value]:worlds_){footprint+=world_bytes(value);modelImages(value.mesh);for(const auto&lm:value.lightmaps)image(lm);}
     cachedBytes_=footprint;return true;
 }
-void Assets::release_level() {
-    worlds_.clear();
+void Assets::release_level(std::string_view keepWorld) {
+    const auto keep=keepWorld.empty()?std::string{}:safe_name(keepWorld);
+    std::erase_if(worlds_,[&](const auto& entry){return entry.first!=keep;});
     models_.clear();
     cachedBytes_=0;
     for(const auto&[name,image]:images_)cachedBytes_+=image->rgba.size();
+    for(const auto&[name,value]:worlds_)cachedBytes_+=world_bytes(value);
+    // Finished prefetches are dropped; running ones complete in the background and are adopted or dropped later.
+    std::erase_if(prefetches_,[&](const auto& entry){return entry.first!=keep&&entry.second.wait_for(std::chrono::seconds(0))==std::future_status::ready;});
 }
 const World& Assets::world(std::string_view name) {
     auto normalized=safe_name(name);if(auto it=worlds_.find(normalized);it!=worlds_.end())return it->second;
+    if(auto it=prefetches_.find(normalized);it!=prefetches_.end()) {
+        auto future=std::move(it->second);prefetches_.erase(it);World value=std::move(*future.get());
+        charge(cachedBytes_,world_bytes(value));auto&stored=worlds_.emplace(normalized,std::move(value)).first->second;stored.mesh.nativeWorld=&stored;return stored;
+    }
     const auto before=cachedBytes_,imageBefore=image_cache_bytes(images_);
     try {
         auto bytes=read(name);auto value=decode_world(bytes,name);source_render_links(value.mesh);
         charge(cachedBytes_,world_bytes(value));auto&stored=worlds_.emplace(normalized,std::move(value)).first->second;stored.mesh.nativeWorld=&stored;return stored;
     } catch(...) {cachedBytes_=before+image_cache_bytes(images_)-imageBefore;throw;}
+}
+bool Assets::prefetch_world(std::string_view name) {
+    auto normalized=safe_name(name);if(worlds_.contains(normalized))return true;
+    if(auto it=prefetches_.find(normalized);it!=prefetches_.end()) {
+        if(it->second.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return false;
+        world(name);return true;
+    }
+    // The worker owns a snapshot without the decoded levels (node-based maps: moving them keeps World addresses stable).
+    auto worlds=std::move(worlds_);auto models=std::move(models_);auto prefetches=std::move(prefetches_);worlds_.clear();models_.clear();prefetches_.clear();
+    auto worker=std::make_shared<Assets>(*this);
+    worlds_=std::move(worlds);models_=std::move(models);prefetches_=std::move(prefetches);
+    prefetches_.emplace(normalized,std::async(std::launch::async,[worker,file=std::string(name)]{
+        auto bytes=worker->read(file);auto value=std::make_shared<World>(worker->decode_world(bytes,file));source_render_links(value->mesh);return value;}).share());
+    return false;
+}
+void Assets::drop_world(std::string_view name) {
+    auto normalized=safe_name(name);
+    if(auto it=worlds_.find(normalized);it!=worlds_.end()){cachedBytes_-=std::min(cachedBytes_,world_bytes(it->second));worlds_.erase(it);}
+    if(auto it=prefetches_.find(normalized);it!=prefetches_.end()&&it->second.wait_for(std::chrono::seconds(0))==std::future_status::ready)prefetches_.erase(it);
 }
 
 std::shared_ptr<const Image> Assets::embedded_image(std::span<const uint8_t> bytes,size_t&position,uint32_t type,uint32_t width,uint32_t height) {

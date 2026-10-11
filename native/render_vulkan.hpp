@@ -16,7 +16,7 @@ public:
     void capture(std::string_view,WindowMetrics) const;
     void drain();
     void invalidate();
-    void release_scene();
+    void release_scene(const Model* keep = nullptr);
     void purge_model(const Model*);
     void purge_image(const Image*);
     int shader_version() const;
@@ -99,7 +99,7 @@ namespace vk22 {
 std::unique_ptr<Raster,RasterDelete> raster_create(VulkanBackend::State&);
 void raster_destroy(Raster*);
 void raster_draw(Raster&,const RenderFrame&,WindowMetrics);
-void raster_release(Raster&); void raster_purge_model(Raster&,const Model*); void raster_purge_image(Raster&,const k22::Image*);
+void raster_release(Raster&,const Model* keep=nullptr); void raster_purge_model(Raster&,const Model*); void raster_purge_image(Raster&,const k22::Image*);
 int raster_shader_version(const Raster&);
 std::unique_ptr<RayTracing,RayDelete> rt_create(VulkanBackend::State&);
 void rt_destroy(RayTracing*);
@@ -108,7 +108,7 @@ Pose* rt_previous_pose(RayTracing&,Pose& current);
 void rt_scene(RayTracing&,std::span<const RayGeometry>);
 VkDescriptorSetLayout rt_layout(const RayTracing&); VkDescriptorSet rt_set(const RayTracing&);
 void rt_replace_texture(RayTracing&,VkImageView previous,VkImageView replacement);
-void rt_release(RayTracing&); void rt_purge_model(RayTracing&,const Model*); void rt_purge_image(RayTracing&,const k22::Image*);
+void rt_release(RayTracing&,const Model* keep=nullptr); void rt_purge_model(RayTracing&,const Model*); void rt_purge_image(RayTracing&,const k22::Image*);
 }
 
 }

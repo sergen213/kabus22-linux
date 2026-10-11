@@ -123,7 +123,7 @@ struct UI {
         gtk_widget_set_tooltip_text(display,settings->originalCampaign?"Native widescreen or original authored resolution services":"Patched/custom campaign and Bonus retain their authored display. Native overrides are inapplicable.");
         const auto& caps=settings->capabilities;bool custom=caps&&gtk_combo_box_get_active_id(GTK_COMBO_BOX(preset))&&selected(preset)=="custom";
         gtk_widget_set_sensitive(preset,caps.has_value());for(auto* w:{packView,packUp,packDown})gtk_widget_set_sensitive(w,caps.has_value());
-        for(auto& [o,w]:optionWidgets)gtk_widget_set_sensitive(w,(custom||o.key=="fps_limit")&&std::any_of(o.backends.begin(),o.backends.end(),[&](const std::string& b){return caps->available(b);}));
+        for(auto& [o,w]:optionWidgets)gtk_widget_set_sensitive(w,(custom||o.key=="fps_limit"||o.key=="seamless_doors")&&std::any_of(o.backends.begin(),o.backends.end(),[&](const std::string& b){return caps->available(b);}));
         bool modern=selected(padMode)=="modern";for(auto* w:{deadzone,sensitivity,vibration})gtk_widget_set_sensitive(w,modern);for(auto* w:padButtons)gtk_widget_set_sensitive(w,modern);
     }
     void populate() {

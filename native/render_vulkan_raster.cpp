@@ -29,6 +29,7 @@ struct alignas(16) Uniform {
     Matrix sunShadow{},inverseViewProjection{},previousViewProjection{};
     F4 shadowLight{},effects{},pass{},camera{},range{}; // raster_uniform.glsl wave-2 block; zero keeps the original path.
     Matrix previousModel{}; // Motion-vector pass (3) only.
+    std::array<F4,4> door{}; // raster_uniform.glsl dataDoor (seamless door clip); zero keeps the original path.
 };
 // Compute passes of the ray-traced screen-space signals (rt_signals.comp / rt_filter.comp).
 struct alignas(16) ComputeUniform { Matrix inverseViewProjection{},previousViewProjection{}; F4 eye{},sun{},params{},camera{}; std::array<std::int32_t,4> config{}; F4 actor{},planar{}; };
@@ -76,7 +77,7 @@ struct Raster {
     struct Prepared {Pose*pose{};std::array<NativeEntityLightState,3>lights{};std::array<int,2>queues{-1,-1};unsigned admitted{};unsigned latest{3};};
     std::unordered_map<const DrawInstance*,Prepared>prepared;
     std::unordered_map<std::uint32_t,NativeEntityLightState>actorLights;
-    DrawInstance worldDraw{};
+    DrawInstance worldDraw{},doorDraw{}; // doorDraw: RenderFrame::door's world mesh (render.hpp DoorPortal).
     // Wave-2 effects (docs/GRAPHICS_ROADMAP.md, docs/RAYTRACING.md); nothing below is allocated unless enabled.
     VkFormat renderColor{VK_FORMAT_UNDEFINED},renderDepth{VK_FORMAT_UNDEFINED};VkSampleCountFlagBits renderSamples{VK_SAMPLE_COUNT_1_BIT};
     std::array<std::pair<Image*,VkSampler>,6>globals{}; // Bindings 9-14: sun/cube shadow maps, RT mask/GI/reflection, G-buffer depth.
@@ -156,7 +157,15 @@ struct Raster {
         fx.taaValid=fx.historyValid=fx.linearValid=fx.fsrValid=false;fx.extent={};
         if(all){for(auto&v:fx.faces)dropView(v);drop(fx.sun);drop(fx.cube);}
     }
-    void release(){fx.fsrValid=false;for(auto&[k,m]:meshes)s.destroy(m.indices);meshes.clear();for(auto&[k,a]:textures)for(auto&t:a){s.destroy(t.image);s.destroy(t.normal);s.destroy(t.orm);}textures.clear();for(auto&[k,w]:warps)s.destroy(w.image);warps.clear();turbulent.clear();for(auto&[k,w]:skies)s.destroy(w.image);skies.clear();effects.clear();overrideBounds.clear();prepared.clear();actorLights.clear();s.retainedColorValid=s.portalColorValid=false;}
+    // keep (seamless door world, render.hpp DoorPortal): its mesh and the textures/lightmaps its materials name survive.
+    void release(const Model*keep=nullptr){
+        std::unordered_set<const k22::Image*>kept;if(keep)for(auto&mat:keep->materials)for(auto*image:{mat.texture.get(),mat.lightmap.get()})if(image)kept.insert(image);
+        fx.fsrValid=false;std::erase_if(meshes,[&](auto&e){if(e.first==keep)return false;s.destroy(e.second.indices);return true;});
+        std::erase_if(textures,[&](auto&e){if(kept.contains(e.first))return false;for(auto&t:e.second){s.destroy(t.image);s.destroy(t.normal);s.destroy(t.orm);}return true;});
+        std::erase_if(warps,[&](auto&e){if(kept.contains(e.first))return false;s.destroy(e.second.image);return true;});std::erase_if(turbulent,[&](auto*image){return !kept.contains(image);});
+        std::erase_if(skies,[&](auto&e){if(kept.contains(e.first))return false;s.destroy(e.second.image);return true;});
+        effects.clear();overrideBounds.clear();prepared.clear();actorLights.clear();s.retainedColorValid=s.portalColorValid=false;
+    }
     VkSampler sampler(bool linear,bool clamp,double mip=0,bool anisotropic=false){mip=mip<1?0:mip<=2?1:3;float a=anisotropic?effective_anisotropy(s.options.forceAnisotropy?1:frame?frame->anisotropy:0,std::clamp(s.options.anisotropy,1.f,s.properties.limits.maxSamplerAnisotropy)):1;auto key=std::tuple(linear,clamp,mip,a);auto[it,inserted]=samplers.try_emplace(key);if(inserted)try{it->second=s.sampler(linear,clamp,mip,a);}catch(...){samplers.erase(it);throw;}return it->second;}
     Allocation allocate(VkDeviceSize size,VkDeviceSize alignment=16,const void*data=nullptr){
         auto&a=arenas[s.slotIndex];for(std::size_t i=0;;++i){if(i==a.buffers.size()){a.used.push_back(0);try{a.buffers.emplace_back();}catch(...){a.used.pop_back();throw;}try{a.buffers.back()=s.buffer(std::max<VkDeviceSize>(1024*1024,size+alignment),VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,true);}catch(...){a.buffers.pop_back();a.used.pop_back();throw;}}auto offset=(a.used[i]+alignment-1)/alignment*alignment;if(offset+size>a.buffers[i].size)continue;a.used[i]=offset+size;if(data)std::memcpy(static_cast<std::byte*>(a.buffers[i].mapped)+offset,data,size);return {&a.buffers[i],offset,size};}
@@ -292,7 +301,7 @@ struct Raster {
         auto*live=script_material(frame,d.materialIndex);auto&pose=rt_pose(*s.rays,d,m.expanded,m.tangents,(live&&live->effect!=EffectKind::None)||s.options.pbr);prepared[&d]={&pose};bounds(d,m);
         // Only material skins are texture_upscale candidates: lightmaps, sky strips, UI, fonts and particles keep originals.
         auto upload=[&](const k22::Image*image,int upscale){auto binding=resolved_skin(image,frame->skinBindings);if(binding.image)texture(binding.image,binding.dynamic,binding.serial,UICommand::TextureMode::Default,upscale);};
-        const int tiling=frame->world&&d.model==&frame->world->mesh?2:1;
+        const int tiling=(frame->world&&d.model==&frame->world->mesh)||(frame->door.world&&d.model==&frame->door.world->mesh)?2:1;
         for(auto&mat:d.model->materials){if(d.model->formatVersion==6&&(mat.flags&15)==9&&mat.texture)if(auto binding=resolved_skin(mat.texture.get(),frame->skinBindings);binding.image)turbulent.insert(binding.image);upload(mat.texture.get(),(mat.flags&15)==5?0:tiling);if(mat.lightmap)texture(mat.lightmap.get());}
         if(live)for(auto image:live->skins)upload(image,1);
     }
@@ -312,6 +321,7 @@ struct Raster {
         MaterialDraw result;auto&u=result.u;u=view;u.model=model;for(int col=0;col<3;++col){float squared=u.model[col*4]*u.model[col*4]+u.model[col*4+1]*u.model[col*4+1]+u.model[col*4+2]*u.model[col*4+2];for(int row=0;row<3;++row)u.normalMatrix[col*4+row]=squared>0?u.model[col*4+row]/squared:0;}
         u.flags[0][1]=d.spriteFrames;u.flags[0][2]=d.frame;u.flags[0][3]=d.nextFrame;u.parameters[0][1]=std::clamp(d.interpolation,0.f,1.f);u.flags[1][1]=d.unlit||!frame->hardwareLighting||(worldSurface&&type==3);u.flags[1][2]=d.flare;u.flags[1][3]=d.overlay;u.flags[2][0]=d.invertFlare;u.flags[2][2]=d.noFog;u.flags[2][3]=maskPass;u.flags[3][0]=live?int(live->effect):0;u.flags[3][1]=live&&frame->hardwareLighting;u.flags[3][2]=worldSurface&&!d.unlit&&type!=3&&!maskPass;u.normalUv[3]=d.model->clockwise?-1:1;
         if(worldSurface&&mat&&mat->raw.size()!=64)throw std::runtime_error("WMB material lacks native surface metadata");int nativeAmbient=worldSurface&&mat?std::int8_t(mat->raw[42]):0,nativeAlbedo=worldSurface&&mat?std::int8_t(mat->raw[43]):0;u.parameters[0][0]=worldSurface&&mat&&(mat->flags&0x2000)?surface_reflection(nativeAlbedo,d.reflectivity,d.objectId!=0):0;u.normalUv[2]=surface_ambient(nativeAmbient,int(camera.nativeAmbient),d.objectId!=0);u.fogParameters[3]=worldSurface?surface_light(nativeAmbient,int(camera.nativeAmbient),d.objectId!=0)/255.f:model_ambient(d.ambient,int(camera.nativeAmbient));
+        if(u.door[0][3]==2){u.flags[0][0]=0;u.effects={};u.parameters[0][0]=0;} // Door world: lightmaps only, no current-level lights, shadow maps, ray queries or reflections.
         if(mat&&!mat->textureName.empty()&&!mat->texture)throw std::runtime_error("Unresolved game skin: "+mat->textureName);if(mat&&!mat->lightmapName.empty()&&!mat->lightmap)throw std::runtime_error("Unresolved game lightmap: "+mat->lightmapName);
         auto entitySkin=resolved_skin(mat&&mat->texture?mat->texture.get():nullptr,frame->skinBindings);auto skin=entitySkin.image?entitySkin:resolved_skin(live?live->skins[0]:nullptr,frame->skinBindings);const auto*image=skin.image;result.native=nativeModelPass;result.depthWrite=depthWrite;result.additive=d.additive;if(nativeModelPass){auto pass=model_pass_state(d,camera,entitySkin.nativeTextureAlpha,depthWrite);result.blend=pass.blend;result.additive=pass.additive;result.depthWrite=pass.depthWrite;}
         u.flags[1][3]=overlay_keyed(d,image);
@@ -747,12 +757,16 @@ struct Raster {
         if(s.rayEnabled&&s.options.features.shadows==ShadowMode::RayTraced)view.effects[1]=8; // shadows=rt: inline visibility rays in every view.
         if(fx.shadowsValid){view.effects[0]=1;view.sunShadow=fx.sunMatrix;view.effects[2]=fx.sunTexel;view.effects[3]=float(fx.shadowIndex);view.shadowLight=vec(fx.shadowLight,fx.shadowIndex>=0?fx.shadowRange:0);}
         if(camera.portalClip){auto position=targetPlane?targetPlane->position:camera.portalPosition,normal=targetPlane?targetPlane->normal:camera.portalNormal;if(dot(normal,normal)==0)throw std::runtime_error("Portal clip view has no real surface plane");normal=unit(normal);view.clipPlane=vec(normal,-dot(normal,position));}
+        // Seamless door (render.hpp DoorPortal): every pass of this view cuts the doorway (scene.frag mode 1); encounters
+        // add the door world (mode 2). sC<=0 or a closed rect: neither.
+        const auto&door=frame->door;const bool doorOpen=camera.doorPortal&&door.world&&door.halfWidth>0&&door.halfHeight>0&&dot(add(camera.position,mul(door.center,-1)),door.normal)>0;
+        if(doorOpen)view.door={vec(door.center,1),vec(door.normal,door.halfWidth),vec(door.right,door.halfHeight),vec(door.up)};
         auto selectShadows=[&]{
             shadowOrder.clear();if(camera.drawWorld&&!camera.noShadow&&!camera.noEntities&&frame->renderEntities&&(!frame->bonusProfile||frame->planarCapable)&&!frame->shadows.empty()){if(frame->bonusProfile?frame->shadowStencilRaw>0:frame->shadowStencilRaw!=0)throw std::runtime_error("Nondefault source stencil-volume shadows are not implemented; native Vulkan supports the recovered planar route");for(auto&d:frame->shadows){if(!(d.layers&camera.layers)||(d.shadowViewId&&d.shadowViewId!=camera.sourceId)||(camera.excludeEntityId&&d.objectId==camera.excludeEntityId))continue;auto cached=frame->cachedEntityShadow?frame->cachedEntityShadow(frame->lightContext,d):d.nativeShadow;if(frame->bonusProfile||cached.caster)shadowOrder.push_back(&d);}std::sort(shadowOrder.begin(),shadowOrder.end(),[&](auto*a,auto*b){auto da=add(a->position,mul(camera.position,-1)),db=add(b->position,mul(camera.position,-1));if(!frame->shadowSortVertical)da.z=db.z=0;return dot(da,da)>dot(db,db);});}
             if(actorShadows())shadowOrder.clear(); // shadows=rt: the actor shadows (rt_signals.comp actorShadow) replace the planar shadow.
         };
         auto encounters=[&](Encounter encounter){
-            if(camera.drawWorld&&frame->world&&(camera.layers&1))draw_instance(worldDraw,camera,true,-1,encounter);
+            if(camera.drawWorld&&frame->world&&(camera.layers&1)){draw_instance(worldDraw,camera,true,-1,encounter);if(doorOpen){view.door[0][3]=2;draw_instance(doorDraw,camera,true,-1,encounter);view.door[0][3]=1;}}
             if(encounter==Encounter::Replay){
                 // Only the prepared opaque slots replay; transparent and shadow queues retain their source order.
                 for(auto&d:frame->instances)draw_instance(d,camera,true,-1,encounter);
@@ -773,7 +787,7 @@ struct Raster {
         ray_scene(camera);s.mark("as_build");if(primaryView&&motionVectors()){motion_vectors(camera);s.mark("motion");}if(primaryView&&rtSignals())rt_signals(camera);begin(*destination);set_region(r);if(targetOnly&&(!camera.perDrawOpacity||!s.portalColorValid)){clear(camera.environmentOverride?camera.background:frame->clearColor,true,true,true,full());s.portalColorValid=true;}if(translucent)clear(seeded(camera.foreground?Color{0,0,0,0}:camera.environmentOverride?camera.background:frame->clearColor),true,true,true,full());if(camera.perDrawOpacity)clear(seeded(camera.environmentOverride?camera.background:frame->clearColor),camera.clearColor,camera.clearDepth,camera.clearStencil,r);else if(camera.clearDepth)clear({},false,true,false,r);
         if(!s.rayEnabled)selectShadows();
         draw_sky(camera);encounters(s.rayEnabled?Encounter::Replay:Encounter::Live);s.mark("scene");
-        particles(camera);s.mark("particles");if(primaryView){depth_effects(*destination,r);s.mark("depth_fx");}bool hasView=false;if(frame->renderEntities&&!camera.noEntities)for(auto&d:frame->instances)if(!targetOnly&&d.viewSpace&&(d.layers&camera.layers)&&d.visible&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId)){hasView=true;break;}if(hasView){clear({},false,true,false,r);view.fogParameters[0]=view.fogParameters[1]=0;for(auto&d:frame->instances)if(d.viewSpace&&(d.layers&camera.layers)&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId))draw_instance(d,camera);}
+        particles(camera);s.mark("particles");if(primaryView){depth_effects(*destination,r);s.mark("depth_fx");}bool hasView=false;if(frame->renderEntities&&!camera.noEntities)for(auto&d:frame->instances)if(!targetOnly&&d.viewSpace&&(d.layers&camera.layers)&&d.visible&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId)){hasView=true;break;}if(hasView){clear({},false,true,false,r);view.fogParameters[0]=view.fogParameters[1]=0;view.door[0][3]=0;for(auto&d:frame->instances)if(d.viewSpace&&(d.layers&camera.layers)&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId))draw_instance(d,camera);}
         if(translucent){end();s.transition(s.alpha.color,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);begin(main);set_region(full());Uniform u;u.viewport={float(metrics.width),float(metrics.height),0,0};uiVertices.clear();quad(viewport,{viewport.x/metrics.width,viewport.y/metrics.height,viewport.width/metrics.width,viewport.height/metrics.height},{camera.alpha,camera.alpha,camera.alpha,camera.alpha});flush_ui(s.alpha.color,u,false,true,true);}
         if(primaryView&&rtSignals()){const auto nearest=sampler(false,true);globals[2]=globals[3]=globals[4]={&white,nearest};globals[5]={&dummyDepth,nearest};}
     }
@@ -786,7 +800,7 @@ struct Raster {
         begin(s.scene);set_region(full());Uniform u;bind({TonemapProgram},u,{source},{sampler(false,true)});vkCmdDraw(s.command,3,1,0,0);
     }
     void draw(const RenderFrame&f,WindowMetrics m){
-        struct BorrowGuard {Raster&r;~BorrowGuard(){r.frame=nullptr;r.prepared.clear();r.actorLights.clear();r.transparent.clear();r.shadowOrder.clear();r.particlePose=nullptr;r.worldDraw={};r.active=false;r.target=nullptr;}} guard{*this};
+        struct BorrowGuard {Raster&r;~BorrowGuard(){r.frame=nullptr;r.prepared.clear();r.actorLights.clear();r.transparent.clear();r.shadowOrder.clear();r.particlePose=nullptr;r.worldDraw=r.doorDraw={};r.active=false;r.target=nullptr;}} guard{*this};
         if(m.drawableWidth<=0||m.drawableHeight<=0)return;
         if(f.world&&!f.hardwareLighting)throw std::runtime_error("Legacy software world-light topology is not implemented by the native Vulkan hardware path");
         if(!s.command)throw std::runtime_error("Vulkan raster requires an admitted platform frame");
@@ -808,8 +822,10 @@ struct Raster {
             if(primary)for(auto i:actor_shadow_lights(f.lights,casters))pack(f.lights[i],count+actorShadowCount++);
         }
         lightAllocation=count?allocate((count+actorShadowCount)*5*sizeof(F4),std::max<VkDeviceSize>(16,s.properties.limits.minStorageBufferOffsetAlignment),lights.data()):zeroAllocation;
-        worldDraw={};
-        if(f.world){worldDraw.model=&f.world->mesh;prepare(worldDraw);for(auto&mat:f.world->mesh.materials)if((mat.flags&15)==5&&mat.texture&&(mat.texture->width==mat.texture->height*6||mat.texture->width==mat.texture->height*2))sky_texture(*mat.texture);}
+        auto prepareWorld=[&](const World&world,DrawInstance&draw){draw.model=&world.mesh;prepare(draw);for(auto&mat:world.mesh.materials)if((mat.flags&15)==5&&mat.texture&&(mat.texture->width==mat.texture->height*6||mat.texture->width==mat.texture->height*2))sky_texture(*mat.texture);};
+        worldDraw=doorDraw={};if(f.world)prepareWorld(*f.world,worldDraw);
+        // The door world is prepared whenever present (also while its view is closed) so its first visible frame does not upload.
+        if(f.door.world){doorDraw.position=f.door.position;doorDraw.angles=f.door.angles;prepareWorld(*f.door.world,doorDraw);}
         for(auto&d:f.instances)prepare(d);
         if(!actorShadows())for(auto&d:f.shadows)prepare(d,true); // shadows=rt never draws the planar shadow.
         if(!f.particles.empty()){DrawInstance quad;quad.model=&particle_quad();auto&meshGPU=mesh(*quad.model);particlePose=&rt_pose(*s.rays,quad,meshGPU.expanded,meshGPU.tangents,false);for(auto&p:f.particles)if(p.image)texture(p.image);}
@@ -832,7 +848,7 @@ void RasterDelete::operator()(Raster*r)const{raster_destroy(r);}
 std::unique_ptr<Raster,RasterDelete> raster_create(VulkanBackend::State&s){return std::unique_ptr<Raster,RasterDelete>(new Raster(s));}
 void raster_destroy(Raster*r){delete r;}
 void raster_draw(Raster&r,const RenderFrame&f,WindowMetrics m){r.draw(f,m);}
-void raster_release(Raster&r){r.release();}
+void raster_release(Raster&r,const Model*keep){r.release(keep);}
 void raster_purge_model(Raster&r,const Model*model){auto it=r.meshes.find(model);if(it!=r.meshes.end()){r.s.destroy(it->second.indices);r.meshes.erase(it);}for(auto it=r.overrideBounds.begin();it!=r.overrideBounds.end();)if(it->second.model==model)it=r.overrideBounds.erase(it);else ++it;}
 void raster_purge_image(Raster&r,const k22::Image*image){for(auto&[id,effect]:r.effects)for(auto&bank:effect.banks)if(bank.identity==image)bank={};auto found=r.textures.find(image);if(found!=r.textures.end()){for(auto&t:found->second){r.s.destroy(t.image);r.s.destroy(t.normal);r.s.destroy(t.orm);}r.textures.erase(found);}auto warp=r.warps.find(image);if(warp!=r.warps.end()){r.s.destroy(warp->second.image);r.warps.erase(warp);}auto sky=r.skies.find(image);if(sky!=r.skies.end()){r.s.destroy(sky->second.image);r.skies.erase(sky);}r.turbulent.erase(image);}
 int raster_shader_version(const Raster&r){return r.shaders[0]&&r.shaders[1]?2020:0;}

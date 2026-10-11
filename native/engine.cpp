@@ -1035,6 +1035,7 @@ void Engine::tick(Runtime& runtime,const Input& in){ensure_font_palette(runtime.
  update_input(runtime);make_frame(state.profile!=SemanticProfile::BonusA7);if(renderer)for(auto& c:frame_.cameras)if(c.portalId&&!c.portalTarget)if(auto surface=Renderer::portal_surface(frame_,c,renderer->metrics())){set_field(c.sourceId,"portal_x",surface->position.x);set_field(c.sourceId,"portal_y",surface->position.y);set_field(c.sourceId,"portal_z",surface->position.z);set_field(c.sourceId,"pnormal_x",surface->normal.x);set_field(c.sourceId,"pnormal_y",surface->normal.y);set_field(c.sourceId,"pnormal_z",surface->normal.z);}
  if(state.profile==SemanticProfile::CampaignA6)update_ui(runtime);runtime.tick(timeRaw,global("freeze_mode").raw());if(!viewsPrepared_){prepare(runtime);viewsPrepared_=true;}
  console_tick(runtime); // native console cheats/quickload position; no-op unless used (native/console.cpp)
+ door_tick(runtime); // native seamless doors; inert when off (native/seamless_doors.cpp)
  if(global("freeze_mode").raw()<1&&global("debug_mode").raw()<1){const std::uint32_t moveMask=core_mask(Object::Kind::Particle,"move",state.profile)->mask;const std::size_t particleCount=activeParticles.size();for(std::size_t i=0;i<particleCount&&i<activeParticles.size();++i){auto pd=activeParticles[i];auto* o=state.get(pd.object);if(!o||!o->alive)continue;
  auto integrate=[&](std::string_view p,std::string_view velocity){auto& a=o->field(p).value;auto b=o->field(velocity).value.raw();a=Value::from_raw(std::bit_cast<std::int32_t>(a.bits+std::uint32_t(mul(b,timeRaw))));};
  if(pd.legacy){set_global("my_age",pd.first?Value{}:Value::from_raw(std::bit_cast<std::int32_t>(global("total_ticks").bits-std::uint32_t(pd.birthTick))));set_vector(global_vector("my_pos"),position(pd.object));set_vector(global_vector("my_speed"),{float(field(pd.object,"vel_x")),float(field(pd.object,"vel_y")),float(field(pd.object,"vel_z"))});set_vector(global_vector("my_color"),{float(field(pd.object,"blue")),float(field(pd.object,"green")),float(field(pd.object,"red"))});for(auto [g,f]:{std::pair{"my_size","size"},std::pair{"my_alpha","alpha"},std::pair{"my_flare","flare"},std::pair{"my_transparent","transparent"},std::pair{"my_bright","bright"}})set_global(g,Value::from_double(field(pd.object,f)));set_global("my_map",o->field("bmap").value);set_global("my_action",o->field("function").value);
@@ -1047,6 +1048,7 @@ void Engine::tick(Runtime& runtime,const Input& in){ensure_font_palette(runtime.
  else{worldFrameEvents(*this,runtime);if(pendingLevelLoad){auto next=std::move(pendingLevel);pendingLevelLoad=false;load_level(runtime,next);}}
  if(state.profile==SemanticProfile::CampaignA6){physics.step(runtime);update_first_person();}
  media.master_volume(number("sound_vol"),number("midi_vol"));media.update();auto camera=global("camera");if(camera.kind==Value::Kind::Object)media.listener(position(camera.bits),field(camera.bits,"pan"));make_frame();
+ if(fadeVisible_&&!hold_presentation())++fadeFrames;
  if(state.profile==SemanticProfile::BonusA7)update_ui(runtime);
  console_overlay();
  if(state.profile==SemanticProfile::BonusA7&&pendingExit_){pendingExit_=false;quit=true;}
@@ -2411,7 +2413,7 @@ std::optional<Value> Engine::world_builtin(Runtime& runtime,ProcessContext& cont
   need(2);Vec3 origin=vector(args[0]),sector=vector(args[1]),direction{};ObjectId owner=args[0].ref.owner;if(!owner&&args[0].current().kind==Value::Kind::Object)owner=args[0].current().bits;if(owner){const auto& o=state.require(owner);if(o.kind==Object::Kind::Entity||o.kind==Object::Kind::View)direction=angles(owner);else{std::size_t base=args[0].ref.index;if(o.array.size()>=base+5){direction.x=float(o.array[base+3].value.real());direction.y=float(o.array[base+4].value.real());}else{direction.x=float(field(owner,"pan"));direction.y=float(field(owner,"tilt"));}}}
   float nearest=std::numeric_limits<float>::infinity();ObjectId nearestId=0;Vec3 nearestPosition{};ObjectId scanner=context.my;WorldQuerySnapshot snapshot(*this);
   for(ObjectId id:*snapshot.ids){const auto* o=state.get(id);if(id==scanner||!o||!o->alive||!entities.contains(id))continue;Vec3 p=position(id),v=wSub(p,origin);float distance=wLength(v);if(distance>sector.z)continue;float pan=std::atan2(v.y,v.x)*180/worldPi,tilt=std::atan2(v.z,std::hypot(v.x,v.y))*180/worldPi;auto difference=[](float a,float b){return std::remainder(a-b,360.f);};if(sector.x<360&&std::abs(difference(pan,direction.x))>sector.x*.5f)continue;if(sector.y>0&&sector.y<360&&std::abs(difference(tilt,direction.y))>sector.y*.5f)continue;if(sector.y==0&&sector.x<360){Vec3 facing=wRotate({1,0,0},direction);if(distance>0&&wDot(wMul(v,1/distance),facing)<std::cos(sector.x*.5f*worldPi/180))continue;}
-   if(distance<nearest){nearest=distance;nearestId=id;nearestPosition=p;}set_global("result",Value::from_double(distance));invoke_event(runtime,id,scanner,8);if(scanner&&state.require(scanner).alive)invoke_event(runtime,scanner,id,7);
+   if(distance<nearest){nearest=distance;nearestId=id;nearestPosition=p;}set_global("result",Value::from_double(distance));{const bool idle=seamlessDoors&&number("LY_HedefLevel")<=0;invoke_event(runtime,id,scanner,8);if(idle)door_scan(runtime,id);}if(scanner&&state.require(scanner).alive)invoke_event(runtime,scanner,id,7);
   }
   context.you=nearestId;set_vector(global_vector("target"),nearestId?nearestPosition:origin);float result=nearestId?nearest:0;set_global("result",Value::from_double(result));return Value::from_double(result);
  }
@@ -2528,6 +2530,7 @@ void Engine::level_progress(Runtime& runtime,std::int64_t stage){
 void Engine::load_level(Runtime& runtime,std::string_view filename) {
  // The caller can pass an entity-owned string; preserve it before tombstoning the old level.
  std::string level(filename);currentLevel=level;auto oldEntities=std::move(levelEntities_);levelEntities_.clear();
+ const World* keep=door_load(level); // seamless doors: a prefetched destination survives the release (native/seamless_doors.cpp)
  assets.set_native_alpha_depth(global("D3D_ALPHADEPTH").real());
  assets.set_native_shadow_depth(global("D3D_SHADOWDEPTH").real(),renderer!=nullptr);
  assets.initialize_native_lightmap_tables(global("GAMMA").raw(),global("D3D_MONOCHROME").bits!=0,renderer!=nullptr);
@@ -2538,7 +2541,7 @@ void Engine::load_level(Runtime& runtime,std::string_view filename) {
  draws_.clear();shadows_.clear();particles_.clear();lights_.clear();frame_={};world=nullptr;
  entityLightSlots_={};
  for(auto& [id,data]:entities)if(!data.ownedModel){data.model=nullptr;data.light.dirty=true;}
- if(renderer)renderer->release_scene();meshOverrides.clear();queryActors_.clear();queryGeometry_.clear();assets.release_level();
+ if(renderer)renderer->release_scene(keep?&keep->mesh:nullptr);meshOverrides.clear();queryActors_.clear();queryGeometry_.clear();assets.release_level(keep?std::string_view(level):std::string_view{});
  for(auto& [id,data]:entities)if(!data.ownedModel&&data.type&&!data.file.empty())data.model=data.type==4?&assets.world(data.file).mesh:&assets.model(data.file);
  set_global("time_level",Value{});
  if(level.empty())return;
@@ -2857,6 +2860,9 @@ void Engine::make_frame(bool mouseOutput){
   return c;
  };
  for(ObjectId id:state.uiCandidates){auto* candidate=state.get(id);if(!candidate||!candidate->alive)continue;auto& o=*candidate;if(o.kind==Object::Kind::View){bool visible=field(o.id,"visible"),linked=false;if(!visible)for(ObjectId sourceId:state.uiCandidates){const auto* source=state.get(sourceId);if(source&&source->alive&&source->kind==Object::Kind::View&&field(source->id,"visible")&&ui_value(*source,"portal").bits==o.id){linked=true;break;}}if(!visible&&!linked)continue;if(ui_value(o,"bmap"))throw std::runtime_error("VIEW render-to-bitmap is not implemented: "+o.name);auto c=camera_for(o.id);c.portalTarget=!visible&&linked;cameras_.push_back(c);if(visible&&field(o.id,"audible"))media.listener(c.position,c.angles.x);if(visible&&(o.id==mainCamera||cameras_.size()==1)){frame_.fogStart=c.fogStart;frame_.fogEnd=c.fogEnd;frame_.fogColor=c.fogColor;}}else if((o.kind==Object::Kind::Panel||o.kind==Object::Kind::Text)&&field(o.id,"visible"))uiObjects_.push_back(o.id);}
+ for(auto& c:cameras_)c.doorPortal=c.sourceId==mainCamera&&!c.portalTarget&&!c.foreground;
+ // Seamless doors hide LevelYukle's LYP_Fade panel; fadeVisible_ counts presented fade frames (scenario $fadeframes).
+ fadeVisible_=false;if(auto fade=global("LYP_Fade");fade.kind==Value::Kind::Object&&std::find(uiObjects_.begin(),uiObjects_.end(),fade.bits)!=uiObjects_.end()){if(fadeHidden_)std::erase(uiObjects_,fade.bits);else fadeVisible_=field(fade.bits,"alpha")>0;}
  ui_order(cameras_,[](const Camera& a,const Camera& b){return a.layer<b.layer;});
  visibleLodRanges_.resize(cameras_.size());const auto lodFactors=vector(global_vector("D3D_LODFACTOR"));const std::array lodValues{lodFactors.x,lodFactors.y,lodFactors.z};
  for(std::size_t view=0;view<cameras_.size();++view){const auto far=cameras_[view].farClip;const float base=bonusMouse?float(static_cast<long double>(far)*far*1.25):float(static_cast<long double>(far)*far);auto& ranges=visibleLodRanges_[view];ranges[0]=bonusMouse?float(static_cast<long double>(base)*1.25):base;for(std::size_t i=0;i<3;++i){const float squared=float(static_cast<long double>(lodValues[i])*lodValues[i]);const float scaled=float(static_cast<long double>(squared)*std::bit_cast<float>(0x38d1b717u));ranges[i+1]=float(static_cast<long double>(scaled)*base);ranges[i+4]=float(static_cast<long double>(ranges[i+1])*1.15);}}
@@ -3031,6 +3037,7 @@ void Engine::make_frame(bool mouseOutput){
  ui_order(cameras_,[](const Camera& a,const Camera& b){return a.layer<b.layer;});ui_order(ui_,[](const UICommand& a,const UICommand& b){return a.layer<b.layer;});
  if(bonusMouse&&mouseOutput){const bool active=global("mouse_mode").bits!=0;const auto selected=active?global("mouse_map"):Value::object(0);auto cursor=bitmap(selected);if(active&&cursor.image&&!global("mouse_sync").bits){const auto pos=global_vector("mouse_pos");const auto& object=state.require(pos.ref.owner);UICommand command;command.image=cursor.image;command.rect={float(pos.current().raw()>>10),float(ui_value(object,"y").raw()>>10),cursor.pixels.width,cursor.pixels.height};command.uv={cursor.pixels.x/cursor.image->width,cursor.pixels.y/cursor.image->height,cursor.pixels.width/cursor.image->width,cursor.pixels.height/cursor.image->height};command.overlay=true;command.cursorOverlay=true;command.dynamicImage=cursor.dynamic;command.imageSerial=cursor.serial;command.textureMode=cursor.image->nativeTextureAlpha?UICommand::TextureMode::Default:global("D3D_TEXDEPTH").raw()<=16384?UICommand::TextureMode::CursorKey16:UICommand::TextureMode::CursorKey24;ui_.push_back(command);}if(renderer)renderer->set_mouse_mode(currentWindowMode!=WindowMode::Fullscreen&&global("mouse_pointer").bits&&!cursor.image,number("mouse_mode")==0&&number("enable_mouse")!=0);}
  frame_.instances=draws_;frame_.shadows=shadows_;frame_.cameras=cameras_;frame_.ui=ui_;frame_.particles=particles_;frame_.lights=lights_;
+ door_frame();
  frame_.materials=materials_;
  auto restore=[&](std::optional<std::size_t>& index,const std::optional<Button>& old){index.reset();if(old)for(std::size_t i=0;i<buttons_.size();++i)if(buttons_[i].owner==old->owner&&buttons_[i].declaration==old->declaration){index=i;break;}};restore(pressedButton_,previousPressed);restore(hoveredButton_,previousHovered);
 }

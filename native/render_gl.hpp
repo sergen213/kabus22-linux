@@ -9,7 +9,7 @@ public:
     void capture(std::string_view,WindowMetrics) const;
     void drain();
     void invalidate(WindowMode);
-    void release_scene();
+    void release_scene(const Model* keep = nullptr);
     void purge_model(const Model*);
     void purge_image(const Image*);
     int shader_version() const;

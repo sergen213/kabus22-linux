@@ -49,6 +49,8 @@ struct Eval {
   if(take("$")){auto name=lower(ident());
    if(name=="level")return {true,0,lower(engine.currentLevel)};if(name=="frame")return {false,double(frame),{}};
    if(name=="levelminz"||name=="levelmaxz"){if(!engine.world)fail("no level loaded");return {false,name=="levelminz"?engine.world->mesh.min.z:engine.world->mesh.max.z,{}};} // WMB geometry bounds
+   // Seamless doors (docs/SEAMLESS_DOORS.md): phase 0 idle/1 opening/2 crossing/3 holding/4 revealing, completed swaps, presented LYP_Fade frames.
+   if(name=="door")return {false,double(engine.door_phase()),{}};if(name=="doorswaps")return {false,double(engine.doorSwaps),{}};if(name=="fadeframes")return {false,double(engine.fadeFrames),{}};
    if(name=="movie")return {false,engine.movie&&engine.media.movie_playing(engine.movie)?1.0:0.0,{}}; // full-screen media_play (no target bitmap)
    if(name=="movieframe")return {false,engine.movie?engine.media.movie_status(engine.movie):0.0,{}}; // media_playing: 1-based decoded frame, 0 when stopped
    if(name=="wall"){static const auto start=std::chrono::steady_clock::now();return {false,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count(),{}};} // seconds since first $wall read
