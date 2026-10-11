@@ -264,6 +264,7 @@
 !/native/assets.cpp
 !/native/assets.hpp
 !/native/check_assets.cpp
+!/native/character.cpp
 !/native/check_engine.cpp
 !/native/check_modern_box.hpp
 !/native/check_physics.cpp
@@ -565,6 +566,7 @@
 !/docs/ACKNEX_A631.md
 !/docs/ASSET_FORMATS.md
 !/docs/BUG_FIX_PORTING.md
+!/docs/CHARACTER_LOCK.md
 !/docs/CAMERA_SYSTEM.md
 !/docs/COMMUNITY_CREDITS.md
 !/docs/COMMUNITY_PATCH_ANALYSIS.md
