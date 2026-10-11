@@ -239,10 +239,13 @@ uniform vec3 cameraPosition,fogColor;uniform vec2 fogRange;uniform bool noFog;
 void main(){float fog=!noFog&&fogRange.y>fogRange.x?clamp((length(shadowPosition-cameraPosition)-fogRange.x)/(fogRange.y-fogRange.x),0,1):0;color=vec4(fogColor*fog,opacity);}
 )";
 const char* uiVS=R"(#version 330 core
-layout(location=0) in vec2 position;layout(location=1) in vec2 texcoord;layout(location=2) in vec4 vertexColor;
-uniform vec2 viewport;out vec2 uv;out vec4 tint;void main(){uv=texcoord;tint=vertexColor;gl_Position=vec4(position.x/viewport.x*2-1,1-position.y/viewport.y*2,0,1);})";
+layout(location=0) in vec2 position;layout(location=1) in vec2 texcoord;layout(location=2) in vec4 vertexColor;layout(location=3) in vec4 texBounds;
+uniform vec2 viewport;out vec2 uv;out vec4 tint;flat out vec4 bounds;void main(){uv=texcoord;tint=vertexColor;bounds=texBounds;gl_Position=vec4(position.x/viewport.x*2-1,1-position.y/viewport.y*2,0,1);})";
+// UI bitmaps are sub-rects of shared atlas textures: sample clamped to the sub-rect's edge texel centres, as if it were its own
+// CLAMP_TO_EDGE texture. Otherwise MSAA edge pixels (evaluated at the pixel centre outside the quad), edge ties and linear
+// FILTER reach the neighbouring atlas texels (the white separator rows of Enerji_MenuBar.tga/Enerji_Kalp.tga).
 const char* uiFS=R"(#version 330 core
-in vec2 uv;in vec4 tint;uniform sampler2D image;uniform bool overlay,textKey,cursorKey;uniform float alphaRef;out vec4 color;void main(){vec4 c=texture(image,uv);float brightness=max(max(c.r,c.g),c.b);if((textKey&&brightness<0.001)||(overlay&&((!cursorKey&&brightness<0.001)||c.a<alphaRef)))discard;color=c*tint;})";
+in vec2 uv;in vec4 tint;flat in vec4 bounds;uniform sampler2D image;uniform bool overlay,textKey,cursorKey;uniform float alphaRef;out vec4 color;void main(){vec2 h=.5/vec2(textureSize(image,0)),lo=bounds.xy+h;vec4 c=texture(image,clamp(uv,lo,max(lo,bounds.zw-h)));float brightness=max(max(c.r,c.g),c.b);if((textKey&&brightness<0.001)||(overlay&&((!cursorKey&&brightness<0.001)||c.a<alphaRef)))discard;color=c*tint;})";
 const char* postVS=R"(#version 330 core
 out vec2 uv;void main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);uv=p;gl_Position=vec4(p*2-1,0,1);})";
 const char* postFS=R"(#version 330 core
@@ -285,7 +288,7 @@ const char* fogFS="in vec2 uv;out vec4 color;uniform sampler2D linearDepth;unifo
 const char* bloomFS="in vec2 uv;out vec4 color;uniform sampler2D image;uniform vec2 texel;uniform int mode;void main(){color=vec4(mode==0?k22BloomPrefilter(k22BloomDown(image,uv,texel)):mode==1?k22BloomDown(image,uv,texel):k22BloomUp(image,uv,texel),1);}";
 const char* compositeFS="in vec2 uv;out vec4 color;uniform sampler2D image,bloom;uniform bool bloomEnabled,toneMap;void main(){vec4 c=texture(image,uv);if(bloomEnabled)c.rgb+=k22BloomStrength*texture(bloom,uv).rgb;color=vec4(toneMap?k22ToneMap(c.rgb):c.rgb,c.a);}";
 const char* fxaaFS="in vec2 uv;out vec4 color;uniform sampler2D image;uniform vec2 texel;void main(){color=vec4(k22Fxaa(image,uv,texel),texture(image,uv).a);}";
-struct UIVertex { float x,y,u,v,r,g,b,a; };
+struct UIVertex { float x,y,u,v,r,g,b,a,u0,v0,u1,v1; }; // u0..v1: the sampled sub-rect (min/max texture coordinates).
 struct Batch { GLuint first{},count{};std::uint32_t material{};GLuint centroidFirst{},centroidCount{}; };
 struct MeshGPU { GLuint vao{},vertices{},indices{},tangents{},poseBuffer{},poses{};std::vector<Batch> batches;int frameCount{},primaryMax{},skinLayers{};Bounds bounds;std::vector<Bounds> frameBounds; };
 // width/height stay the original image's; pack replacements change only GPU storage, never UV policy.
@@ -474,7 +477,7 @@ struct GLBackend::Impl {
             glGenTextures(1,&white);glBindTexture(GL_TEXTURE_2D,white);const std::uint8_t pixel[4]={255,255,255,255};glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,pixel);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
             for(auto [id,value]:{std::pair{&flatNormal,std::array<std::uint8_t,4>{128,128,255,255}},std::pair{&defaultOrm,std::array<std::uint8_t,4>{255,255,0,255}}}){glGenTextures(1,id);glBindTexture(GL_TEXTURE_2D,*id);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,value.data());glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);}
             glGenVertexArrays(1,&uiVao);glGenBuffers(1,&uiVbo);glBindVertexArray(uiVao);glBindBuffer(GL_ARRAY_BUFFER,uiVbo);
-            glEnableVertexAttribArray(0);glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,sizeof(UIVertex),(void*)0);glEnableVertexAttribArray(1);glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,sizeof(UIVertex),(void*)(2*sizeof(float)));glEnableVertexAttribArray(2);glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,sizeof(UIVertex),(void*)(4*sizeof(float)));
+            glEnableVertexAttribArray(0);glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,sizeof(UIVertex),(void*)0);glEnableVertexAttribArray(1);glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,sizeof(UIVertex),(void*)(2*sizeof(float)));glEnableVertexAttribArray(2);glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,sizeof(UIVertex),(void*)(4*sizeof(float)));glEnableVertexAttribArray(3);glVertexAttribPointer(3,4,GL_FLOAT,GL_FALSE,sizeof(UIVertex),(void*)(8*sizeof(float)));
             glGenVertexArrays(1,&postVao);glGenBuffers(1,&lightBuffer);glGenTextures(1,&lightTexture);glBindTexture(GL_TEXTURE_BUFFER,lightTexture);glBindBuffer(GL_TEXTURE_BUFFER,lightBuffer);glBufferData(GL_TEXTURE_BUFFER,sizeof(float)*8,nullptr,GL_STREAM_DRAW);glTexBuffer(GL_TEXTURE_BUFFER,GL_RGBA32F,lightBuffer);
             glGenTextures(1,&gammaTexture);glBindTexture(GL_TEXTURE_2D,gammaTexture);glTexImage2D(GL_TEXTURE_2D,0,GL_R16,256,3,0,GL_RED,GL_UNSIGNED_SHORT,gamma.gammaRamp.data());glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
             glGenSamplers(1,&sceneSampler);glSamplerParameteri(sceneSampler,GL_TEXTURE_MIN_FILTER,GL_LINEAR_MIPMAP_LINEAR);glSamplerParameteri(sceneSampler,GL_TEXTURE_MAG_FILTER,GL_LINEAR);if(anisotropy>1)glSamplerParameterf(sceneSampler,GL_TEXTURE_MAX_ANISOTROPY_EXT,anisotropy);
@@ -1149,7 +1152,7 @@ struct GLBackend::Impl {
         glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,gammaTexture);glBindSampler(1,uiNearestSampler);
         glBindVertexArray(postVao);glDrawArrays(GL_TRIANGLES,0,3);
     }
-    void quad(Rect r,Rect uv,Color c,float angle=0){float cx=r.x+r.width*.5f,cy=r.y+r.height*.5f,cs=std::cos(rad(angle)),sn=std::sin(rad(angle));UIVertex v[4];for(int i=0;i<4;++i){float x=(i==1||i==2?r.width:0)-r.width*.5f,y=(i>=2?r.height:0)-r.height*.5f;v[i]={cx+x*cs-y*sn,cy+x*sn+y*cs,uv.x+(i==1||i==2?uv.width:0),uv.y+(i>=2?uv.height:0),c.r,c.g,c.b,c.a};}for(int i:{0,1,2,0,2,3})uiVertices.push_back(v[i]);}
+    void quad(Rect r,Rect uv,Color c,float angle=0){float cx=r.x+r.width*.5f,cy=r.y+r.height*.5f,cs=std::cos(rad(angle)),sn=std::sin(rad(angle));const float u0=std::min(uv.x,uv.x+uv.width),v0=std::min(uv.y,uv.y+uv.height),u1=std::max(uv.x,uv.x+uv.width),v1=std::max(uv.y,uv.y+uv.height);UIVertex v[4];for(int i=0;i<4;++i){float x=(i==1||i==2?r.width:0)-r.width*.5f,y=(i>=2?r.height:0)-r.height*.5f;v[i]={cx+x*cs-y*sn,cy+x*sn+y*cs,uv.x+(i==1||i==2?uv.width:0),uv.y+(i>=2?uv.height:0),c.r,c.g,c.b,c.a,u0,v0,u1,v1};}for(int i:{0,1,2,0,2,3})uiVertices.push_back(v[i]);}
     void flush_ui(GLuint image){
         if(uiVertices.empty())return;glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,image);glBindVertexArray(uiVao);glBindBuffer(GL_ARRAY_BUFFER,uiVbo);
         if(uiVertices.size()>uiCapacity){uiCapacity=std::max<std::size_t>(uiVertices.size(),4096);glBufferData(GL_ARRAY_BUFFER,uiCapacity*sizeof(UIVertex),nullptr,GL_STREAM_DRAW);}

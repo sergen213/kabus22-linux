@@ -135,6 +135,28 @@ void overlay_key_checks(k22::RendererBackend backend,bool rayTracing) {
     expect("OVERLAY keeps opaque black of a BMAP0x100 32-bit TGA",front32,true,{0,0,0});
     expect("Unflagged opaque black stays drawn",front24,false,{0,0,0});
 }
+// A6 BMAP sub-rects share one atlas texture (Enerji_MenuBar.tga: HUD cells between opaque white separator texels). A UI quad at
+// a fractional position, MSAA edge pixels (shaded at the pixel centre outside the quad) and FILTER must never sample past the cell.
+void ui_atlas_edge_checks(k22::RendererBackend backend,bool rayTracing) {
+    using namespace k22;
+    TempDirectory captures;
+    auto atlas=std::make_shared<Image>();atlas->width=atlas->height=3;
+    for(int i=0;i<9;++i){const std::uint8_t v=i==4?0:255;atlas->rgba.insert(atlas->rgba.end(),{255,v,v,255});}
+    std::array<UICommand,2> ui{};ui[0].kind=UICommand::Kind::Solid;ui[0].rect={0,0,64,64};ui[0].color={0,0,0,1};
+    ui[1].image=atlas.get();ui[1].uv={1/3.f,1/3.f,1/3.f,1/3.f};ui[1].rect={10.75f,10.25f,40.5f,41.5f};
+    RenderFrame frame;frame.ui=ui;frame.mipmapping=0;
+    RenderOptions options;options.backend=backend;options.rayTracing=rayTracing;options.width=options.height=64;options.samples=4;options.vsync=false;
+    options.title="Kabus 22 UI atlas sub-rect consumer";
+    Renderer renderer(options);
+    for(bool filter:{false,true}){
+        ui[1].filter=filter;const std::string label=filter?"FILTER UI sub-rect":"UI sub-rect";
+        const auto pixels=captured_pixels(renderer,frame,captures.path/"atlas.ppm");
+        const auto center=capture_pixel(pixels,renderer.metrics());
+        if(center[0]<250||center[1]>4||center[2]>4)throw std::runtime_error(label+" cell not drawn: RGB"+std::to_string(center[0])+","+std::to_string(center[1])+","+std::to_string(center[2]));
+        for(std::size_t i=0;i<pixels.size();i+=3)if(pixels[i+1]>4||pixels[i+2]>4)
+            throw std::runtime_error(label+" samples neighbouring atlas texels at pixel "+std::to_string(i/3)+": RGB"+std::to_string(pixels[i])+","+std::to_string(pixels[i+1])+","+std::to_string(pixels[i+2]));
+    }
+}
 
 void gl_checks(std::span<const std::byte> mix,std::span<const std::byte> sunMix,k22::RendererBackend backend=k22::RendererBackend::OpenGL,bool rayTracing=false) {
     using namespace k22;
@@ -2068,11 +2090,11 @@ int main(int argc,char** argv) {
     if(argc==3) {
         if(mode=="--vulkan-rt"){
             temporal_ghosting_checks(true);temporal_ghosting_checks(true,2);gl_checks(bytes(mix),bytes(sunMix),k22::RendererBackend::Vulkan,true);
-            rt_checks();rt_actor_shadow_checks();rt_reflection_checks(bytes(mix),bytes(sunMix));overlay_key_checks(k22::RendererBackend::Vulkan,true);
+            rt_checks();rt_actor_shadow_checks();rt_reflection_checks(bytes(mix),bytes(sunMix));overlay_key_checks(k22::RendererBackend::Vulkan,true);ui_atlas_edge_checks(k22::RendererBackend::Vulkan,true);
             std::cout<<"Actual Vulkan hardware ray-query visibility/animation/alpha/reflection/turbulence consumer checks passed\n";
         }else{
             const auto backend=mode=="--vulkan"?k22::RendererBackend::Vulkan:k22::RendererBackend::OpenGL;
-            if(backend==k22::RendererBackend::Vulkan){temporal_ghosting_checks(false);temporal_ghosting_checks(false,2);}gl_checks(bytes(mix),bytes(sunMix),backend);turbulence_checks(backend);overlay_key_checks(backend,false);
+            if(backend==k22::RendererBackend::Vulkan){temporal_ghosting_checks(false);temporal_ghosting_checks(false,2);}gl_checks(bytes(mix),bytes(sunMix),backend);turbulence_checks(backend);overlay_key_checks(backend,false);ui_atlas_edge_checks(backend,false);
             std::cout<<"Actual "<<(mode=="--vulkan"?"Vulkan raster":"GL")<<" material/effect/opacity/particle/turbulence consumer checks passed\n";
         }
     }
