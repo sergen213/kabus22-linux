@@ -1,9 +1,10 @@
 #version 460
 // Ray-traced signal denoiser. Mode 0: temporal accumulation with reprojection (motion vectors of moving entities, the
 // previous view-projection elsewhere), disocclusion rejection (render_policy::history_valid) and a variance clip of the
-// history. Mode 1: one edge-aware a-trous iteration (B3 kernel, depth/normal stopping; mirror-smooth reflections are not blurred).
+// history. Mode 1: one edge-aware a-trous iteration (B3 kernel, depth/normal stopping; mirror-smooth reflections and the
+// actor-shadow mask alpha are not blurred).
 layout(local_size_x=8,local_size_y=8) in;
-layout(set=0,binding=0,std140) uniform Signals { mat4 inverseViewProjection,previousViewProjection; vec4 eye,sun,params,camera; ivec4 config; } g;
+layout(set=0,binding=0,std140) uniform Signals { mat4 inverseViewProjection,previousViewProjection; vec4 eye,sun,params,camera; ivec4 config; vec4 actor; } g;
 layout(push_constant) uniform Push { int mode,stride; } pc;
 layout(set=0,binding=2) uniform sampler2D gDepth;
 layout(set=0,binding=3) uniform sampler2D gData;
@@ -67,7 +68,9 @@ void main(){
             if(use(1))sm+=w*imageLoad(inMask,q);if(use(2))sg+=w*imageLoad(inGi,q);wm+=w;
             if(use(4)&&blurReflection){float wq=w*(other.b>0.05?1.0:0.0);sr+=wq*imageLoad(inReflect,q);wr+=wq;}
         }
-        if(wm>0.0){if(use(1))mask=sm/wm;if(use(2))gi=sg/wm;}
+        // The actor-shadow channel (alpha) is only accumulated: its rays aim at small lamps, and the spatial blur thinned a
+        // body's shadow strip to half its darkness.
+        if(wm>0.0){if(use(1))mask=vec4((sm/wm).rgb,mask.a);if(use(2))gi=sg/wm;}
         if(wr>0.0)reflection=sr/wr;
     }
     if(use(1))imageStore(outMask,pixel,mask);if(use(2))imageStore(outGi,pixel,gi);if(use(4))imageStore(outReflect,pixel,reflection);

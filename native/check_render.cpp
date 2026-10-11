@@ -1776,6 +1776,58 @@ void rt_reflection_checks(std::span<const std::byte> mix,std::span<const std::by
         throw std::runtime_error("Hardware reflection sampled stale pre-warp descriptors instead of current display texture");
 }
 
+// shadows=rt actor shadows (rt_signals.comp actorShadow): a SHADOW-flag model between a baked WMB light and a lightmapped
+// floor shadows the floor on the side away from the light, the shadow changes sides when the light does, and the caster's
+// fixed-direction planar shadow (drawn by default ray tracing, the positive control) is replaced once the GPU reports the
+// actor shadow drawn (two frames later). A caster without a light in range keeps its planar shadow.
+void rt_actor_shadow_checks() {
+    using namespace k22;
+    TempDirectory captures;
+    auto flat=[](std::array<std::uint8_t,4> c){auto image=std::make_shared<Image>();image->width=image->height=16;for(unsigned i=0;i<256;++i)image->rgba.insert(image->rgba.end(),c.begin(),c.end());return image;};
+    auto white=flat({255,255,255,255}),gray=flat({128,128,128,255});
+    World floor;auto&mesh=floor.mesh;mesh.formatVersion=6;
+    // Lights closer than rtLightClearance (16) are not occluded, so the fixture is at the scale of a room.
+    mesh.vertices={{{-32,32,0},{0,0,1},{0,0},{0,0}},{{32,32,0},{0,0,1},{1,0},{1,0}},{{32,-32,0},{0,0,1},{1,1},{1,1}},{{-32,-32,0},{0,0,1},{0,1},{0,1}}};
+    mesh.triangles={{{0,1,2},0,0},{{0,2,3},0,0}};mesh.materials.resize(1);
+    auto&surface=mesh.materials[0];surface.texture=white;surface.lightmap=gray;surface.raw.resize(64);surface.raw[43]=100;
+    Model blocker;blocker.formatVersion=4;
+    blocker.vertices={{{-12,12,24},{0,0,1},{0,0},{}},{{12,12,24},{0,0,1},{1,0},{}},{{12,-12,24},{0,0,1},{1,1},{}},{{-12,-12,24},{0,0,1},{0,1},{}}};
+    blocker.triangles={{{0,2,1},0,0},{{0,3,2},0,0}};blocker.materials.resize(1); // Front faces up, as the planar pass culls.blocker.materials[0].texture=white;
+    DrawInstance caster;caster.model=&blocker;caster.objectId=500;caster.shadowRequested=caster.doubleSided=caster.noFog=true;
+    DrawInstance planar=caster;planar.nativeShadow={true,0,{0,0,-1}};
+    RenderLight lamp;lamp.position={-32,0,48};lamp.range=160;lamp.baked=lamp.synthetic=true;
+    Camera camera;camera.position={0,0,80};camera.angles={0,-90,0};camera.farClip=400;camera.widescreen=false;camera.perDrawOpacity=camera.noCull=true;
+    RenderFrame frame;frame.cameras=std::span(&camera,1);frame.world=&floor;frame.sunDirection={};frame.instances=std::span(&caster,1);
+    frame.shadows=std::span(&planar,1);frame.shadowSun={1,0};frame.clipSize=0;frame.lights=std::span(&lamp,1);
+    RenderOptions options;options.backend=RendererBackend::Vulkan;options.rayTracing=true;
+    options.width=options.height=64;options.samples=1;options.vsync=false;options.title="Kabus 22 RT actor shadow consumer";
+    // Floor points 22 units either side of the caster along x (screen vertical; 60 units half view), outside its silhouette;
+    // 5x5 mean luma against the 1-sample stochastic signal.
+    auto sides=[&](Renderer&renderer,const char*name){
+        for(int i=0;i<3;++i)renderer.draw(frame); // The caster feedback of a frame slot is read when the slot comes round again.
+        const auto pixels=captured_pixels(renderer,frame,captures.path/name);const auto m=renderer.metrics();
+        if(auto*keep=std::getenv("K22_CAPTURE_DIR"))std::filesystem::copy_file(captures.path/name,std::filesystem::path(keep)/name,std::filesystem::copy_options::overwrite_existing);
+        auto mean=[&](float y){double sum=0;for(int dy=-2;dy<=2;++dy)for(int dx=-2;dx<=2;++dx){auto p=capture_pixel(pixels,m,.5f+dx/float(m.drawableWidth),y+dy/float(m.drawableHeight));sum+=.299*p[0]+.587*p[1]+.114*p[2];}return sum/25;};
+        return std::array<double,2>{mean(.5f-22/120.f),mean(.5f+22/120.f)};
+    };
+    auto shadowed=[](std::array<double,2>s,int side){return s[side]<=.7*s[1-side]&&s[1-side]>20;};
+    auto plainOptions=options;plainOptions.title="Kabus 22 default RT planar shadow control";
+    Renderer plain(plainOptions);
+    const auto control=sides(plain,"actor-plain.ppm");
+    if(!shadowed(control,0)&&!shadowed(control,1))throw std::runtime_error("Planar shadow control is not visible on the default ray-traced path: "+std::to_string(control[0])+"/"+std::to_string(control[1]));
+    options.features.shadows=ShadowMode::RayTraced;
+    Renderer renderer(options);
+    const auto left=sides(renderer,"actor-left.ppm");
+    lamp.position.x=32;
+    const auto right=sides(renderer,"actor-right.ppm");
+    std::cout<<"RT actor shadow: planar control "<<control[0]<<"/"<<control[1]<<", light -x "<<left[0]<<"/"<<left[1]<<", light +x "<<right[0]<<"/"<<right[1]<<std::endl;
+    if(!(shadowed(left,0)&&shadowed(right,1))&&!(shadowed(left,1)&&shadowed(right,0)))
+        throw std::runtime_error("shadows=rt actor shadow does not follow the baked light, or the fixed planar shadow is still drawn");
+    lamp.range=10;
+    const auto unlit=sides(renderer,"actor-unlit.ppm");
+    if(!shadowed(unlit,shadowed(control,0)?0:1))throw std::runtime_error("shadows=rt removed a planar shadow without drawing an actor shadow");
+}
+
 // A moving, vertex-animated actor under a following camera with the full temporal stack (TAA, and RT shadows/GI/
 // rough reflections with the denoiser) must not leave a trail: the frame reached through motion is compared with the
 // same final frame converged with everything held still. K22_CAPTURE_DIR keeps the captures for inspection.
@@ -1870,6 +1922,15 @@ void graphics_policy_checks() {
      auto up=project_ndc(cube_face_matrix(l,0,1,500),add(l,Vec3{100,50,0}));require(up.y<0,"GL cube +X face has world +Y at texel row 0 (NDC -Y)");}
     {std::vector<RenderLight>lights(5);lights[0].baked=true;lights[1].synthetic=true;lights[2].type=3;lights[3].position={1000,0,0};lights[4].position={50,0,0};lights[4].range=200;
      require(shadow_light_index(lights,{0,0,0})==4,"cube shadow follows the strongest nearby dynamic light");lights.resize(3);require(shadow_light_index(lights,{0,0,0})==-1,"no eligible shadow light");}
+    {std::vector<RenderLight>lights(44);lights[0].type=1;lights[0].range=500;lights[1].synthetic=true;lights[1].type=3; // native point, hardware sun
+     lights[2].synthetic=true;lights[2].type=1; // a synthetic non-baked point is not a hardware light
+     lights[3].type=3;lights[3].range=500; // script directional light: no position
+     for(std::size_t i=4;i<lights.size();++i){lights[i].baked=lights[i].synthetic=true;lights[i].position={float(20*int(i)),0,0};lights[i].range=100;}
+     const std::array<Vec3,2>casters{{{0,0,0},{2000,0,0}}};
+     auto picked=actor_shadow_lights(lights,casters);
+     // Ranges that hold a caster: native point (gap -500) and baked lights at x 20i < 100 from the first caster.
+     require(picked==std::vector<std::uint32_t>{0,4,1},"actor shadows trace the lights whose range holds a caster, deepest first, then the sun");
+     require(actor_shadow_lights(lights,{}).empty(),"no SHADOW caster, no actor-shadow lights");}
     {std::array<Vec2,8>seen{};for(int i=0;i<8;++i){seen[i]=taa_jitter(i);require(std::abs(seen[i].x)<=.5f&&std::abs(seen[i].y)<=.5f,"jitter within one pixel");for(int j=0;j<i;++j)require(seen[i].x!=seen[j].x||seen[i].y!=seen[j].y,"8 distinct jitter offsets");}
      require(taa_jitter(8).x==seen[0].x&&std::abs(halton(1,2)-.5f)<1e-6f&&std::abs(halton(2,3)-2/3.f)<1e-6f&&std::abs(halton(4,3)-4/9.f)<1e-6f,"Halton(2,3) sequence");
      Camera c;auto vp=camera_matrix(c,16/9.f);auto j=jittered(vp,{.25f,-.5f},1920,1080);Vec3 p{200,30,10};auto a=project_ndc(vp,p),b=project_ndc(j,p);require(std::abs(b.x-a.x-.5f/1920)<1e-5f&&std::abs(b.y-a.y+1.f/1080)<1e-5f&&std::abs(b.z-a.z)<1e-6f,"jitter moves clip XY by whole sub-pixel offsets only");}
@@ -1962,7 +2023,7 @@ int main(int argc,char** argv) {
     if(argc==3) {
         if(mode=="--vulkan-rt"){
             temporal_ghosting_checks(true);temporal_ghosting_checks(true,2);gl_checks(bytes(mix),bytes(sunMix),k22::RendererBackend::Vulkan,true);
-            rt_checks();rt_reflection_checks(bytes(mix),bytes(sunMix));overlay_key_checks(k22::RendererBackend::Vulkan,true);
+            rt_checks();rt_actor_shadow_checks();rt_reflection_checks(bytes(mix),bytes(sunMix));overlay_key_checks(k22::RendererBackend::Vulkan,true);
             std::cout<<"Actual Vulkan hardware ray-query visibility/animation/alpha/reflection/turbulence consumer checks passed\n";
         }else{
             const auto backend=mode=="--vulkan"?k22::RendererBackend::Vulkan:k22::RendererBackend::OpenGL;

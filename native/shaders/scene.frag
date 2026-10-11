@@ -39,7 +39,7 @@ layout(set=0,binding=4) uniform sampler2D normalSkin;
 // Wave-2: shadow maps (raster fallback) and denoised screen-space ray-traced signals of the primary view.
 layout(set=0,binding=9) uniform sampler2DShadow sunShadowMap;
 layout(set=0,binding=10) uniform samplerCubeShadow cubeShadowMap;
-layout(set=0,binding=11) uniform sampler2D rtMask; // r dynamic-light visibility, g sun visibility, b contact shadow.
+layout(set=0,binding=11) uniform sampler2D rtMask; // r dynamic-light visibility, g sun visibility, b contact shadow, a lightmap actor shadow.
 layout(set=0,binding=12) uniform sampler2D rtGi; // linear one-bounce irradiance (albedo applied here).
 layout(set=0,binding=13) uniform sampler2D rtReflect; // rgb reflected radiance, a transmitted fraction.
 layout(set=0,binding=14) uniform sampler2D gbufferDepth;
@@ -211,6 +211,10 @@ void main(){
 #endif
         rgb=k22Pbr(t.rgb,illumination,worldPosition,normalize(worldNormal),worldTangent,normalOrientation,texture(pbrNormal,coord).rgb,texture(pbrOrm,coord),k22RoughnessMap,k22LegacyRoughness,cameraPosition,sunDirection,sunVisibility,!hasLightmap);
     }
+#if K22_RAY_QUERY
+    // Actor shadows (rt_signals.comp actorShadow) darken the lit surface like the planar shadow they replace (alpha over it).
+    if(signalShadows&&hasLightmap)rgb*=mask.a;
+#endif
     if(!noFog&&fogRange.y>fogRange.x){float f=clamp((length(worldPosition-cameraPosition)-fogRange.x)/(fogRange.y-fogRange.x),0,1);rgb=mix(rgb,fogColor,f);}
     if(portalEnabled&&reflectionWeight>0&&abs(dot(portalPlane,vec4(worldPosition,1)))<0.1){
         vec4 reflected=portalProjection*vec4(worldPosition,1);
