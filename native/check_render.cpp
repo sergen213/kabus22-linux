@@ -157,6 +157,53 @@ void ui_atlas_edge_checks(k22::RendererBackend backend,bool rayTracing) {
             throw std::runtime_error(label+" samples neighbouring atlas texels at pixel "+std::to_string(i/3)+": RGB"+std::to_string(pixels[i])+","+std::to_string(pixels[i+1])+","+std::to_string(pixels[i+2]));
     }
 }
+// Seamless door (render.hpp DoorPortal), Vulkan raster/RT: a red level wall at x=50 with a 20x20 doorway shows the green door
+// world (x=60) through it and stays red elsewhere; without a door (or with it closed/not this camera's) the output is the
+// original frame; release_scene(keep) keeps the door world drawable as the next level. Temporal configurations (TAA, FSR,
+// RT signals with the denoiser) must keep the same split.
+void vulkan_door_portal_checks(bool rayTracing) {
+    using namespace k22;
+    TempDirectory captures;
+    auto plane=[](World&world,float x,float half,std::array<std::uint8_t,4> rgba){
+        auto image=std::make_shared<Image>();image->width=image->height=8;for(int i=0;i<64;++i)image->rgba.insert(image->rgba.end(),rgba.begin(),rgba.end());
+        auto&m=world.mesh;m.formatVersion=6;m.nativeWorld=&world;
+        m.vertices={{{x,-half,-half},{-1,0,0},{0,0},{}},{{x,half,-half},{-1,0,0},{1,0},{}},{{x,half,half},{-1,0,0},{1,1},{}},{{x,-half,half},{-1,0,0},{0,1},{}}};
+        m.triangles={{{0,2,1},0,0},{{0,3,2},0,0}};m.materials.resize(1);m.materials[0].texture=image;m.materials[0].flags=3;m.materials[0].raw.resize(64);
+    };
+    World level,next;plane(level,50,200,{255,0,0,255});plane(next,60,20,{0,255,0,255});
+    // The door world is lit by its lightmap (mid grey: x2 = full texel) and must stay so under the RT signals of the current level.
+    auto lightmap=std::make_shared<Image>();lightmap->width=lightmap->height=4;lightmap->rgba.assign(64,128);
+    next.mesh.materials[0].flags=0;next.mesh.materials[0].lightmap=lightmap;for(auto&v:next.mesh.vertices)v.lightmap_uv=v.uv;
+    Camera camera;camera.widescreen=false;camera.noShadow=true;camera.doorPortal=true;
+    RenderFrame frame;frame.cameras=std::span(&camera,1);frame.world=&level;frame.mipmapping=0;
+    const DoorPortal door{&next,{},{},{50,0,0},{-1,0,0},{0,1,0},{0,0,1},10,10};
+    for(int config=0;config<3;++config){
+        RenderOptions options;options.backend=RendererBackend::Vulkan;options.rayTracing=rayTracing;options.width=options.height=128;options.samples=1;options.vsync=false;
+        options.title="Kabus 22 seamless door consumer";auto&f=options.features;f.taa=config==1;f.fsr=config==2?2:0;
+        if(rayTracing&&config){f.shadows=ShadowMode::RayTraced;f.gi=f.roughReflections=f.denoise=true;}
+        Renderer renderer(options);const auto metrics=renderer.metrics();
+        auto sample=[&]{for(int i=0;i<(config?12:0);++i)renderer.draw(frame);return captured_pixels(renderer,frame,captures.path/"door.ppm");};
+        auto expect=[&](const char*label,const std::vector<std::uint8_t>&pixels,float x,float y,bool green){
+            auto p=capture_pixel(pixels,metrics,x,y);if(green?(p[1]<200||p[0]>40):(p[0]<200||p[1]>40))
+                throw std::runtime_error(std::string("Vulkan seamless door config ")+std::to_string(config)+": "+label+": RGB"+std::to_string(p[0])+","+std::to_string(p[1])+","+std::to_string(p[2]));
+        };
+        frame.world=&level;frame.door={};const auto original=sample();
+        expect("level without door",original,.5f,.5f,false);
+        frame.door=door;const auto open=sample();
+        expect("doorway shows the door world",open,.5f,.5f,true);expect("doorway edge (inside)",open,.5f,.45f,true);
+        expect("wall beside the doorway",open,.5f,.25f,false);expect("wall corner",open,.05f,.05f,false);
+        if(!config){
+            frame.door.halfWidth=0;if(sample()!=original)throw std::runtime_error("Closed Vulkan seamless door changed the frame");
+            frame.door=door;camera.doorPortal=false;if(sample()!=original)throw std::runtime_error("Vulkan seamless door applied to a non-door camera");
+            camera.doorPortal=true;camera.position.x=55;frame.door={};const auto beyond=sample();frame.door=door;
+            if(sample()!=beyond)throw std::runtime_error("Vulkan seamless door applied behind its wall plane (sC<=0)");
+            camera.position.x=0;frame.door={};if(sample()!=original)throw std::runtime_error("Vulkan frame without a door differs from the original");
+        }
+        frame.door=door;sample();renderer.release_scene(&next.mesh);
+        frame.world=&next;frame.door={};expect("kept door world drawn as the level",sample(),.5f,.5f,true);
+        renderer.release_scene();frame.world=&level;
+    }
+}
 
 void gl_checks(std::span<const std::byte> mix,std::span<const std::byte> sunMix,k22::RendererBackend backend=k22::RendererBackend::OpenGL,bool rayTracing=false) {
     using namespace k22;
@@ -2088,6 +2135,7 @@ int main(int argc,char** argv) {
     Renderer::boundary_check();
     std::cout<<"Renderer material/effect boundary checks passed\n";
     if(argc==3) {
+        if(mode!="--gl"){vulkan_door_portal_checks(mode=="--vulkan-rt");std::cout<<"Actual Vulkan seamless door portal checks passed\n";}
         if(mode=="--vulkan-rt"){
             temporal_ghosting_checks(true);temporal_ghosting_checks(true,2);gl_checks(bytes(mix),bytes(sunMix),k22::RendererBackend::Vulkan,true);
             rt_checks();rt_actor_shadow_checks();rt_reflection_checks(bytes(mix),bytes(sunMix));overlay_key_checks(k22::RendererBackend::Vulkan,true);ui_atlas_edge_checks(k22::RendererBackend::Vulkan,true);

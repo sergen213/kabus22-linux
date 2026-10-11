@@ -20,6 +20,9 @@ layout(set=0,binding=0,std140) uniform Uniform {
     vec4 dataCamera; // xyz camera forward, w near plane.
     vec4 dataRange; // x far plane, yz fog start/end, w effect parameter.
     mat4 dataPreviousModel; // Motion-vector pass: the entity's previous-frame model transform.
+    // Seamless door (render.hpp DoorPortal): [0] doorway centre, w mode (0 none, 1 cut the current level's doorway, 2 door
+    // world kept inside it), [1] wall normal, w half width, [2] right, w half height, [3] up.
+    vec4 dataDoor[4];
 } u;
 #define k22ShadowMaps (u.dataEffects.x!=0)
 #define k22RtSignals int(u.dataEffects.y)

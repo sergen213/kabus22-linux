@@ -290,9 +290,18 @@ void rt_replace_texture(RayTracing& rt,VkImageView oldView,VkImageView newView){
 }
 VkDescriptorSetLayout rt_layout(const RayTracing& rt){return rt.layout;}
 VkDescriptorSet rt_set(const RayTracing& rt){return rt.slots[rt.s.slotIndex].set;}
-void rt_release(RayTracing& rt){
-    for(auto& slot:rt.slots){for(auto& b:slot.blas)rt.destroy(b.acceleration);slot.blas.clear();slot.blasLookup.clear();for(auto& scene:slot.scenes){rt.destroy(scene.tlas);rt.s.destroy(scene.instances);rt.s.destroy(scene.records);rt.s.destroy(scene.materials);}slot.scenes.clear();slot.sceneUsed=0;for(auto& a:slot.garbage)rt.destroy(a);slot.garbage.clear();for(auto& p:slot.poses)rt.s.destroy(p->pose.vertices);slot.poses.clear();slot.poseGroups.clear();slot.poseLookup.clear();slot.set={};}
-    for(auto* map:{&rt.models,&rt.expandedModels}){for(auto& [key,m]:*map){rt.s.destroy(m.base);rt.s.destroy(m.endpoints);}map->clear();}for(auto& [key,o]:rt.overrides)rt.s.destroy(o.endpoint);rt.overrides.clear();
+// keep (seamless door world, render.hpp DoorPortal): its model data, GPU poses and their BLAS survive; scenes never do.
+void rt_release(RayTracing& rt,const Model* keep){
+    auto drop=[&](const Model* model){return !keep||model!=keep;};
+    for(auto& slot:rt.slots){
+        std::erase_if(slot.blas,[&](Blas& b){if(!drop(b.pose->model))return false;rt.destroy(b.acceleration);return true;});
+        slot.blasLookup.clear();for(std::size_t i=0;i<slot.blas.size();++i)slot.blasLookup[slot.blas[i].pose].push_back(i);
+        for(auto& scene:slot.scenes){rt.destroy(scene.tlas);rt.s.destroy(scene.instances);rt.s.destroy(scene.records);rt.s.destroy(scene.materials);}slot.scenes.clear();slot.sceneUsed=0;for(auto& a:slot.garbage)rt.destroy(a);slot.garbage.clear();
+        std::erase_if(slot.poses,[&](auto& p){if(!drop(p->model))return false;slot.poseLookup.erase(&p->pose);rt.s.destroy(p->pose.vertices);return true;});
+        std::erase_if(slot.poseGroups,[&](auto& group){return drop(group.first.model);});slot.set={};
+    }
+    for(auto* map:{&rt.models,&rt.expandedModels})std::erase_if(*map,[&](auto& m){if(!drop(m.first))return false;rt.s.destroy(m.second.base);rt.s.destroy(m.second.endpoints);return true;});
+    std::erase_if(rt.overrides,[&](auto& o){if(!drop(o.second.model))return false;rt.s.destroy(o.second.endpoint);return true;});
 }
 void rt_purge_model(RayTracing& rt,const Model* model){
     for(auto& slot:rt.slots){
