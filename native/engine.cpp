@@ -1085,6 +1085,7 @@ Value Engine::builtin(Runtime& runtime,ProcessContext& ctx,std::string_view name
   const bool koru=characterLock>=0?story_character()==2:name=="k22_body_koruyucu_pasif";
   return global(koru?"koruyucu_pasif":"oyuncu_pasif");
  }
+ if(name=="k22_ebru_hit_kind"){const double t=number("dmr_yaralan_tip");return characterLock>=0&&(t==2||t==3)?Value::from_int(int(t)-2):global("dmr_yaralan_tip");} // character.cpp
  if(name=="k22_bullet_hit_kind"){ // silah.wdl:680 you.skill3=aktif_silah; Lain handles one firearm kind (character.cpp)
   const auto lain=runtime.function("kotukoru_ai");
   if(characterLock>=0&&lain&&ctx.you&&state.get(ctx.you)&&callback(ctx.you,"action1")==lain)return Value::from_int(2);
