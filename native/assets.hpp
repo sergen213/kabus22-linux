@@ -9,6 +9,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <future>
 #include <vector>
 
 namespace k22 {
@@ -121,8 +122,13 @@ public:
     void purge_image(std::string_view name);
     // Caller retires all borrowed model/GPU references before purging.
     bool purge_model(std::string_view name);
-    // Invalidates decoded references; call only after scene/render teardown.
-    void release_level();
+    // Invalidates decoded references; call only after scene/render teardown. keepWorld: one decoded world survives (seamless door destination).
+    void release_level(std::string_view keepWorld={});
+    // Seamless doors: decodes a WMB on a worker thread from a snapshot of this Assets (archives, decode settings, decoded
+    // images); world() adopts the result (waiting if needed). True once the world is cached; decode errors surface there.
+    bool prefetch_world(std::string_view name);
+    // Forgets a cached or finished prefetched world; the caller retires its GPU/model references first.
+    void drop_world(std::string_view name);
     static std::vector<uint8_t> decompress(std::span<const uint8_t> bytes, size_t expected);
     const std::filesystem::path& root() const { return root_; }
 private:
@@ -145,6 +151,7 @@ private:
     std::unordered_map<std::string,std::shared_ptr<const Image>> images_;
     std::unordered_map<std::string,Model> models_;
     std::unordered_map<std::string,World> worlds_;
+    std::unordered_map<std::string,std::shared_future<std::shared_ptr<World>>> prefetches_;
     size_t cachedBytes_{};
 };
 }

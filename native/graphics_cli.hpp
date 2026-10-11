@@ -17,6 +17,7 @@ struct Request {
     std::vector<std::string> packs;
     bool presetBackend{}; // Backend chosen by preset, not by the user: may degrade with a notice.
     int fpsLimit{}; // Resolved fps_limit for main.cpp pacing: 0 = script fps_max, -1 = unlimited.
+    bool seamlessDoors{true}; // Resolved seamless_doors for Engine::seamlessDoors.
 };
 inline std::string json(std::string_view text){
     std::string out="\"";
@@ -46,7 +47,7 @@ inline void apply(RenderOptions&o,Request&r){
     if(!r.active)return;
     auto g=render_policy::resolve_graphics(r.preset,r.overrides);
     // Unlimited also turns vsync off; numeric limits keep it, so the display refresh still caps them.
-    r.fpsLimit=g.fpsLimit;if(g.fpsLimit<0)o.vsync=false;
+    r.fpsLimit=g.fpsLimit;r.seamlessDoors=g.seamlessDoors;if(g.fpsLimit<0)o.vsync=false;
     if(!r.packs.empty()){if(g.explicitPacks&&!g.texturePacks)throw std::runtime_error("--texture-pack conflicts with --graphics texture_packs=0");g.texturePacks=true;}
     if(r.backendOverride)select_backend(o,g.backend);
     else if(!r.rendererFlag&&(r.preset=="enhanced"||r.preset=="ultra")){select_backend(o,g.backend);r.presetBackend=true;}

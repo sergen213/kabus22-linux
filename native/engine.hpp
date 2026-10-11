@@ -29,6 +29,13 @@ Vec3 worldModelVertex(const Engine&,ObjectId,const EntityData&,std::size_t rende
 struct FileData {std::vector<std::uint8_t> bytes;std::size_t cursor=0;std::filesystem::path output;bool writable=false;};
 struct ParticleData {ObjectId object=0;FunctionId callback=0;ObjectId owner=0;bool legacy=false,first=true;std::int32_t birthTick=0;};
 struct CollisionNode {Vec3 min,max;std::uint32_t begin=0,count=0,left=0,right=0;};
+// Seamless door geometry (native/seamless_doors.cpp). center: doorway centre on the door face plane; normal: into the room.
+struct DoorSide {Vec3 center{},normal{},right{};float halfWidth{},halfHeight{},floor{};};
+// b: the destination's return door; position/angles map destination coordinates into the source level (DrawInstance convention).
+struct DoorLink {DoorSide a,b;Vec3 position{},angles{};};
+std::optional<DoorSide> door_side(const World&,std::span<const Vec3> triggers);
+std::vector<std::vector<Vec3>> door_clusters(const World&,int target); // LY_Kapi triggers with LevelID target, grouped per doorway
+std::optional<DoorLink> door_link(const World& from,std::span<const Vec3> triggers,const World& to,int fromId);
 class Engine {
 public:
  Engine(Assets&,Renderer*,Media&,State&);
@@ -115,7 +122,20 @@ public:
  bool quickSaving=false; // file_close adds the player position to the slot sidecar while set
  struct PositionRestore {int level=0;Vec3 position{};float pan=0;bool started=false;int ticks=0;};
  std::optional<PositionRestore> positionRestore; // set by a quicksave slot read; applied once its level is in play
+ // Native seamless doors (docs/SEAMLESS_DOORS.md, native/seamless_doors.cpp); false = the original LevelYukle fade exactly.
+ bool seamlessDoors=false;
+ bool hold_presentation()const{return door_.phase==DoorPhase::Holding;} // main loop: do not present (last frame stays up)
+ int door_phase()const; // 0 idle, 1 opening, 2 crossing, 3 holding, 4 revealing
+ std::uint32_t doorSwaps=0,fadeFrames=0; // completed seamless swaps; presented frames with a visible LYP_Fade (scenario $fadeframes)
+ void door_scan(Runtime&,ObjectId trigger); // after a scan event: an LY_Kapi request may become a doorway preview
 private:
+ enum class DoorPhase {Idle,Opening,Crossing,Holding,Revealing};
+ struct DoorGroup {int target=0;std::vector<Vec3> triggers;Vec3 centroid{};std::optional<DoorLink> link;bool linked=false;};
+ struct DoorState {DoorPhase phase=DoorPhase::Idle;std::vector<DoorGroup> groups;const World* groupsWorld=nullptr;std::size_t group=~std::size_t{},warm=~std::size_t{};
+  const World* world=nullptr;std::string wmb;int from=0,target=0,ticks=0,held=0;float open=0,openTime=0;} door_;
+ bool fadeHidden_=false,fadeVisible_=false;
+ void door_tick(Runtime&);void door_frame();void door_reset();void door_level();const World* door_load(std::string_view level);
+ const World* door_world(DoorGroup&,bool wait);bool door_scripted(int from,int to)const;std::string level_wmb(int id)const;
  friend class Physics;
  friend std::optional<Value> worldModelBuiltin(Engine&,Runtime&,ProcessContext&,std::string_view,std::span<const Argument>);
  void initialize_globals();void make_frame(bool mouseOutput=true);void update_input(Runtime&);void update_ui(Runtime&);void update_first_person();

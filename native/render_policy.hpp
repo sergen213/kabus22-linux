@@ -285,7 +285,7 @@ inline unsigned backend_bit(std::string_view backend){return backend=="opengl"?b
 // `restricted` names one value that only works on `restrictedBackends` (shadows=rt).
 struct GraphicsOption { std::string_view key,label,fallback; std::array<std::string_view,11> values; std::size_t count; unsigned backends{backendAll}; std::string_view restricted{}; unsigned restrictedBackends{}; };
 // Every implemented --graphics key. Backend availability is probed separately.
-inline constexpr std::array<GraphicsOption,20> graphicsOptions{{
+inline constexpr std::array<GraphicsOption,21> graphicsOptions{{
     {"backend","Rendering backend","opengl",{"opengl","vulkan-raster","vulkan-rt"},3},
     {"pbr","PBR materials (HDR + tone mapping)","0",{"0","1"},2},
     {"anisotropy","Anisotropic filtering","8",{"1","2","4","8","16"},5},
@@ -305,12 +305,15 @@ inline constexpr std::array<GraphicsOption,20> graphicsOptions{{
     {"texture_upscale","Edge-aware 2x texture upscaling","0",{"0","1"},2,backendVulkan},
     {"sharpen","Contrast-adaptive sharpening","0",{"0","1"},2,backendVulkan},
     {"fsr","AMD FSR 3.1 upscaling (replaces TAA)","off",{"off","native","quality","balanced","performance","ultra_performance"},6,backendVulkan},
-    {"fps_limit","Frame rate limit (original = script fps_max: campaign 72, Bonus 60)","original",{"original","30","60","72","90","120","144","165","180","240","unlimited"},11}}};
+    {"fps_limit","Frame rate limit (original = script fps_max: campaign 72, Bonus 60)","original",{"original","30","60","72","90","120","144","165","180","240","unlimited"},11},
+    // Engine (not renderer) option like fps_limit: every preset keeps it on; off = the original LevelYukle fade (docs/SEAMLESS_DOORS.md).
+    {"seamless_doors","Seamless doors (next zone visible through the open door, no fade)","on",{"on","off"},2}}};
 struct GraphicsSettings {
     std::string backend{"opengl"};
     bool pbr{},texturePacks{},explicitPacks{};
     int anisotropy{},msaa{}; // 0 keeps the legacy/script-controlled default exactly.
     int fpsLimit{}; // 0 = script fps_max, -1 = unlimited.
+    bool seamlessDoors{true};
     GraphicsFeatures features;
 };
 inline GraphicsSettings resolve_graphics(std::string_view preset,std::span<const std::pair<std::string,std::string>> overrides){
@@ -330,7 +333,8 @@ inline GraphicsSettings resolve_graphics(std::string_view preset,std::span<const
         else if(key=="bloom")f.bloom=on;else if(key=="ssao")f.ssao=on;else if(key=="fxaa")f.fxaa=on;else if(key=="taa")f.taa=on;
         else if(key=="smooth_normals")f.smoothNormals=on;else if(key=="tessellation")f.tessellation=on;else if(key=="texture_upscale")f.upscale=on;else if(key=="sharpen")f.sharpen=on;
         else if(key=="fsr")f.fsr=std::uint8_t(std::find(option->values.begin(),option->values.end(),value)-option->values.begin());
-        else if(key=="fps_limit")g.fpsLimit=value=="original"?0:value=="unlimited"?-1:std::stoi(value);else f.fog=on;
+        else if(key=="fps_limit")g.fpsLimit=value=="original"?0:value=="unlimited"?-1:std::stoi(value);
+        else if(key=="seamless_doors")g.seamlessDoors=value=="on";else f.fog=on;
     }
     return g;
 }

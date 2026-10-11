@@ -114,6 +114,7 @@ int main(int argc,char** argv){try{
  engine.initialize_plugins(runtime);
  if(!bonus)engine.configure_language(runtime,language,explicitLanguage);
  if(cameraName=="first-person"){if(bonus||lower(entryName)=="k22widescreen.wdl")throw std::runtime_error("--camera first-person applies to the original campaign scripts (patched scripts provide their own F5 camera)");engine.cameraMode=k22::Engine::CameraMode::FirstPerson;}
+ engine.seamlessDoors=graphics.seamlessDoors&&!bonus; // --graphics seamless_doors=on|off (docs/SEAMLESS_DOORS.md)
  const bool originalCampaign=!bonus&&entry.empty()&&lower(entryName)=="k22.wdl";
  if((!headless||displayDimensions)&&originalCampaign){const bool admitted=engine.configure_display(runtime,true,display=="native",displayWidth,displayHeight,windowMode);if(display=="native"&&(displayDimensions||displayMode)&&!admitted)throw std::runtime_error("native display overrides require the original campaign resolution/UI function graph");}
  else if(displayDimensions||displayMode)throw std::runtime_error("native display overrides require the auto-selected original campaign (headless also requires explicit resolution)");
@@ -141,7 +142,8 @@ int main(int argc,char** argv){try{
   const auto t1=timingLog?std::chrono::steady_clock::now():t0;
   engine.tick(runtime,engine.skip_intro(runtime,engine.console(runtime,input)));
   const auto t2=timingLog?std::chrono::steady_clock::now():t0;
-  if(renderer)renderer->draw(engine.frame());
+  // Seamless doors: the frames between the destination's Level_Load and its Giris placement are not presented.
+  if(renderer&&!engine.hold_presentation())renderer->draw(engine.frame());
   const auto t3=timingLog?std::chrono::steady_clock::now():t0;
   engine.finish_frame(runtime);++count;
   if(timingLog){const auto t4=std::chrono::steady_clock::now();auto us=[](auto d){return (long long)std::chrono::duration_cast<std::chrono::microseconds>(d).count();};std::fprintf(timingLog,"%llu %lld %lld %lld %lld %zu\n",(unsigned long long)count-1,us(t1-t0),us(t2-t1),us(t3-t2),us(t4-t3),engine.activeParticles.size());}
