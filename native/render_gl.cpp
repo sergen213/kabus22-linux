@@ -118,6 +118,9 @@ uniform vec4 tint;uniform vec3 sunDirection,cameraPosition,fogColor;uniform vec2
 uniform sampler2D portalImage;uniform mat4 portalProjection;uniform vec4 portalViewport,portalPlane;uniform bool portalEnabled;uniform float reflectionWeight;
 in vec3 effectLight,effectView;uniform int effectKind;uniform sampler2D normalSkin;uniform vec2 normalUvScale;
 uniform vec4 skillMain,skillExtra,preparedAmbient;uniform bool explicitMaterial;
+// Seamless door (render.hpp DoorPortal): 1 discards current-level fragments in the doorway, 2 keeps only door-world fragments
+// seen through it; doorSky fills door-world SKY surfaces with doorSkyColor.
+uniform int doorMode;uniform vec3 doorCenter,doorNormal,doorRight,doorUp,doorSkyColor;uniform vec2 doorHalf;uniform bool doorSky;
 #ifdef K22_SHADOW_MAPS
 // Sun depth map plus one point/spot depth cube (shadowLight, -1 none); casterPass renders depth only.
 uniform bool shadowMaps,casterPass;uniform int shadowLight;uniform mat4 sunShadowMatrix;uniform float sunShadowTexel;uniform sampler2DShadow sunShadowMap;uniform samplerCubeShadow cubeShadowMap;
@@ -150,7 +153,13 @@ vec3 enhancedBaked(vec3 p,vec3 n){
     return result;
 }
 void main(){
+    if(doorMode!=0){
+        float sC=dot(cameraPosition-doorCenter,doorNormal),sP=dot(worldPosition-doorCenter,doorNormal);vec3 d=cameraPosition+(worldPosition-cameraPosition)*(sC/(sC-sP))-doorCenter;
+        bool inside=sC-sP>0&&abs(dot(d,doorRight))<=doorHalf.x&&abs(dot(d,doorUp))<=doorHalf.y;
+        if(doorMode==1?sP<1&&inside:!(sP<-2&&inside))discard;
+    }
     if(skyMask){color=vec4(1);return;}
+    if(doorSky){color=vec4(doorSkyColor,1);return;}
     vec2 coord=uv*uvScale+uvOffset;vec4 texel;
     if(spriteFrames>1){float cols=floor(1.0/uvScale.x+0.5),f0=float(frame0),f1=float(frame1);texel=mix(texture(skin,coord+vec2(mod(f0,cols)/cols,floor(f0/cols)*uvScale.y)),texture(skin,coord+vec2(mod(f1,cols)/cols,floor(f1/cols)*uvScale.y)),interpolation);}else texel=texture(skin,coord); // sprite grid cells (engine.cpp load_entity_asset)
     if(effectKind!=0){
@@ -387,7 +396,7 @@ struct GLBackend::Impl {
     std::array<float,4> geometryClipPlane{};
     GLuint warpProgram{},warpFbo{};GLint warpOriginal{},warpOffsets{},warpSize{},warpStride{};
     std::unordered_map<const Image*,SkyGPU> skies;
-    bool maskPass{};
+    bool maskPass{},doorPass{};
     GLuint shadowProgram{};
     struct ShadowUniforms {GLint model,projection,vp,poses,frame0,frame1,vertexCount,interpolation,firstOverride,nextOverride,clipPlane,viewport,areaThreshold,alpha,reversed,cameraPosition,fogColor,fogRange,noFog;} shu{};
     std::array<GLsync,2> completion{};unsigned completionFront{},completionCount{},completionLimit{1};
@@ -420,6 +429,7 @@ struct GLBackend::Impl {
         GLint infiniteViewer,selectedLight;
         GLint pbr,toneInShader,roughnessMap,legacyRoughness,pbrNormal,pbrOrm;
         GLint shadowMaps,casterPass,shadowLight,sunShadowMatrix,sunShadowTexel,sunShadowMap,cubeShadowMap;
+        GLint doorMode,doorCenter,doorNormal,doorRight,doorUp,doorSkyColor,doorHalf,doorSky;
     } su{};
     GLint uiViewport{},uiImage{},uiOverlay{},uiTextKey{},uiCursorKey{},uiAlphaRef{},postImage{},postRamp{},postEnabled{};
     explicit Impl(SDL_Window* w,RenderOptions o):window(w),options(std::move(o)) {
@@ -469,6 +479,7 @@ struct GLBackend::Impl {
             U(infiniteViewer,"infiniteViewer");U(selectedLight,"selectedLight");
             U(pbr,"pbr");U(toneInShader,"toneInShader");U(roughnessMap,"roughnessMap");U(legacyRoughness,"legacyRoughness");U(pbrNormal,"pbrNormal");U(pbrOrm,"pbrOrm");
             U(shadowMaps,"shadowMaps");U(casterPass,"casterPass");U(shadowLight,"shadowLight");U(sunShadowMatrix,"sunShadowMatrix");U(sunShadowTexel,"sunShadowTexel");U(sunShadowMap,"sunShadowMap");U(cubeShadowMap,"cubeShadowMap");
+            U(doorMode,"doorMode");U(doorCenter,"doorCenter");U(doorNormal,"doorNormal");U(doorRight,"doorRight");U(doorUp,"doorUp");U(doorSkyColor,"doorSkyColor");U(doorHalf,"doorHalf");U(doorSky,"doorSky");
 #undef U
             if(shadowMapsOn){glUseProgram(scene);glUniform1i(su.sunShadowMap,8);glUniform1i(su.cubeShadowMap,9);} // Distinct units from the 2D samplers.
             uiViewport=glGetUniformLocation(ui,"viewport");uiImage=glGetUniformLocation(ui,"image");uiOverlay=glGetUniformLocation(ui,"overlay");uiAlphaRef=glGetUniformLocation(ui,"alphaRef");postImage=glGetUniformLocation(post,"image");postRamp=glGetUniformLocation(post,"ramp");postEnabled=glGetUniformLocation(post,"enabled");
@@ -582,7 +593,7 @@ struct GLBackend::Impl {
         const Matrix sun=sun_shadow_matrix(camera,aspect,f.sunDirection,f.world?mesh(f.world->mesh).bounds:Bounds{},sunShadowDistance,sunShadowResolution);
         // Lights often sit inside lamp/pole geometry: the cube near plane (cubeShadowNear) clips those fixtures out.
         shadowLight=shadow_light_index(f.lights,camera.position);
-        glUseProgram(scene);glUniform1i(su.casterPass,1);glUniform1i(su.shadowMaps,0);glUniform1i(su.lightCount,0);glUniform1i(su.skyMask,0);
+        glUseProgram(scene);glUniform1i(su.casterPass,1);glUniform1i(su.shadowMaps,0);glUniform1i(su.lightCount,0);glUniform1i(su.skyMask,0);glUniform1i(su.doorMode,0);
         glUniform1i(su.skin,0);glUniform1i(su.lightmap,1);glUniform1i(su.poses,2);glUniform1i(su.pbr,0);glBindSampler(0,sceneSampler);glBindSampler(1,lightmapSampler);
         glActiveTexture(GL_TEXTURE8);glBindTexture(GL_TEXTURE_2D,0);glActiveTexture(GL_TEXTURE9);glBindTexture(GL_TEXTURE_CUBE_MAP,0);
         geometryClipPlane={};glUniform4fv(su.clipPlane,1,geometryClipPlane.data());portalPass=false;casterPass=true;worldCasters.clear();worldCastersReady=false;
@@ -894,6 +905,36 @@ struct GLBackend::Impl {
         }
         glDisable(GL_STENCIL_TEST);glStencilMask(255);glDepthMask(GL_TRUE);glEnable(GL_DEPTH_TEST);if(clipEnabled)glEnable(GL_CLIP_DISTANCE0);glUseProgram(scene);glBindSampler(0,sceneSampler);
     }
+    // Seamless door (render.hpp DoorPortal). The door world's mesh, textures, lightmaps and sky are uploaded whenever it is
+    // present, so neither its first visible frame nor the level swap (release_scene keep) re-uploads anything.
+    void prepare_door(const Model&model){
+        mesh(model);glActiveTexture(GL_TEXTURE0);
+        for(const auto&mat:model.materials){
+            const Image*image=mat.texture.get();const int type=mat.flags&15;
+            if(type==5){if(image&&(image->width==image->height*6||image->width==image->height*2))sky_texture(*image);continue;}
+            if(type!=9)texture(image); // Turbulent sources upload through prepare_turbulence (never pack-replaced).
+            texture(mat.lightmap.get());
+        }
+    }
+    bool door_view(const RenderFrame&f,const Camera&camera,bool eligible){
+        const auto&d=f.door;
+        const bool active=eligible&&d.world&&camera.doorPortal&&d.halfWidth>0&&d.halfHeight>0&&dot(add(camera.position,mul(d.center,-1)),d.normal)>0;
+        glUniform1i(su.doorMode,active);
+        if(active){
+            glUniform3f(su.doorCenter,d.center.x,d.center.y,d.center.z);glUniform3f(su.doorNormal,d.normal.x,d.normal.y,d.normal.z);
+            glUniform3f(su.doorRight,d.right.x,d.right.y,d.right.z);glUniform3f(su.doorUp,d.up.x,d.up.y,d.up.z);glUniform2f(su.doorHalf,d.halfWidth,d.halfHeight);
+        }
+        return active;
+    }
+    // Door world: own textures and lightmaps only (no scene lights, shadow maps or reflections); SKY surfaces become skyColor.
+    void draw_door(const RenderFrame&f,const Camera&camera,Color skyColor,bool portalEnabled){
+        DrawInstance door;door.model=&f.door.world->mesh;door.position=f.door.position;door.angles=f.door.angles;
+        glUniform1i(su.doorMode,2);glUniform3f(su.doorSkyColor,skyColor.r,skyColor.g,skyColor.b);glUniform1i(su.lightCount,0);glUniform1i(su.portalEnabled,0);
+        if(shadowMapsOn)glUniform1i(su.shadowMaps,0);
+        doorPass=true;draw_instance(door,f.skinBindings,&camera);doorPass=false;
+        glUniform1i(su.doorMode,1);glUniform1i(su.lightCount,lightData.size()/5);glUniform1i(su.portalEnabled,portalEnabled);
+        if(shadowMapsOn)glUniform1i(su.shadowMaps,shadowsReady);
+    }
     void model_uniform(const Matrix&m){
         glUniformMatrix4fv(su.model,1,GL_FALSE,m.data());
         std::array<float,9>normal{};
@@ -1019,9 +1060,10 @@ struct GLBackend::Impl {
             const Material*mat=nativeSubsets&&b.material>0?&d.model->materials[b.material]:model_material(*d.model,b.material,d.skinIndex);
             if(nativeSubsets&&b.material>0&&(!mat->texture||!mat->nativePrimarySubset))continue;
             bool worldSurface=d.model->formatVersion==6;int type=mat?mat->flags&15:0;
-            if(maskPass?(!worldSurface||!mat||type!=5):(worldSurface&&mat&&(type==5||type==11||(portalPass&&(mat->flags&0x2000)))))continue;
+            if(maskPass?(!worldSurface||!mat||type!=5):(worldSurface&&mat&&((type==5&&!doorPass)||type==11||(portalPass&&(mat->flags&0x2000)))))continue;
             if(worldSurface&&mat&&mat->raw.size()!=64)throw std::runtime_error("WMB material lacks native surface metadata");
             if(maskPass){glDrawElements(GL_TRIANGLES,b.count,GL_UNSIGNED_INT,reinterpret_cast<void*>(std::uintptr_t(b.first)*sizeof(std::uint32_t)));continue;}
+            if(doorPass&&type==5){glUniform1i(su.doorSky,1);glDrawElements(GL_TRIANGLES,b.count,GL_UNSIGNED_INT,reinterpret_cast<void*>(std::uintptr_t(b.first)*sizeof(std::uint32_t)));glUniform1i(su.doorSky,0);continue;}
             int nativeAmbient=worldSurface&&mat?static_cast<std::int8_t>(mat->raw[42]):0,nativeAlbedo=worldSurface&&mat?static_cast<std::int8_t>(mat->raw[43]):0;
             float reflection=worldSurface&&mat&&(mat->flags&0x2000)?surface_reflection(nativeAlbedo,d.reflectivity,d.objectId!=0):0;
             glUniform1f(su.reflectionWeight,reflection);glUniform1f(su.surfaceAmbient,surface_ambient(nativeAmbient,camera?static_cast<int>(camera->nativeAmbient):0,d.objectId!=0));
@@ -1195,20 +1237,22 @@ void GLBackend::purge_model(const Model*model){
         if(material.lightmap&&material.lightmap.use_count()==1)purge_image(material.lightmap.get());
     }
 }
-void GLBackend::release_scene(const Model* keep){(void)keep; // TODO-door
+void GLBackend::release_scene(const Model* keep){
     auto&i=*impl_;
     i.drain_completion();
     i.retainedColorValid=i.portalColorValid=false;
-    for(auto&[key,m]:i.meshes){glDeleteVertexArrays(1,&m.vao);glDeleteBuffers(1,&m.vertices);glDeleteBuffers(1,&m.indices);glDeleteBuffers(1,&m.tangents);glDeleteBuffers(1,&m.poseBuffer);glDeleteTextures(1,&m.poses);}
-    i.meshes.clear();
+    // keep (seamless door world becoming the level) retains its mesh and every image its materials reference, with derived warps/skies.
+    std::unordered_set<const Image*> kept;
+    if(keep)for(const auto&material:keep->materials){kept.insert(material.texture.get());kept.insert(material.lightmap.get());}
+    std::erase_if(i.meshes,[&](auto&entry){if(entry.first==keep)return false;auto&m=entry.second;glDeleteVertexArrays(1,&m.vao);glDeleteBuffers(1,&m.vertices);glDeleteBuffers(1,&m.indices);glDeleteBuffers(1,&m.tangents);glDeleteBuffers(1,&m.poseBuffer);glDeleteTextures(1,&m.poses);return true;});
     for(auto&[key,m]:i.overrides)release_override(m);
     i.overrides.clear();
     i.lightData.clear();
     i.effectBindings.clear();
-    for(auto&[key,variants]:i.textures)for(auto&texture:variants){glDeleteTextures(1,&texture.id);glDeleteTextures(1,&texture.normal);glDeleteTextures(1,&texture.orm);}
-    i.textures.clear();
-    for(auto&[image,warp]:i.warps){glDeleteTextures(1,&warp.texture);glDeleteTextures(1,&warp.offsetTexture);glDeleteBuffers(1,&warp.offsetBuffer);}i.warps.clear();i.turbulent.clear();
-    for(auto&[image,sky]:i.skies)glDeleteTextures(1,&sky.texture);i.skies.clear();
+    std::erase_if(i.textures,[&](auto&entry){if(kept.contains(entry.first))return false;for(auto&texture:entry.second){glDeleteTextures(1,&texture.id);glDeleteTextures(1,&texture.normal);glDeleteTextures(1,&texture.orm);}return true;});
+    std::erase_if(i.warps,[&](auto&entry){if(kept.contains(entry.first))return false;auto&warp=entry.second;glDeleteTextures(1,&warp.texture);glDeleteTextures(1,&warp.offsetTexture);glDeleteBuffers(1,&warp.offsetBuffer);return true;});
+    std::erase_if(i.turbulent,[&](const Image*image){return !kept.contains(image);});
+    std::erase_if(i.skies,[&](auto&entry){if(kept.contains(entry.first))return false;glDeleteTextures(1,&entry.second.texture);return true;});
 }
 void GLBackend::purge_image(const Image*image){
     auto&i=*impl_;auto it=i.textures.find(image);
@@ -1599,6 +1643,7 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
     i.admit_frame(f.tripleBufferRaw,f.bonusProfile);i.centroidLighting=centroid_lighting(f);
     i.configure_sampling(f.mipmapping,f.anisotropy);
     i.targets(m.drawableWidth,m.drawableHeight);
+    if(f.door.world)i.prepare_door(f.door.world->mesh);
     // Primary view: first full-window background world view. Shadow maps, SSAO and volumetric fog follow it.
     const Camera*primary=nullptr;
     for(const auto&camera:f.cameras)if(!camera.foreground&&!camera.portalTarget&&camera.drawWorld){
@@ -1751,8 +1796,12 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
                 Vec3 da=add(a->position,mul(camera.position,-1)),db=add(b->position,mul(camera.position,-1));if(!f.shadowSortVertical)da.z=db.z=0;return dot(da,da)>dot(db,db);
             });
         }
-        glUniform1i(i.su.skyMask,0);i.draw_sky(f,camera,w,h);
+        glUniform1i(i.su.skyMask,0);const bool door=i.door_view(f,camera,!targetOnly);i.draw_sky(f,camera,w,h);
         if(camera.drawWorld&&f.world&&(camera.layers&1)){DrawInstance world;world.model=&f.world->mesh;i.draw_instance(world,f.skinBindings,&camera);}
+        if(door&&camera.drawWorld&&(camera.layers&1)){
+            const Vec2 range{camera.environmentOverride?camera.fogStart:f.fogStart,camera.environmentOverride?camera.fogEnd:f.fogEnd};
+            i.draw_door(f,camera,seeded(range.y>range.x?fog:camera.environmentOverride?camera.background:f.clearColor),surface.has_value());
+        }
         i.transparent.clear();
         for(const auto&d:f.instances){
             if(camera.noEntities||!f.renderEntities||!(d.layers&camera.layers)||d.viewSpace||(camera.excludeEntityId&&d.objectId==camera.excludeEntityId))continue;
@@ -1818,7 +1867,7 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
         bool hasViewEntities=false;
         if(f.renderEntities&&!camera.noEntities)for(const auto&d:f.instances)if(!targetOnly&&d.viewSpace&&(d.layers&camera.layers)&&d.visible&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId)){hasViewEntities=true;break;}
         if(hasViewEntities){
-            glDepthMask(GL_TRUE);glClear(GL_DEPTH_BUFFER_BIT);glUniform2f(i.su.fogRange,0,0);
+            glDepthMask(GL_TRUE);glClear(GL_DEPTH_BUFFER_BIT);glUniform2f(i.su.fogRange,0,0);glUniform1i(i.su.doorMode,0);
             for(const auto&d:f.instances)if(d.viewSpace&&(d.layers&camera.layers)&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId))i.draw_instance(d,f.skinBindings,&camera);
         }
         glDepthMask(GL_TRUE);
