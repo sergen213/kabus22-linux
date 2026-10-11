@@ -58,6 +58,19 @@ The media-page preview doubles as the media check: Next on that page stays disab
 Enter in the path field or `--source` start it; a failure, Cancel or a changed path keeps Next
 disabled.
 
+For an ISO the preview stages the setup slices (~2 GB) once, and the install reuses them instead of
+reading the ISO again. They live on disk in a private `$XDG_CACHE_HOME/kabus22/preview-XXXXXX`
+(default `~/.cache`, never `/tmp`, which is often RAM), owned by the wizard under an exclusive `flock`
+on its `.lock`. The directory is removed when the path changes, the preview fails or is cancelled, the
+install succeeds or the wizard exits; a failed install keeps it for Back and retry. Each new preview
+first removes `preview-XXXXXX` directories of ours whose lock is free (crashed or killed
+installers). The install reuses them only for the same ISO path with unchanged device, inode, size
+and mtime, from a private (0700) directory of ours outside the destination. Otherwise it stages
+again (progress shows "Staging original ISO setup slices" rather than "Reusing original ISO setup
+slices staged by the media preview"). Listing and extraction still revalidate the slice set, sizes,
+setup header and Inno checksums. `--unattended` stages once inside the install staging directory,
+as before.
+
 ## Supported sources
 
 | Source | Detection | Notes |
