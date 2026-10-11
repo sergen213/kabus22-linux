@@ -122,7 +122,7 @@ public:
  void configure_characters(Runtime&,int defaultLock=-1);int characterDefault=-1;
  void set_character_lock(int character);
  int character_prompt()const{return switchPrompt_;}
- int story_character()const;int body_character()const;int menu_character()const;int weapon_character()const;
+ int story_character()const;int body_character()const;int menu_character();int weapon_character()const;
 private:
  friend class Physics;
  friend std::optional<Value> worldModelBuiltin(Engine&,Runtime&,ProcessContext&,std::string_view,std::span<const Argument>);
@@ -134,7 +134,8 @@ private:
  bool character_tick(Runtime&,const Input&); // true: a switch prompt is open and the scripts stay paused this frame
  void character_weapons(Runtime&,bool spawning);int ebruWeapon_=0;
  void character_overlay();float draw_menu_word(std::string_view,float x,float y,float scale,float alpha,bool measure);
- int storyAtLevel_=-1,switchPrompt_=-1,promptCursor_=0,newGameChoice_=0;bool adoptStory_=false,promptRelease_=false,promptArmed_=false,newGameMenu_=false;
+ int storyAtLevel_=-1,switchPrompt_=-1,promptCursor_=0,newGameChoice_=0,menuLatch_=-1;bool adoptStory_=false,promptRelease_=false,promptArmed_=false,newGameMenu_=false,menuInventory_=false;
+ static constexpr double bossDamageScale=20;ObjectId bossId_=0;double bossHealth_=0; // character_tick: Inzar against the final boss
  std::shared_ptr<const Image> menuAtlas_;std::array<Rect,256> menuGlyphs_{};std::array<Rect,2> menuArrows_{},promptRows_{};std::string promptTitle_,language_;
  std::string consoleLine_,consolePrompt_,toast_,fpsText_;std::deque<std::string> consoleLog_;std::vector<std::string> consoleHistory_;std::size_t historyCursor_=0;
  double toastUntil_=0,fpsTime_=0;int fpsFrames_=0;Input consoleInput_;

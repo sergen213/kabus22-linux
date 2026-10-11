@@ -32,11 +32,21 @@ constexpr std::array<Cell,28> cells{{{'Q',0,320},{'W',0,352},{'E',0,384},{'R',0,
 }
 int Engine::story_character()const{return std::clamp(int(number("Aktif_Player")),0,2);}
 int Engine::body_character()const{return characterLock>=0?characterLock:story_character();}
-// Inzar's body opens the item inventory outside her own story (items are needed there) and her spell menu inside it; a gun body
-// never gets the spell menu. Unlocked: Aktif_Player.
 // A weapon Demir cannot hold (Ebru's magnum) is not morphed onto his gun; character_weapons swaps it for the pistol.
 int Engine::weapon_character()const{const int b=body_character(),w=int(number("Aktif_Silah"));return b==0&&(w<1||w>7)?-1:b;}
-int Engine::menu_character()const{const int s=story_character();return characterLock>=0&&characterLock!=2&&s==2?characterLock:s;}
+// M (EnvanterMenu.wdl EM_Kernel:333-335) reads Aktif_Player three times per press: Demir or Ebru toggle the item inventory
+// (EnvanterAcKapat), Inzar her spell menu (KoruyucuAcKapat). A gun body gets the inventory in Inzar's story. Inzar's body keeps her
+// spell menu everywhere; outside her own story the items are needed too, so there M cycles: closed → spell menu → (M) the spell
+// menu closes and the item inventory opens on the next frame (character_tick) → (M) closed. The three reads of one press see one
+// answer (latched until the next frame). The level-entry gate (:315, M not held) sees the story. Unlocked: Aktif_Player.
+int Engine::menu_character(){
+ const int s=story_character();
+ if(characterLock<0||characterLock==s)return s;
+ if(characterLock!=2)return s==2?characterLock:s;
+ if(number("Key_Menu")==0)return s;
+ if(menuLatch_<0){menuLatch_=number("EM_Acik")!=0?s:2;menuInventory_=menuLatch_==2&&number("KOM_Acik")!=0;}
+ return menuLatch_;
+}
 void Engine::configure_characters(Runtime& runtime,int defaultLock){
  if(state.profile==SemanticProfile::BonusA7)return;
  characterDefault=std::clamp(defaultLock,-1,2);newGameChoice_=characterDefault+1;
@@ -133,6 +143,28 @@ bool Engine::character_tick(Runtime& runtime,const Input& in){
   // (seytan.wdl:958 Seytan_Ol holds it at Enerji 1 in Seytan_BuyuBekle). A gun body has none of these reactions: they are cleared
   // at once (no strike, no knock-back; the swing costs nothing, docs/CHARACTER_LOCK.md Limitations).
   if(characterLock>=0&&characterLock!=2&&(number("seytan_logo_aktif")!=0||number("one_vurusu_aktif")!=0)){set_global("seytan_logo_aktif",Value{});set_global("one_vurusu_aktif",Value{});}
+  // Inzar's M cycle (menu_character): the spell menu closed on the last frame's press, the item inventory opens now.
+  menuLatch_=-1;
+  if(menuInventory_&&number("KOM_Acik")==0){menuInventory_=false;if(number("EM_Acik")==0)runtime.start("EnvanterAcKapat");}
+  // The final boss (boss.wdl boss_ai, Enerji 1800) is Demir's fight, fought from range: the invisible solid boss_engel.wmb (box ±168
+  // around (316,131), inside it the boss_kalkan shield) keeps the player at least ~100 from the boss, beyond Inzar's sword. Her
+  // ranged spell 4 (koru_adu_buyu: 10 per bolt, 23 of 230 mana) would need about 100 bolts for the ~1000 the story requires
+  // (1500→1000 once the creatures are gone, then 990→below 500 while the possessed Ebru stands guard). Locked to Inzar, each
+  // frame's loss of the boss's health while the player has control is multiplied by bossDamageScale (20): a bolt hits for 200, so
+  // 1800→1000 takes 4 and 990→below 500 takes 3, 161 of her 230 mana (the creatures before refill it through her sword).
+  if(characterLock==2){
+   const auto boss=global("boss_ent");const auto* o=boss.kind==Value::Kind::Object?state.get(boss.bits):nullptr;
+   if(o&&o->alive&&callback(boss.bits,"action1")==runtime.function("boss_ai")){
+    double h=field(boss.bits,"skill1");
+    if(boss.bits==bossId_&&h<bossHealth_&&number("oyuncu_pasif")==0){h=bossHealth_-(bossHealth_-h)*bossDamageScale;set_field(boss.bits,"skill1",h);}
+    bossId_=boss.bits;bossHealth_=h;
+   }else bossId_=0;
+  }
+  // Final boss, second phase: the possessed Ebru (boss_ebru_ai) guards the boss. Each shot aimed at it turns her into the line
+  // (silah.wdl Ates_Et:546-558 sets boss_ebruhedefpan; ebruboss_DurusAcim moves her there), so Demir's way through is a grenade
+  // or mine, whose blast hurts the boss by distance (hedef.wdl Dusman_Tarama:59-77). Ebru's body throws neither (rule 3): for her
+  // the guard keeps her place beside the boss (pan 180, K22.wdl:262), and shots from off that line reach it.
+  if(characterLock==1&&number("boss_ebruhedefpan")!=180)set_global("boss_ebruhedefpan",Value::from_int(180));
   if(characterLock<0||adoptStory_||storyAtLevel_<0)return false;
   const int s=story_character();if(s==storyAtLevel_)return false;
   storyAtLevel_=s;if(s==characterLock)return false;
