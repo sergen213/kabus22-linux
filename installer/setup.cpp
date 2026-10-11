@@ -28,6 +28,7 @@ extern "C" {
 #include <sys/mman.h>
 #include <string_view>
 #include <sys/syscall.h>
+#include <sys/file.h>
 #include <unistd.h>
 #include <vector>
 #include <utility>
@@ -793,7 +794,72 @@ std::string rows(const fs::path& base, bool rootInventory, const Progress& progr
     }
     return out;
 }
+// The original ISO's identity now; empty iso when it is not an inspectable regular file.
+StagedMedia mediaIdentity(const fs::path& iso) {
+    struct stat info{};
+    if (::stat(iso.c_str(), &info) != 0 || !S_ISREG(info.st_mode)) return {};
+    StagedMedia result;
+    result.iso = iso;
+    result.device = info.st_dev; result.inode = info.st_ino; result.size = static_cast<std::uint64_t>(info.st_size);
+    result.mtimeSeconds = info.st_mtim.tv_sec; result.mtimeNanoseconds = info.st_mtim.tv_nsec;
+    return result;
+}
+bool sameMedia(const StagedMedia& a, const StagedMedia& b) {
+    return !a.iso.empty() && a.iso == b.iso && a.device == b.device && a.inode == b.inode && a.size == b.size &&
+        a.mtimeSeconds == b.mtimeSeconds && a.mtimeNanoseconds == b.mtimeNanoseconds;
+}
+// Staged slices are reused only from a private directory of ours (media::prepare's 0700 staging).
+bool privateStaging(const fs::path& setup) {
+    try {
+        const auto path = checkedAbsolute(setup);
+        chain(path.parent_path());
+        const auto folder = lstatPath(path.parent_path()), file = lstatPath(path);
+        return S_ISDIR(folder.st_mode) && folder.st_uid == geteuid() && !(folder.st_mode & 077) &&
+            S_ISREG(file.st_mode) && file.st_uid == geteuid();
+    } catch (const std::runtime_error&) { return false; }
+}
 } // namespace
+
+PreviewCache::PreviewCache(const fs::path& cacheHome) {
+    const auto base = checkedAbsolute(cacheHome)/"kabus22";
+    fs::path current = base.root_path();
+    for (const auto& part : base.relative_path()) {
+        current /= part;
+        if (!lstatPath(current, true).st_mode)
+            require(::mkdir(current.c_str(), 0700) == 0 || errno == EEXIST, "Cannot create cache directory: " + current.string());
+    }
+    chain(base);
+    require(lstatPath(base).st_uid == geteuid(), "Cache directory is not owned by you: " + base.string());
+    // Creation and sweeping are serialised, so a sweep never meets a live preview before its owner locked it.
+    Fd guard(::open((base/".preview.lock").c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600));
+    require(::flock(guard.value, LOCK_EX) == 0, "Cannot lock the preview cache");
+    std::vector<fs::path> stale;
+    for (const auto& entry : fs::directory_iterator(base)) {
+        const auto name = entry.path().filename().string();
+        if (name.size() != 14 || !name.starts_with("preview-")) continue;
+        struct stat info{};
+        if (::lstat(entry.path().c_str(), &info) != 0 || !S_ISDIR(info.st_mode) || info.st_uid != geteuid()) continue;
+        const int fd = ::open((entry.path()/".lock").c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0 ? errno == ENOENT : ::flock(fd, LOCK_EX | LOCK_NB) == 0) stale.push_back(entry.path());
+        if (fd >= 0) ::close(fd); // a dead owner's lock stays free; the guard keeps new owners out meanwhile
+    }
+    for (const auto& path : stale) { std::error_code error; fs::remove_all(path, error); }
+    auto name = (base/"preview-XXXXXX").string();
+    require(::mkdtemp(name.data()) != nullptr, "Cannot create preview cache directory: " + std::string(std::strerror(errno)));
+    root_ = name;
+    lock_ = ::open((root_/".lock").c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (lock_ < 0 || ::flock(lock_, LOCK_EX | LOCK_NB) != 0) {
+        const std::string message = "Cannot lock preview cache directory: " + std::string(std::strerror(errno));
+        std::error_code error; fs::remove_all(root_, error);
+        if (lock_ >= 0) ::close(lock_);
+        throw std::runtime_error(message);
+    }
+}
+PreviewCache::~PreviewCache() {
+    std::error_code error;
+    fs::remove_all(root_, error);
+    ::close(lock_);
+}
 
 Request defaultPaths() {
     const auto* homeEnv = g_get_home_dir();
@@ -995,13 +1061,19 @@ Artwork previewArtwork(const fs::path& input, const fs::path& extractor, const f
         PatchSnapshot windows(source.path, true);
         for (const auto& file : windows.files) if (lower(file.relative.generic_string()) == "help/help_files/fon_logo.jpg") {
             windows.copy(file, destination/"artwork/fon_logo.jpg", progress);
-            return {destination/"artwork/fon_logo.jpg", {}, {}};
+            return {destination/"artwork/fon_logo.jpg", {}, {}, {}};
         }
         throw std::runtime_error("Original game logo is not present in the game folder");
     }
+    const auto before = source.kind == SourceKind::Iso ? mediaIdentity(source.path) : StagedMedia{};
     const auto prepared = media::prepare(source.kind == SourceKind::Iso ? source.path : fs::path{},
         source.kind == SourceKind::Setup ? source.path : fs::path{}, destination/"source", progress);
     Artwork artwork;
+    if (sameMedia(before, mediaIdentity(source.path))) {
+        artwork.staged = before;
+        artwork.staged.setup = prepared.setup;
+        artwork.staged.sourceBytes = prepared.sourceBytes;
+    }
     try {
         mkdirPrivate(destination/"wizard");
         wizardArtwork(prepared.setup, destination/"wizard");
@@ -1137,10 +1209,18 @@ Result install(const Request& request, const Progress& progress) {
         require(!windows->files.empty() && windows->font, "Windows game folder has no original Kabus22 data or K22.exe");
         assetBytes = windows->bytes; fontSourceBytes = static_cast<std::uint64_t>(windows->font->info.st_size);
     } else {
-        mkdirPrivate(stage.path/"source");
         mkdirPrivate(stage.path/"extracted");
-        prepared = media::prepare(source.kind == SourceKind::Iso ? source.path : fs::path{},
-            source.kind == SourceKind::Setup ? source.path : fs::path{}, stage.path/"source", progress);
+        const auto& staged = request.staged;
+        if (source.kind == SourceKind::Iso && !staged.setup.empty() && sameMedia(staged, mediaIdentity(source.path)) &&
+                privateStaging(staged.setup) && !within(root, checkedAbsolute(staged.setup))) {
+            // media::list/extract still revalidate the slice set, sizes, header and identity during use.
+            report(progress, "Reusing original ISO setup slices staged by the media preview");
+            prepared = media::Prepared{checkedAbsolute(staged.setup), staged.sourceBytes};
+        } else {
+            mkdirPrivate(stage.path/"source");
+            prepared = media::prepare(source.kind == SourceKind::Iso ? source.path : fs::path{},
+                source.kind == SourceKind::Setup ? source.path : fs::path{}, stage.path/"source", progress);
+        }
         listed = media::list(*prepared, checkedAbsolute(request.extractor), progress);
         for (const auto& member : listed) if (media::selected(member)) { members.push_back(member); assetBytes = addBytes(assetBytes, member.size); }
         require(!members.empty(), "Media has no native Kabus22 assets");

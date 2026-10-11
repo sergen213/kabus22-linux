@@ -204,21 +204,6 @@ Pixels nativeArtwork(const fs::path& path) {
     return pixels;
 }
 
-struct PreviewScratch {
-    fs::path root;
-    PreviewScratch() {
-        GError* error = nullptr;
-        char* directory = g_dir_make_tmp("kabus22-artwork-XXXXXX", &error);
-        if (!directory) {
-            const std::string message = error ? error->message : "Cannot create artwork scratch directory";
-            if (error) g_error_free(error);
-            throw std::runtime_error(message);
-        }
-        root = directory;
-        g_free(directory);
-    }
-    ~PreviewScratch() { std::error_code error; fs::remove_all(root, error); }
-};
 void accessible(GtkWidget* widget, const char* name, const char* description = nullptr) {
     AtkObject* object = gtk_widget_get_accessible(widget);
     atk_object_set_name(object, name);
@@ -419,6 +404,10 @@ class Installer {
     bool finished_ = false, dirty_ = false, succeeded_ = false, busy_ = false, previewing_ = false,
          installed_ = false, closing_ = false, mediaReady_ = false; // mediaReady_: preview of source_ succeeded
     std::string previewSource_;
+    // The preview's on-disk staging (ISO slices) that the install reuses; removed whenever the source
+    // changes, the preview fails or is cancelled, after a successful install and on exit.
+    std::unique_ptr<PreviewCache> media_, mediaResult_; // mediaResult_: worker result, under mutex_
+    StagedMedia staged_, stagedResult_;                 // stagedResult_: under mutex_
     guint timer_ = 0;
     bool loose_;
 
@@ -514,6 +503,7 @@ class Installer {
         }
     }
     std::string text(GtkWidget* entry) const { return gtk_entry_get_text(GTK_ENTRY(entry)); }
+    void dropMedia() { media_.reset(); staged_ = {}; }
     void setControls() {
         // The artwork preview runs in the background; it also validates the media, so the media page's
         // Next waits for it to succeed. Install waits for any job.
@@ -624,6 +614,9 @@ class Installer {
             if (!input.installRoot.empty()) input.installRoot = fs::absolute(input.installRoot).lexically_normal();
             input.optionalPatch = text(patch_);
             if (!input.optionalPatch.empty()) input.optionalPatch = fs::absolute(input.optionalPatch).lexically_normal();
+            if (preview) dropMedia();
+            else if (mediaReady_ && media_) input.staged = staged_;
+            const fs::path cacheHome = g_get_user_cache_dir();
             cancelled_ = false;
             busy_ = true;
             previewing_ = preview;
@@ -638,7 +631,7 @@ class Installer {
             }
             if (preview) gtk_image_clear(GTK_IMAGE(image_));
             setControls();
-            worker_ = std::thread([this, input = std::move(input), preview] {
+            worker_ = std::thread([this, input = std::move(input), preview, cacheHome] {
                 const auto progress = [this](const std::string& stage, std::uint64_t done, std::uint64_t total) {
                     std::lock_guard lock(mutex_);
                     stage_ = stage; done_ = done; total_ = total; dirty_ = true;
@@ -646,8 +639,8 @@ class Installer {
                 };
                 try {
                     if (preview) {
-                        PreviewScratch scratch;
-                        const auto artwork = previewArtwork(input.source, input.extractor, scratch.root / "media", progress);
+                        auto cache = std::make_unique<PreviewCache>(cacheHome); // removed again unless kept below
+                        const auto artwork = previewArtwork(input.source, input.extractor, cache->scratch(), progress);
                         if (cancelled_.load() || interrupted.load()) throw Cancelled();
                         auto pixels = nativeArtwork(artwork.logo);
                         auto* large = k22::wizard::load(artwork.wizard);
@@ -657,6 +650,8 @@ class Installer {
                         if (wizard_) g_object_unref(wizard_);
                         if (wizardSmall_) g_object_unref(wizardSmall_);
                         wizard_ = large; wizardSmall_ = small;
+                        mediaResult_ = std::move(cache);
+                        stagedResult_ = artwork.staged;
                         stage_ = T(ArtworkLoaded);
                         succeeded_ = true;
                     } else {
@@ -723,9 +718,15 @@ class Installer {
         if (!finished) return G_SOURCE_CONTINUE;
         worker_.join();
         busy_ = false;
-        // A result for an earlier or cancelled source must not unlock Next.
-        if (previewing_) mediaReady_ = succeeded_ && !cancelled_.load() && text(source_) == previewSource_;
-        else installed_ = succeeded_;
+        // A result for an earlier or cancelled source must not unlock Next or be reused.
+        if (previewing_) {
+            mediaReady_ = succeeded_ && !cancelled_.load() && text(source_) == previewSource_;
+            if (mediaReady_) { media_ = std::move(mediaResult_); staged_ = stagedResult_; }
+            mediaResult_.reset(); stagedResult_ = {};
+        } else {
+            installed_ = succeeded_;
+            if (installed_) dropMedia(); // a failed install keeps it for Back and retry
+        }
         previewing_ = false;
         if (!pixels_.rgba.empty()) {
             auto pixels = std::make_unique<Pixels>(std::move(pixels_));
@@ -842,6 +843,7 @@ public:
                 if (GTK_WIDGET(editable) == self->source_) {
                     gtk_image_clear(GTK_IMAGE(self->image_));
                     self->mediaReady_ = false;
+                    self->dropMedia();
                 }
                 self->setControls();
             }), this);

@@ -165,6 +165,34 @@ void reinstall(const fs::path& base, const std::vector<std::pair<std::string, st
     publish(base/"s3", base/"fresh", {});
     require(verify(base/"fresh").ok() && !fs::exists(base/"s3"), "Missing root must receive the installation");
 }
+// The GUI preview's on-disk staging: private, locked while owned, removed on destruction, and stale
+// directories of dead owners swept (only our preview-XXXXXX directories; never live or foreign entries).
+void previewCache(const fs::path& base) {
+    const auto home = base/"cache";
+    fs::path first;
+    {
+        PreviewCache live(home);
+        first = live.root();
+        require(first.parent_path() == home/"kabus22" && first.filename().string().starts_with("preview-") &&
+            fs::is_regular_file(first/".lock") && (fs::status(first).permissions() & fs::perms::all) == fs::perms::owner_all,
+            "Preview cache must be a private locked preview-XXXXXX directory");
+        put(live.scratch()/"source/media/setup.exe", "MZ staged");
+        put(home/"kabus22/preview-DEADAA/.lock", "");          // owner gone: lock free
+        put(home/"kabus22/preview-DEADAB/source/slice", "x");  // crashed before locking
+        put(home/"kabus22/preview-keep/.lock", "");            // not our name pattern
+        put(base/"outside/keep", "keep");
+        fs::create_directory_symlink(base/"outside", home/"kabus22/preview-LINKED");
+        {
+            PreviewCache second(home);
+            require(fs::exists(live.scratch()/"source/media/setup.exe"), "A live preview must survive another installer's sweep");
+            require(!fs::exists(home/"kabus22/preview-DEADAA") && !fs::exists(home/"kabus22/preview-DEADAB"),
+                "Stale preview directories must be swept");
+            require(fs::exists(home/"kabus22/preview-keep") && fs::is_symlink(home/"kabus22/preview-LINKED") &&
+                get(base/"outside/keep") == "keep", "Sweep must leave foreign entries and symlink targets alone");
+        }
+    }
+    require(!fs::exists(first), "Preview cache must be removed by its owner");
+}
 }
 
 int main() {
@@ -176,6 +204,7 @@ int main() {
         struct Cleanup { fs::path path; ~Cleanup() { std::error_code error; fs::remove_all(path, error); } } cleanup{base};
         fixtures(base);
         reinstall(base, {{"K22.wrs", "WRS2 campaign"}, {"Help/Help_Files/fon_LOGO.jpg", "logo"}});
+        previewCache(base);
         std::cout << "Installer checks passed.\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
