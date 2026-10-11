@@ -22,6 +22,7 @@ constexpr std::array<std::string_view,1> weaponFunctions{"EM_KuBiGoSMenu"}; // w
 // locked body reads the story's gate instead of its own. No body action writes its gate.
 constexpr std::array<std::string_view,2> demirEbruFiles{"oyuncu2.wdl","oyuncu2_ebru.wdl"};
 constexpr std::array<std::string_view,2> inzarFiles{"koruyucu.wdl","koru_buyuler.wdl"};
+constexpr std::array<std::string_view,1> ebruFiles{"oyuncu2_ebru.wdl"};
 constexpr std::array<std::string_view,2> posingFunctions{"oy_Oynat","Hareket_Hizi"};
 // Glyph cells of the original language-independent menu atlas (TusYonetim.wdl TYI_Tus*): 170x32 cells, one key label each.
 struct Cell {char c;int x,y;};
@@ -44,6 +45,11 @@ void Engine::configure_characters(Runtime& runtime,int defaultLock){
  runtime.reroute_reads("Aktif_Player","k22_weapon_player",weaponFunctions);
  runtime.reroute_reads("oyuncu_pasif","k22_body_oyuncu_pasif",{},{},demirEbruFiles);
  runtime.reroute_reads("koruyucu_pasif","k22_body_koruyucu_pasif",{},{},inzarFiles);
+ // Hit kinds (dmr_yaralan_tip) set by Demir-story attackers: 2 burning (the final boss's fire efect2.wdl:5887, cino_yara.wdl:223),
+ // 3 Atilgan's swing (atilgan_yara.wdl:128). Demir's action reacts to 0-3 (oyuncu2.wdl:1812-2022), Ebru's only to 0 and 1
+ // (oyuncu2_ebru.wdl:1239/1303). Hurt by kind 2 or 3 she matched neither branch; holding the aim key, d_ates_go (:1397) jumped back
+ // to e_yaralan_go with no wait(1) and the frame never ended. Locked, her action reads 2 as 0 (hurt) and 3 as 1 (knock-back).
+ runtime.reroute_reads("dmr_yaralan_tip","k22_ebru_hit_kind",{},{},ebruFiles);
  // Lain's hit reaction (kotu_koruyucu.wdl Kotukoru_Yaralan:5291) branches on the attack kind in skill3: Inzar's sword and spell
  // kinds and firearm 2. Ates_Et (silah.wdl:680) records the firearm number there, so any other gun fell through every branch and
  // ended Lain's AI with its Enerji below 0 (no Kotukoru_Ol, no progression). A locked game records Lain's bullet hits as kind 2.
