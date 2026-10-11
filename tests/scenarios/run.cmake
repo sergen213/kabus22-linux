@@ -4,6 +4,7 @@
 # "# mode: bonus" runs the Bonus game (--mode bonus --data "GAME_ROOT/Kabus 22 Mode").
 # -DONLY=REGEX runs the matching scenario names; -DCHARACTER=demir|ebru|inzar adds --character (docs/CHARACTER_LOCK.md), so the
 # loaded original saves play as that character. "# character: NAME" in a scenario does the same for that file (and wins).
+# "# bodies: NAME..." limits a scenario to those bodies under -DCHARACTER (it tests one character's own weapons or moves).
 file(GLOB scenarios "${SCENARIOS}/*.k22s")
 list(SORT scenarios)
 set(failed "")
@@ -16,6 +17,13 @@ foreach(scenario IN LISTS scenarios)
   if(text MATCHES "# requires: saves" AND NOT SAVES)
     message(STATUS "SKIP ${name}: needs -DK22_ORIGINAL_SAVES")
     continue()
+  endif()
+  if(CHARACTER AND text MATCHES "# bodies: ([a-z ]+)")
+    set(bodies " ${CMAKE_MATCH_1} ")
+    if(NOT bodies MATCHES " ${CHARACTER} ")
+      message(STATUS "SKIP ${name}: tests the bodies${bodies}")
+      continue()
+    endif()
   endif()
   if(text MATCHES "# continues: ([A-Za-z0-9_]+)")
     set(root "${OUT}/${CMAKE_MATCH_1}")

@@ -132,7 +132,7 @@ private:
  bool consoleOpen_=false,consoleRelease_=false,god_=false,noclip_=false,fpsOverlay_=false;ObjectId noclipPlayer_=0;
  void apply_character_lock(Runtime&,std::vector<std::pair<ObjectId,FunctionId>>& placedActions);
  bool character_tick(Runtime&,const Input&); // true: a switch prompt is open and the scripts stay paused this frame
- void character_weapons(Runtime&,bool spawning);int ebruWeapon_=0;
+ void character_weapons(Runtime&,bool spawning);int ebruWeapon_=0;bool ebruSpawn_=false;
  void character_overlay();float draw_menu_word(std::string_view,float x,float y,float scale,float alpha,bool measure);
  int storyAtLevel_=-1,switchPrompt_=-1,promptCursor_=0,newGameChoice_=0;bool adoptStory_=false,promptRelease_=false,promptArmed_=false,newGameMenu_=false;
  std::shared_ptr<const Image> menuAtlas_;std::array<Rect,256> menuGlyphs_{};std::array<Rect,2> menuArrows_{},promptRows_{};std::string promptTitle_,language_;

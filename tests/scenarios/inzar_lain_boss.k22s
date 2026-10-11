@@ -1,4 +1,5 @@
 # requires: saves
+# bodies: inzar (her sword and spells; gun bodies: character_boss_lain_*)
 # Inzar vs Lain (kotukoru_ai) in Kotukoru_d, slot 26 = kayit25.sav. The intro movie is skipped with Escape (kotu_koruyucu.wdl:6466).
 # Lain closes in and hits (Kotukoru_Kontrol/Kos/FirstVur), Inzar's sword combos (koruyucu.wdl:3434, Key_SilahKaldir) drain its Enerji,
 # A round that stalls (Lain out of reach) ends after 420 frames and the next round re-aims.
@@ -333,6 +334,9 @@ wait until @boss.skill21 == 9 || lain_sona_erdi >= 1 timeout 600
 frames 90
 capture inzar_lain_death
 wait until lain_sona_erdi == 1 timeout 3000
+# Locked (-DCHARACTER=inzar), Kotukoru_Ol's story switch to Demir opens the prompt; Return keeps Inzar (row 1). Unlocked: no prompt.
+wait until $prompt != -1 || $character == -1 || LY_AktifLevelID == 84 timeout 3000
+press-until Return $prompt == -1 timeout 120
 wait until LY_AktifLevelID == 84 && level_yuklendi_ok == 1 && lain_sona_erdi == 2 timeout 3000
 assert Aktif_Player == 0
 assert $level == "buyukes.wmb"

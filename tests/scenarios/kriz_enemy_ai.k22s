@@ -1,15 +1,17 @@
 # requires: saves
-# Demir at Kiz Kulesi (slot 10 = kayit9.sav): five atilgan_ai enemies approach and damage the player (atilgan_yara.wdl:130/147).
-# An atilgan flies off again after its pass (seed 0: 878 -> 298 at +200 frames, then 1284 at +600), so the approach is
-# sampled while it happens instead of at a fixed end frame.
+# The player at Kiz Kulesi (slot 10 = kayit9.sav; Demir's story, any locked body): five atilgan_ai enemies approach and damage the
+# player (atilgan_yara.wdl:130/147: only within 150 of it). Which atilgan attacks first depends on the body (seed 0, Demir: the
+# nearest, 878 -> 298 in 200 frames; Inzar: another one), so the check is: the body's health falls, and an atilgan is then at
+# least 300 nearer than the nearest one was at the start.
 realtime off
 load-save 9
 wait until LY_AktifLevelID == 31 && level_yuklendi_ok == 1 && player != 0 timeout 7200
 assert $count(atilgan_ai) == 5
+store hp0 $health
 find enemy atilgan_ai
 store d0 $dist(@enemy)
-store hp0 oyn_yaralanma
 assert @enemy.skill1 > 0
-wait until $dist(@enemy) < @d0 - 300 timeout 600
-wait until oyn_yaralanma < @hp0 timeout 600
+wait until $health < @hp0 timeout 1800
+find attacker atilgan_ai
+assert $dist(@attacker) < @d0 - 300
 capture kriz_attacked

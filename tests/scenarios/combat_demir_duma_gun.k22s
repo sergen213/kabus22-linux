@@ -1,4 +1,5 @@
 # requires: saves
+# bodies: demir (Demir's machine gun fires bursts while D is held; Ebru's action fires it one round per D press with her magnum handling, too slow for this 900-frame kill, and Inzar has no firearms)
 # Demir's machine gun against the last duma_yaratik in Tnel10 (slot 15 = kayit14.sav, cadde_yara_adet[23] == 1). Weapon 3 is
 # chosen through the original inventory, held with S and fired with D (silah.wdl Ates_Et); each hit drains Enerji and plays a
 # Yrt_Yaralan_* reaction (skill21), death is duma_Ol (Yrt_ol 9), then ent_remove; aktif_oldurme_sayisi +1, cadde_yara_adet[23] -> 0.

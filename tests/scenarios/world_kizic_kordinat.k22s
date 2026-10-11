@@ -14,8 +14,10 @@ press-until D LY_AktifLevelID == 36 timeout 600
 wait until $level == "kizic.wmb" && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
 # The spiral stairs end at the kapi_kriz_ctrl door (three scan points at z 328, k_kizkapi_Tarama, Ornek_Yasin.wdl:2519);
 # the nearest hull cell is 45 quants from them, inside the 60-quant scan of NS_Kullan (Nesneler.wdl temp.z 60).
+# The stairs are walked, not run: Ebru's gravity lifts at half Demir's rate (oyuncu2_ebru.wdl yercekimi_ebru), so running she sinks
+# behind the steps of the spiral and stops at a riser; walking, every body climbs them.
 find door kapi_kriz_ctrl
-walk-to @door 50 path run timeout 6000
+walk-to @door 50 path timeout 6000
 turn-to @door 6
 # Use item 52 through M -> Nesneler -> slot -> Kullan (as world_cam1_padlock): NS_AktifNesneNo 52 -> v_kapikriz_basla 1.
 press M
@@ -37,7 +39,7 @@ capture kizic_door_cutscene
 wait until v_kapikriz_ok == 1 timeout 3000
 wait until oyuncu_pasif == 0 && camera.visible == 1 && EnvaterAcilabilirmi == 1 timeout 1200
 # Up the last flight along its south side: the middle of the stairs around (-215,-558,396) stops the hull.
-route 16 -300 -578 -200 -578 run timeout 400
+route 16 -300 -578 -200 -578 timeout 1200
 # NS_Bulmaca (Nesneler.wdl:605) BulmacaNo 5 (skill2), ilgiliNesneNo 0: a D scan (PL_KapiTara, 50 quants, 60 degree cone)
 # sets Bul_AcPointer = BUL_FP[5] = BULKordinatAc. The tower model v_kule_cr stands between the stairs and the point.
 find puzzle NS_Bulmaca

@@ -5,12 +5,14 @@
 # (ucakkursun_gonder) take 20 health per hit, and an atilgan at 0 health plays its death fall and bumps
 # atilgan_sayisi (atilgan_yara.wdl:566-635). The divers approach from the gun's right (world pan ≈ -80),
 # so every cycle re-aims there, lifts the barrel and fires. Enemy knock-backs are random: waypoints avoid the café benches.
+# The corner at (720,-420) is cut early and (745,-150) holds the line north: Inzar turns slowly while running, drifted east and stuck
+# at about (775,-231). Which atilgan dives when depends on the body and the route time (seed 0: all three bodies kill).
 realtime off
 load-save 9
 wait until LY_AktifLevelID == 31 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
 assert $count(atilgan_ai) == 5
 assert atilgan_sayisi == 0
-route 40 130 -915 60 -915 60 -650 60 -430 400 -440 750 -420 750 -320 755 100 620 140 560 480 run timeout 7200
+route 40 130 -915 60 -915 60 -650 60 -430 400 -440 720 -420 745 -320 745 -150 755 100 620 140 560 480 run timeout 7200
 find fish ucak_fish
 walk-to @fish 45 timeout 600
 press-until D ucaksavar_aktif == 1 timeout 300

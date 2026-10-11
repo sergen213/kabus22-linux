@@ -79,7 +79,7 @@ void Engine::apply_character_lock(Runtime& runtime,std::vector<std::pair<ObjectI
  // It goes first in the queue: until oyuncu_koruyucu sets player, level scripts that poll player.x would read NULL.
  if(body&&b==2&&!effectPlaced&&effect){auto id=create_entity(runtime,"fish.mdl",position(*body),0);state.require(id).field("action1").value=Value::function(effect);actions.insert(actions.begin(),{id,effect});}
  // Ebru's action selects her magnum (Aktif_Silah 8) at every spawn; outside her story she keeps the firearm the story carried.
- if(body&&b==1){const int w=int(number("Aktif_Silah"));ebruWeapon_=w>=1&&w<=5?w:0;}
+ if(body&&b==1){const int w=int(number("Aktif_Silah"));ebruWeapon_=w>=1&&w<=5?w:0;ebruSpawn_=ebruWeapon_!=0;}
  if(body&&b==0)character_weapons(runtime,true); // before his action's Silah_Ekle reads Aktif_Silah
  // A bullet hit (silah.wdl Ates_Et:651-658) reads the blood table kan_mertip[3*(you.skill2-1)+n] by enemy type, skill2 1-6. Every
  // enemy action sets its type except Lain's and Seytan's, which only Inzar fights in the story: a gun body would index -2. All six
@@ -106,8 +106,11 @@ void Engine::character_weapons(Runtime& runtime,bool spawning){
   if(gun.kind==Value::Kind::Object&&state.get(gun.bits)&&state.get(gun.bits)->alive&&names){ProcessContext context;std::array<Argument,2> args{{{gun,{}},{names->value,{}}}};builtin(runtime,context,"ent_morph",args);}
  }
  if(characterLock==1&&story_character()!=1){
+  // Her action's spawn write (oyuncu2_ebru.wdl:194 aktif_silah=8) gives way to the story's firearm even while the magnum has rounds;
+  // a magnum chosen later in the inventory stays while it has rounds.
   if(w>=1&&w<=5)ebruWeapon_=w;
-  else if((w==8&&ebruWeapon_&&rounds(8)==0)||w==0||w==6||w==7)set_global("Aktif_Silah",Value::from_int(ebruWeapon_?ebruWeapon_:8));
+  else if((w==8&&ebruWeapon_&&(ebruSpawn_||rounds(8)==0))||w==0||w==6||w==7)set_global("Aktif_Silah",Value::from_int(ebruWeapon_?ebruWeapon_:8));
+  if(w==8)ebruSpawn_=false;
  }
 }
 // Top of Engine::tick. A story switch (a script writes another Aktif_Player during play) asks whether to keep the locked body or
@@ -117,6 +120,9 @@ bool Engine::character_tick(Runtime& runtime,const Input& in){
   if(newGameMenu_){set_character_lock(newGameChoice_-1);newGameMenu_=false;}
   adoptStory_=true;
  }
+ // A slot load (Yukleme_Kontrol, YukleMenu.wdl:324-340) first resets the story (Yeni_Oyun_Kolay: Aktif_Player 0), then reads the slot:
+ // neither is a story switch. Without this an in-game load of a locked non-Demir game opened the prompt and paused the load forever.
+ if(number("Yukleme_Yapilsin")!=0)adoptStory_=true;
  const auto menuPanel=global("YMP_Normal");newGameMenu_=menuPanel.kind==Value::Kind::Object&&state.get(menuPanel.bits)&&field(menuPanel.bits,"visible")!=0;
  if(newGameMenu_){
   const bool left=in.pressed[SDL_SCANCODE_LEFT]||in.pressed[SDL_SCANCODE_KP_4]||in.controllerPressed[SDL_CONTROLLER_BUTTON_DPAD_LEFT];
