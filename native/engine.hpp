@@ -117,7 +117,9 @@ public:
  std::optional<PositionRestore> positionRestore; // set by a quicksave slot read; applied once its level is in play
  // Character lock (native/character.cpp, docs/CHARACTER_LOCK.md); not in the original. -1: the body follows Aktif_Player.
  int characterLock=-1;
- void configure_characters(Runtime&); // after Runtime::load: reroutes the body/menu reads of Aktif_Player
+ // After Runtime::load: reroutes the body/menu/weapon reads of Aktif_Player. defaultLock (--character): the New Game selection
+ // and the lock of loaded slots that carry none (original saves), -1 original.
+ void configure_characters(Runtime&,int defaultLock=-1);int characterDefault=-1;
  void set_character_lock(int character);
  int character_prompt()const{return switchPrompt_;}
  int story_character()const;int body_character()const;int menu_character()const;int weapon_character()const;
@@ -132,7 +134,7 @@ private:
  bool character_tick(Runtime&,const Input&); // true: a switch prompt is open and the scripts stay paused this frame
  void character_weapons(Runtime&,bool spawning);int ebruWeapon_=0;
  void character_overlay();float draw_menu_word(std::string_view,float x,float y,float scale,float alpha,bool measure);
- int storyAtLevel_=-1,switchPrompt_=-1,promptCursor_=0,newGameChoice_=0;bool adoptStory_=false,promptRelease_=false,newGameMenu_=false;
+ int storyAtLevel_=-1,switchPrompt_=-1,promptCursor_=0,newGameChoice_=0;bool adoptStory_=false,promptRelease_=false,promptArmed_=false,newGameMenu_=false;
  std::shared_ptr<const Image> menuAtlas_;std::array<Rect,256> menuGlyphs_{};std::array<Rect,2> menuArrows_{},promptRows_{};std::string promptTitle_,language_;
  std::string consoleLine_,consolePrompt_,toast_,fpsText_;std::deque<std::string> consoleLog_;std::vector<std::string> consoleHistory_;std::size_t historyCursor_=0;
  double toastUntil_=0,fpsTime_=0;int fpsFrames_=0;Input consoleInput_;

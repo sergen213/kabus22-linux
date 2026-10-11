@@ -1,0 +1,48 @@
+# requires: saves
+# Character lock (docs/CHARACTER_LOCK.md): a story write of Aktif_Player during locked play opens the native prompt and pauses the
+# scripts (here the write is the scenario's, as cinematic.wdl does it before LY_HedefLevel). Row 1 keeps the locked body, row 2
+# follows the story; the answer is the new lock and the next level entry places that body.
+realtime off
+load-save 1
+wait until LY_AktifLevelID == 7 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+press F10
+type character demir
+press Return
+press F10
+frames 4
+assert $character == 0 && $prompt == -1
+set Aktif_Player 1
+frames 2
+assert $prompt == 1
+# Paused: a held turn key does not turn the player (Up/Down move the prompt cursor).
+store pan player.pan
+down Left
+frames 60
+up Left
+assert player.pan == @pan && $prompt == 1
+# Keep Demir (row 1): no change, the story stays Ebru's.
+press Return
+frames 4
+assert $prompt == -1 && $character == 0 && Aktif_Player == 1
+# Back to Demir's story: the lock is Demir again, so no question.
+set Aktif_Player 0
+frames 4
+assert $prompt == -1
+# Switch (row 2) to Ebru and enter Camtuvalet: Ebru's action plays Demir's story level.
+set Aktif_Player 1
+frames 2
+assert $prompt == 1
+press Down
+press Return
+frames 4
+assert $prompt == -1 && $character == 1
+set Aktif_Player 0
+frames 2
+assert $prompt == 0
+press Return
+frames 4
+assert $character == 1
+set LY_HedefLevel 24
+wait until LY_AktifLevelID == 24 timeout 3000
+wait until level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 1200
+assert Aktif_Player == 0 && $count(Oyuncu_Ebru) == 1 && $count(Oyuncu_Demir) == 0

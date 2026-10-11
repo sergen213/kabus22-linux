@@ -148,6 +148,12 @@ if(BUILD_TESTING)
       add_test(NAME level_sweep COMMAND "${CMAKE_COMMAND}" "-DK22=$<TARGET_FILE:kabus22>" "-DGAME=${K22_GAME_DATA}" "-DSAVES=${K22_ORIGINAL_SAVES}"
         "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/level-sweep" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/levels/sweep.cmake")
       set_tests_properties(level_sweep PROPERTIES TIMEOUT 1200)
+      # The same sweep with each character lock (docs/CHARACTER_LOCK.md): every level's player is the locked character.
+      foreach(character demir ebru inzar)
+        add_test(NAME level_sweep_${character} COMMAND "${CMAKE_COMMAND}" "-DK22=$<TARGET_FILE:kabus22>" "-DGAME=${K22_GAME_DATA}" "-DSAVES=${K22_ORIGINAL_SAVES}"
+          "-DCHARACTER=${character}" "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/level-sweep-${character}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/levels/sweep.cmake")
+        set_tests_properties(level_sweep_${character} PROPERTIES TIMEOUT 1200)
+      endforeach()
     endif()
     # Native captures of tests/reference/*.k22s against the original's captures (tools/wine-reference/, docs/GAMEPLAY_TESTING.md#reference-comparison).
     # Renders with OpenGL in a window, so it needs DISPLAY; thresholds in tests/reference/thresholds.tsv.

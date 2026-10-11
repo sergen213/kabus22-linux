@@ -2,11 +2,16 @@
 # Every scenario runs headless in a fresh private XDG tree. "# requires: saves" scenarios need the original Windows save set.
 # "# continues: OTHER" reuses OTHER's tree without a fresh import (a restart of the same installation); OTHER must sort first.
 # "# mode: bonus" runs the Bonus game (--mode bonus --data "GAME_ROOT/Kabus 22 Mode").
+# -DONLY=REGEX runs the matching scenario names; -DCHARACTER=demir|ebru|inzar adds --character (docs/CHARACTER_LOCK.md), so the
+# loaded original saves play as that character.
 file(GLOB scenarios "${SCENARIOS}/*.k22s")
 list(SORT scenarios)
 set(failed "")
 foreach(scenario IN LISTS scenarios)
   get_filename_component(name "${scenario}" NAME_WE)
+  if(ONLY AND NOT name MATCHES "${ONLY}")
+    continue()
+  endif()
   file(READ "${scenario}" text)
   if(text MATCHES "# requires: saves" AND NOT SAVES)
     message(STATUS "SKIP ${name}: needs -DK22_ORIGINAL_SAVES")
@@ -35,6 +40,9 @@ foreach(scenario IN LISTS scenarios)
   endif()
   set(data "${GAME}")
   set(mode "")
+  if(CHARACTER)
+    set(mode --character ${CHARACTER})
+  endif()
   if(text MATCHES "# mode: bonus")
     set(data "${GAME}/Kabus 22 Mode")
     set(mode --mode bonus)
