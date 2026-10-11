@@ -53,6 +53,11 @@ GTK CSS on a fixed light Adwaita theme) and the root's `wizard-small-image.png` 
 installations made before this change simply have no header image. Reference screenshots of the
 original (Wine, private Xvfb) live in `reverse/original-installer/` (local only, not in git).
 
+The media-page preview doubles as the media check: Next on that page stays disabled while it runs
+(status line shows its stage) and is enabled only once it succeeds for the current path. Browse,
+Enter in the path field or `--source` start it; a failure, Cancel or a changed path keeps Next
+disabled.
+
 ## Supported sources
 
 | Source | Detection | Notes |

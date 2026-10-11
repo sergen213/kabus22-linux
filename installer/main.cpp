@@ -417,7 +417,8 @@ class Installer {
     GdkPixbuf *wizard_ = nullptr, *wizardSmall_ = nullptr; // worker results, under mutex_
     int page_ = Welcome;
     bool finished_ = false, dirty_ = false, succeeded_ = false, busy_ = false, previewing_ = false,
-         installed_ = false, closing_ = false;
+         installed_ = false, closing_ = false, mediaReady_ = false; // mediaReady_: preview of source_ succeeded
+    std::string previewSource_;
     guint timer_ = 0;
     bool loose_;
 
@@ -514,14 +515,15 @@ class Installer {
     }
     std::string text(GtkWidget* entry) const { return gtk_entry_get_text(GTK_ENTRY(entry)); }
     void setControls() {
-        // The artwork preview runs in the background; only the media row and Install wait for it.
+        // The artwork preview runs in the background; it also validates the media, so the media page's
+        // Next waits for it to succeed. Install waits for any job.
         const bool idle = !busy_, browsing = idle || previewing_;
         for (std::size_t i = 0; i < editable_.size(); ++i) gtk_widget_set_sensitive(editable_[i], !installed_ && (idle || (previewing_ && i >= 2)));
         gtk_widget_set_visible(back_, (page_ > Welcome && page_ < Installing) || (page_ == Installing && idle && !installed_));
         gtk_widget_set_sensitive(back_, browsing);
         gtk_widget_set_visible(next_, page_ != Installing);
         gtk_button_set_label(GTK_BUTTON(next_), T(page_ == Ready ? InstallButton : page_ == Finished ? Finish : Next));
-        const bool filled = (page_ != Media || !text(source_).empty()) && (page_ != Destination || !text(destination_).empty());
+        const bool filled = (page_ != Media || mediaReady_) && (page_ != Destination || !text(destination_).empty());
         gtk_widget_set_sensitive(next_, (page_ == Ready ? idle : browsing) && filled && !closing_);
         gtk_widget_set_visible(cancel_, page_ != Finished);
         gtk_widget_set_sensitive(cancel_, !busy_ || !cancelled_.load());
@@ -618,13 +620,14 @@ class Installer {
             input.source = fs::absolute(source).lexically_normal();
             input.sourceIso.clear(); input.sourceSetup.clear();
             input.installRoot = text(destination_);
-            if (input.installRoot.empty()) throw std::runtime_error("Choose an installation directory.");
-            input.installRoot = fs::absolute(input.installRoot).lexically_normal();
+            if (!preview && input.installRoot.empty()) throw std::runtime_error("Choose an installation directory.");
+            if (!input.installRoot.empty()) input.installRoot = fs::absolute(input.installRoot).lexically_normal();
             input.optionalPatch = text(patch_);
             if (!input.optionalPatch.empty()) input.optionalPatch = fs::absolute(input.optionalPatch).lexically_normal();
             cancelled_ = false;
             busy_ = true;
             previewing_ = preview;
+            if (preview) { mediaReady_ = false; previewSource_ = text(source_); }
             labelText(status, T(preview ? ReadingArtwork : Preparing));
             gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(progress_), 0);
             {
@@ -655,6 +658,7 @@ class Installer {
                         if (wizardSmall_) g_object_unref(wizardSmall_);
                         wizard_ = large; wizardSmall_ = small;
                         stage_ = T(ArtworkLoaded);
+                        succeeded_ = true;
                     } else {
                         auto result = install(input, progress);
                         std::lock_guard lock(mutex_);
@@ -719,8 +723,10 @@ class Installer {
         if (!finished) return G_SOURCE_CONTINUE;
         worker_.join();
         busy_ = false;
+        // A result for an earlier or cancelled source must not unlock Next.
+        if (previewing_) mediaReady_ = succeeded_ && !cancelled_.load() && text(source_) == previewSource_;
+        else installed_ = succeeded_;
         previewing_ = false;
-        installed_ = succeeded_;
         if (!pixels_.rgba.empty()) {
             auto pixels = std::make_unique<Pixels>(std::move(pixels_));
             auto* pixbuf = gdk_pixbuf_new_from_data(pixels->rgba.data(), GDK_COLORSPACE_RGB, TRUE, 8,
@@ -833,9 +839,14 @@ public:
         for (auto* entry : {source_, destination_})
             g_signal_connect(entry, "changed", G_CALLBACK(+[](GtkEditable* editable, gpointer data) {
                 auto* self = static_cast<Installer*>(data);
-                if (GTK_WIDGET(editable) == self->source_) gtk_image_clear(GTK_IMAGE(self->image_));
+                if (GTK_WIDGET(editable) == self->source_) {
+                    gtk_image_clear(GTK_IMAGE(self->image_));
+                    self->mediaReady_ = false;
+                }
                 self->setControls();
             }), this);
+        // A typed path is checked on Enter, like one chosen with Browse.
+        g_signal_connect(source_, "activate", G_CALLBACK(+[](GtkEntry*, gpointer data) { static_cast<Installer*>(data)->begin(true); }), this);
         g_signal_connect(window_, "delete-event", G_CALLBACK(+[](GtkWidget*, GdkEvent*, gpointer data) -> gboolean {
             auto* self = static_cast<Installer*>(data);
             if (self->installed_ || self->confirmExit()) self->close();
