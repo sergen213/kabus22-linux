@@ -98,9 +98,13 @@ struct Raster {
     } fx;
     VkDescriptorSetLayout computeSetLayout{};VkPipelineLayout computeLayout{};VkPipeline signalsPipeline{},filterPipeline{};
     std::uint64_t frameIndex{};const Camera*primary{};
-    // shadows=rt actor shadows: light records appended after the shading lights, and the casters they replace the planar shadow for.
+    // shadows=rt actor shadows: light records appended after the shading lights. rt_signals.comp counts, per TLAS instance of
+    // the primary view, the pixels its actor shadow darkened; each frame slot keeps that instance's object id. Read back when
+    // the slot comes round again, the counts name the casters whose planar shadow is replaced (actorShadowCasters).
     std::size_t actorShadowFirst{},actorShadowCount{};std::vector<std::uint32_t>actorShadowCasters;
+    struct CasterFeedback { Buffer pixels; std::vector<std::uint32_t> objects; };std::array<CasterFeedback,2>casterFeedback;
     bool actorShadows()const{return s.rayEnabled&&s.options.features.shadows==ShadowMode::RayTraced;}
+    static constexpr std::uint32_t actorShadowPixels=64; // Pixels (signal resolution) darkened by >= SHADOW_ALPHA/2 that count as a drawn shadow.
     bool rtSignals()const{const auto&f=s.options.features;return s.rayEnabled&&(f.shadows==ShadowMode::RayTraced||f.gi||f.roughReflections);}
     bool motionVectors()const{return s.options.features.taa||s.options.features.fsr||(rtSignals()&&s.options.features.denoise);}
     // Caster push constant stages: the tessellation evaluation stage projects tessellated casters too.
@@ -120,8 +124,8 @@ struct Raster {
         for(std::size_t i=0;i<code.size();++i)shaders[i]=s.shader(code[i]);
         if(s.options.features.tessellation){shaders[14]=s.shader(spirv::scene_tesc);shaders[15]=s.shader(spirv::scene_tese);}
         if(rtSignals()){
-            // Compute set: 0 uniform, 1 lights, 2-9 sampled images, 10-21 storage images; set 1 is the ray-query scene.
-            std::array<VkDescriptorSetLayoutBinding,22>cb{};for(unsigned i=0;i<cb.size();++i){cb[i].binding=i;cb[i].descriptorCount=1;cb[i].descriptorType=i==0?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:i==1?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:i<10?VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;cb[i].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT;}
+            // Compute set: 0 uniform, 1 lights, 2-9 sampled images, 10-20 storage images, 21 caster feedback; set 1 is the ray-query scene.
+            std::array<VkDescriptorSetLayoutBinding,22>cb{};for(unsigned i=0;i<cb.size();++i){cb[i].binding=i;cb[i].descriptorCount=1;cb[i].descriptorType=i==0?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:i==1||i==21?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:i<10?VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;cb[i].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT;}
             VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};ci.bindingCount=cb.size();ci.pBindings=cb.data();require(vkCreateDescriptorSetLayout(s.device,&ci,nullptr,&computeSetLayout),"RT signal descriptor layout");
             std::array<VkDescriptorSetLayout,2>sets{computeSetLayout,rt_layout(*s.rays)};VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT,0,8};
             VkPipelineLayoutCreateInfo cp{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};cp.setLayoutCount=2;cp.pSetLayouts=sets.data();cp.pushConstantRangeCount=1;cp.pPushConstantRanges=&push;require(vkCreatePipelineLayout(s.device,&cp,nullptr,&computeLayout),"RT signal pipeline layout");
@@ -143,6 +147,7 @@ struct Raster {
     ~Raster(){destroy_owned();}
     void destroy_owned(){
         for(auto&[k,p]:pipelines)vkDestroyPipeline(s.device,p,nullptr);for(auto module:shaders)if(module)vkDestroyShaderModule(s.device,module,nullptr);vkDestroyPipelineLayout(s.device,pipelineLayout,nullptr);vkDestroyDescriptorSetLayout(s.device,layout,nullptr);
+        for(auto&f:casterFeedback)if(f.pixels.handle)s.destroy(f.pixels);
         vkDestroyPipeline(s.device,signalsPipeline,nullptr);vkDestroyPipeline(s.device,filterPipeline,nullptr);vkDestroyPipelineLayout(s.device,computeLayout,nullptr);vkDestroyDescriptorSetLayout(s.device,computeSetLayout,nullptr);
         for(auto&a:arenas){for(auto view:a.views)vkDestroyImageView(s.device,view,nullptr);for(auto&b:a.buffers)s.destroy(b);for(auto p:a.pools)vkDestroyDescriptorPool(s.device,p,nullptr);}for(auto&[k,p]:samplers)vkDestroySampler(s.device,p,nullptr);
         release();s.destroy(white);s.destroy(black);s.destroy(gamma);s.destroy(video);s.destroy(flatNormal);s.destroy(defaultOrm);
@@ -387,7 +392,7 @@ struct Raster {
         auto model=transform(d.position,d.angles,d.scale);
         auto&shadow=light->shadow;if(!shadow.caster)return;auto projection=planar_projection(d,shadow,*frame);if(!geometry_eligible(bound,product(projection,model),view.viewProjection,view.clipPlane))return;if(found==prepared.end())found=prepared.find(&d);if(found==prepared.end())throw std::runtime_error("Planar Vulkan draw has no shared prepared pose");Uniform u=view;u.model=model;u.projection=projection;u.viewport[0]=region.extent.width;u.viewport[1]=region.extent.height;u.parameters[0][2]=-2.f*frame->clipSize;auto alpha=std::uint8_t(std::int64_t(std::trunc(frame->shadowAlpha*.01f*camera.opacityByte)));u.fogParameters[2]=alpha/255.f;u.flags[2][2]=d.noFog;bool reversed=(camera.horizontalFov<0)!=(camera.pixelAspect<0);reversed^=d.model->clockwise;reversed^=d.scale.x*d.scale.y*d.scale.z<0;u.parameters[2][0]=reversed;bind({Shadow,0,1,1,1},u);VkDeviceSize offset=0;vkCmdBindVertexBuffers(s.command,0,1,&found->second.pose->vertices.handle,&offset);vkCmdBindIndexBuffer(s.command,m.indices.handle,0,VK_INDEX_TYPE_UINT32);for(auto&b:m.batches)vkCmdDrawIndexed(s.command,b.count,1,b.first,0,0);
     }
-    void ray_scene(const Camera&camera){
+    void ray_scene(const Camera&camera,std::vector<std::uint32_t>*instanceObjects=nullptr){
         if(!s.rayEnabled)return;
         end();
         std::vector<RayGeometry>geometry;
@@ -430,7 +435,7 @@ struct Raster {
         }
         std::sort(translucent.begin(),translucent.end(),[&](auto*a,auto*b){auto da=add(a->position,mul(camera.position,-1)),db=add(b->position,mul(camera.position,-1));return dot(da,da)>dot(db,db);});
         for(auto*d:translucent)addGeometry(*d,false,camera.perDrawOpacity&&d->model&&model_has_entity_skins(*d->model)?1:-1);
-        rt_scene(*s.rays,geometry);
+        rt_scene(*s.rays,geometry,instanceObjects);
     }
     void draw_sky(const Camera&camera){
         if(!camera.drawWorld||!frame->world||!(camera.layers&1))return;const k22::Image*cube=nullptr,*dome=nullptr;for(auto&mat:frame->world->mesh.materials)if((mat.flags&15)==5){if(!mat.texture)throw std::runtime_error("SKY surface has no decoded native bitmap");auto&image=*mat.texture;if(image.width==image.height*6)cube=&image;else if(image.width==image.height*2)dome=&image;}auto*image=cube?cube:dome;if(!image)return;auto&sky=skies.at(image);
@@ -577,11 +582,11 @@ struct Raster {
         for(;;){if(a.pool==a.pools.size()){std::array<VkDescriptorPoolSize,4>sizes{{{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,2048},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,4096},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,24576},{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,1024}}};VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};ci.maxSets=2048;ci.poolSizeCount=sizes.size();ci.pPoolSizes=sizes.data();a.pools.emplace_back();try{require(vkCreateDescriptorPool(s.device,&ci,nullptr,&a.pools.back()),"raster descriptor pool");}catch(...){a.pools.pop_back();throw;}}VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};ai.descriptorPool=a.pools[a.pool];ai.descriptorSetCount=1;ai.pSetLayouts=&setLayout;auto result=vkAllocateDescriptorSets(s.device,&ai,&set);if(result==VK_ERROR_OUT_OF_POOL_MEMORY||result==VK_ERROR_FRAGMENTED_POOL){++a.pool;continue;}require(result,"raster descriptor allocation");return set;}
     }
     // Compute set: 0 uniform, 1 lights, 2.. sampled images, 10.. storage images (GENERAL); null entries stay unwritten.
-    VkDescriptorSet compute_set(const ComputeUniform&cu,std::span<const std::pair<Image*,VkSampler>>sampledImages,std::span<Image* const>storage){
+    VkDescriptorSet compute_set(const ComputeUniform&cu,std::span<const std::pair<Image*,VkSampler>>sampledImages,std::span<Image* const>storage,const Buffer*feedback=nullptr){
         auto set=allocate_set(computeSetLayout);auto uniform=allocate(sizeof(cu),std::max<VkDeviceSize>(16,s.properties.limits.minUniformBufferOffsetAlignment),&cu);auto lights=lightAllocation.buffer?lightAllocation:zeroAllocation;
-        std::array<VkDescriptorBufferInfo,2>bi{{{uniform.buffer->handle,uniform.offset,uniform.size},{lights.buffer->handle,lights.offset,lights.size}}};std::array<VkDescriptorImageInfo,20>ii{};std::vector<VkWriteDescriptorSet>w;
+        std::array<VkDescriptorBufferInfo,3>bi{{{uniform.buffer->handle,uniform.offset,uniform.size},{lights.buffer->handle,lights.offset,lights.size},{feedback?feedback->handle:VK_NULL_HANDLE,0,VK_WHOLE_SIZE}}};std::array<VkDescriptorImageInfo,20>ii{};std::vector<VkWriteDescriptorSet>w;
         auto write=[&](std::uint32_t binding,VkDescriptorType type){VkWriteDescriptorSet x{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};x.dstSet=set;x.dstBinding=binding;x.descriptorCount=1;x.descriptorType=type;w.push_back(x);return &w.back();};
-        w.reserve(24);write(0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)->pBufferInfo=&bi[0];write(1,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)->pBufferInfo=&bi[1];
+        w.reserve(24);write(0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)->pBufferInfo=&bi[0];write(1,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)->pBufferInfo=&bi[1];if(feedback)write(21,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)->pBufferInfo=&bi[2];
         for(std::size_t i=0;i<sampledImages.size();++i){ii[i]={sampledImages[i].second,sampledImages[i].first->view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};write(2+i,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)->pImageInfo=&ii[i];}
         for(std::size_t i=0;i<storage.size();++i)if(storage[i]){ii[8+i]={VK_NULL_HANDLE,storage[i]->view,VK_IMAGE_LAYOUT_GENERAL};write(10+i,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)->pImageInfo=&ii[8+i];}
         vkUpdateDescriptorSets(s.device,w.size(),w.data(),0,nullptr);return set;
@@ -640,7 +645,11 @@ struct Raster {
         ComputeUniform cu;cu.inverseViewProjection=inverse(view.viewProjection);cu.previousViewProjection=fx.previousVP;cu.eye=vec(camera.position,camera.farClip);cu.sun=vec(unit(frame->sunDirection),0.02f);
         cu.params={float(frameIndex&0xffff),1500.f,40.f,camera.nearClip};cu.camera=vec(fx.forward,float(std::min<std::size_t>(frame->lights.size(),32)));cu.config={bits,int(s.render.width),int(s.render.height),fx.historyValid?1:0};cu.actor={float(actorShadowFirst),float(actorShadowCount),std::clamp(frame->shadowAlpha*.01f,0.f,1.f),0};
         const auto nearest=sampler(false,true);const std::array<std::pair<Image*,VkSampler>,5>edges{{{&fx.gdepth[cur],nearest},{&fx.gdata[cur],nearest},{&fx.gdepth[prev],nearest},{&fx.gdata[prev],nearest},{&fx.motion,nearest}}};
-        dispatch(signalsPipeline,compute_set(cu,std::span(edges).first(2),std::array<Image*,3>{&fx.raw[0],&fx.raw[1],&fx.raw[2]}),0,0);s.mark("rt_signals");
+        auto&feedback=casterFeedback[s.slotIndex];const VkDeviceSize feedbackSize=std::max<std::size_t>(feedback.objects.size(),1)*sizeof(std::uint32_t);
+        if(feedback.pixels.size<feedbackSize){if(feedback.pixels.handle)s.retire(feedback.pixels);feedback.pixels=s.buffer(std::max<VkDeviceSize>(feedbackSize,1024),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT,true);}
+        vkCmdFillBuffer(s.command,feedback.pixels.handle,0,VK_WHOLE_SIZE,0);compute_barrier(VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
+        dispatch(signalsPipeline,compute_set(cu,std::span(edges).first(2),std::array<Image*,3>{&fx.raw[0],&fx.raw[1],&fx.raw[2]},&feedback.pixels),0,0);s.mark("rt_signals");
+        {VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};b.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;b.dstAccessMask=VK_ACCESS_HOST_READ_BIT;vkCmdPipelineBarrier(s.command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&b,0,nullptr,0,nullptr);}
         std::array<Image,3>*result=&fx.raw;
         if(f.denoise){
             auto&history=fx.history[cur];auto&before=fx.history[prev];
@@ -740,7 +749,7 @@ struct Raster {
         if(camera.portalClip){auto position=targetPlane?targetPlane->position:camera.portalPosition,normal=targetPlane?targetPlane->normal:camera.portalNormal;if(dot(normal,normal)==0)throw std::runtime_error("Portal clip view has no real surface plane");normal=unit(normal);view.clipPlane=vec(normal,-dot(normal,position));}
         auto selectShadows=[&]{
             shadowOrder.clear();if(camera.drawWorld&&!camera.noShadow&&!camera.noEntities&&frame->renderEntities&&(!frame->bonusProfile||frame->planarCapable)&&!frame->shadows.empty()){if(frame->bonusProfile?frame->shadowStencilRaw>0:frame->shadowStencilRaw!=0)throw std::runtime_error("Nondefault source stencil-volume shadows are not implemented; native Vulkan supports the recovered planar route");for(auto&d:frame->shadows){if(!(d.layers&camera.layers)||(d.shadowViewId&&d.shadowViewId!=camera.sourceId)||(camera.excludeEntityId&&d.objectId==camera.excludeEntityId))continue;auto cached=frame->cachedEntityShadow?frame->cachedEntityShadow(frame->lightContext,d):d.nativeShadow;if(frame->bonusProfile||cached.caster)shadowOrder.push_back(&d);}std::sort(shadowOrder.begin(),shadowOrder.end(),[&](auto*a,auto*b){auto da=add(a->position,mul(camera.position,-1)),db=add(b->position,mul(camera.position,-1));if(!frame->shadowSortVertical)da.z=db.z=0;return dot(da,da)>dot(db,db);});}
-            // shadows=rt: visible SHADOW casters already shadow the primary view from the actual lights (rt_signals.comp actorShadow).
+            // shadows=rt: casters whose actor shadow was drawn in the primary view lose their planar shadow there (rt_signals.comp actorShadow).
             if(primaryView&&actorShadows())std::erase_if(shadowOrder,[&](auto*d){return std::ranges::find(actorShadowCasters,d->objectId)!=actorShadowCasters.end();});
         };
         auto encounters=[&](Encounter encounter){
@@ -762,7 +771,7 @@ struct Raster {
             selectShadows(); // A6 cached-caster admission precedes every current-camera callback.
             encounters(Encounter::Prepare);
         }
-        ray_scene(camera);s.mark("as_build");if(primaryView&&motionVectors()){motion_vectors(camera);s.mark("motion");}if(primaryView&&rtSignals())rt_signals(camera);begin(*destination);set_region(r);if(targetOnly&&(!camera.perDrawOpacity||!s.portalColorValid)){clear(camera.environmentOverride?camera.background:frame->clearColor,true,true,true,full());s.portalColorValid=true;}if(translucent)clear(seeded(camera.foreground?Color{0,0,0,0}:camera.environmentOverride?camera.background:frame->clearColor),true,true,true,full());if(camera.perDrawOpacity)clear(seeded(camera.environmentOverride?camera.background:frame->clearColor),camera.clearColor,camera.clearDepth,camera.clearStencil,r);else if(camera.clearDepth)clear({},false,true,false,r);
+        ray_scene(camera,primaryView&&actorShadows()?&casterFeedback[s.slotIndex].objects:nullptr);s.mark("as_build");if(primaryView&&motionVectors()){motion_vectors(camera);s.mark("motion");}if(primaryView&&rtSignals())rt_signals(camera);begin(*destination);set_region(r);if(targetOnly&&(!camera.perDrawOpacity||!s.portalColorValid)){clear(camera.environmentOverride?camera.background:frame->clearColor,true,true,true,full());s.portalColorValid=true;}if(translucent)clear(seeded(camera.foreground?Color{0,0,0,0}:camera.environmentOverride?camera.background:frame->clearColor),true,true,true,full());if(camera.perDrawOpacity)clear(seeded(camera.environmentOverride?camera.background:frame->clearColor),camera.clearColor,camera.clearDepth,camera.clearStencil,r);else if(camera.clearDepth)clear({},false,true,false,r);
         if(!s.rayEnabled)selectShadows();
         draw_sky(camera);encounters(s.rayEnabled?Encounter::Replay:Encounter::Live);s.mark("scene");
         particles(camera);s.mark("particles");if(primaryView){depth_effects(*destination,r);s.mark("depth_fx");}bool hasView=false;if(frame->renderEntities&&!camera.noEntities)for(auto&d:frame->instances)if(!targetOnly&&d.viewSpace&&(d.layers&camera.layers)&&d.visible&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId)){hasView=true;break;}if(hasView){clear({},false,true,false,r);view.fogParameters[0]=view.fogParameters[1]=0;for(auto&d:frame->instances)if(d.viewSpace&&(d.layers&camera.layers)&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId))draw_instance(d,camera);}
@@ -794,9 +803,13 @@ struct Raster {
         auto pack=[&](const RenderLight&l,std::size_t i){lights[i*5]=vec(l.position,l.range);lights[i*5+1]={l.color.r,l.color.g,l.color.b,l.baked?-l.intensity:l.intensity};lights[i*5+2]=vec(l.direction,float(l.type));lights[i*5+3]=vec(l.attenuation,l.falloff);lights[i*5+4]={l.type==2?std::cos(rad(l.theta)*.5f):0,l.type==2?std::cos(rad(l.phi)*.5f):0,l.synthetic?1.f:0.f,0};};
         for(std::size_t i=0;i<count;++i)pack(f.lights[i],i);
         actorShadowFirst=count;actorShadowCount=0;actorShadowCasters.clear();
-        if(actorShadows()&&primary){
-            for(auto i:actor_shadow_lights(f.lights,primary->position))pack(f.lights[i],count+actorShadowCount++);
-            for(auto&d:f.instances)if(d.shadowRequested&&d.visible&&!d.viewSpace&&d.objectId)actorShadowCasters.push_back(d.objectId);
+        if(actorShadows()){
+            // This slot's previous frame has completed: its counts name the casters whose actor shadow was actually drawn.
+            auto&feedback=casterFeedback[s.slotIndex];std::vector<Vec3>casters;std::vector<std::uint32_t>shadowed;
+            if(feedback.pixels.handle){auto*pixels=static_cast<const std::uint32_t*>(feedback.pixels.mapped);for(std::size_t i=0;i<feedback.objects.size();++i)if(feedback.objects[i]&&pixels[i]>=actorShadowPixels)shadowed.push_back(feedback.objects[i]);}
+            feedback.objects.clear();
+            for(auto&d:f.instances)if(d.shadowRequested&&d.visible&&!d.viewSpace){casters.push_back(d.position);if(d.objectId&&std::ranges::find(shadowed,d.objectId)!=shadowed.end())actorShadowCasters.push_back(d.objectId);}
+            if(primary)for(auto i:actor_shadow_lights(f.lights,casters))pack(f.lights[i],count+actorShadowCount++);
         }
         lightAllocation=count?allocate((count+actorShadowCount)*5*sizeof(F4),std::max<VkDeviceSize>(16,s.properties.limits.minStorageBufferOffsetAlignment),lights.data()):zeroAllocation;
         worldDraw={};

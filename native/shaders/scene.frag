@@ -165,7 +165,7 @@ void main(){
     if(!unlit&&!explicitMaterial){
         illumination=hasLightmap?2*clamp(texture(lightmap,lmuv).rgb+vec3(surfaceAmbient),0,1):vec3(materialAmbient);
 #if K22_RAY_QUERY
-        if(signalShadows)illumination*=hasLightmap?mask.b*mask.a:mask.b; // a: actor shadows from the actual lights (rt_signals.comp actorShadow).
+        if(signalShadows)illumination*=mask.b;
 #endif
         vec3 n=normalize(worldNormal);
         if(!hasLightmap){
@@ -211,6 +211,10 @@ void main(){
 #endif
         rgb=k22Pbr(t.rgb,illumination,worldPosition,normalize(worldNormal),worldTangent,normalOrientation,texture(pbrNormal,coord).rgb,texture(pbrOrm,coord),k22RoughnessMap,k22LegacyRoughness,cameraPosition,sunDirection,sunVisibility,!hasLightmap);
     }
+#if K22_RAY_QUERY
+    // Actor shadows (rt_signals.comp actorShadow) darken the lit surface like the planar shadow they replace (alpha over it).
+    if(signalShadows&&hasLightmap)rgb*=mask.a;
+#endif
     if(!noFog&&fogRange.y>fogRange.x){float f=clamp((length(worldPosition-cameraPosition)-fogRange.x)/(fogRange.y-fogRange.x),0,1);rgb=mix(rgb,fogColor,f);}
     if(portalEnabled&&reflectionWeight>0&&abs(dot(portalPlane,vec4(worldPosition,1)))<0.1){
         vec4 reflected=portalProjection*vec4(worldPosition,1);

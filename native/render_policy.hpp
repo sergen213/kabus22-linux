@@ -408,20 +408,26 @@ inline int shadow_light_index(std::span<const RenderLight>lights,Vec3 eye){
     }
     return best;
 }
-// shadows=rt actor shadows on lightmapped surfaces (rt_signals.comp): the baked WMB lights whose range sphere is nearest
-// to the camera, then the hardware sun. Independent of the 32-record shading upload, which keeps native slots first.
+// shadows=rt actor shadows on lightmapped surfaces (rt_signals.comp actorShadow): the baked WMB lights and native point/spot
+// lights whose range holds a SHADOW caster, nearest first by how deep the nearest caster sits inside the range, then the
+// hardware sun. Independent of the 32-record shading upload, which keeps native slots first. No casters: no lights.
 constexpr std::size_t actorShadowLightLimit=32;
-inline std::vector<std::uint32_t> actor_shadow_lights(std::span<const RenderLight>lights,Vec3 eye){
-    std::vector<std::uint32_t>baked;int sun=-1;
+inline std::vector<std::uint32_t> actor_shadow_lights(std::span<const RenderLight>lights,std::span<const Vec3>casters){
+    std::vector<std::pair<float,std::uint32_t>>local;int sun=-1;
+    if(casters.empty())return {};
     for(std::uint32_t i=0;i<lights.size();++i){
         const auto&l=lights[i];if(!(l.intensity>0)||l.color.r+l.color.g+l.color.b<=0)continue;
-        if(l.baked&&l.range>0)baked.push_back(i);else if(sun<0&&l.synthetic&&l.type==3)sun=int(i);
+        if(l.synthetic&&!l.baked){if(sun<0&&l.type==3)sun=int(i);continue;}
+        if(!(l.range>0)||(!l.baked&&l.type!=1&&l.type!=2))continue;
+        float gap=std::numeric_limits<float>::max();
+        for(auto c:casters){auto d=add(l.position,mul(c,-1));gap=std::min(gap,std::sqrt(dot(d,d))-l.range);}
+        if(gap<0)local.push_back({gap,i});
     }
-    auto gap=[&](std::uint32_t i){auto d=add(lights[i].position,mul(eye,-1));return std::sqrt(dot(d,d))-lights[i].range;};
-    const auto kept=std::min(baked.size(),actorShadowLightLimit-(sun>=0));
-    std::partial_sort(baked.begin(),baked.begin()+kept,baked.end(),[&](auto a,auto b){return gap(a)<gap(b);});
-    baked.resize(kept);if(sun>=0)baked.push_back(std::uint32_t(sun));
-    return baked;
+    const auto kept=std::min(local.size(),actorShadowLightLimit-(sun>=0));
+    std::partial_sort(local.begin(),local.begin()+kept,local.end());
+    std::vector<std::uint32_t>picked;picked.reserve(kept+1);for(std::size_t i=0;i<kept;++i)picked.push_back(local[i].second);
+    if(sun>=0)picked.push_back(std::uint32_t(sun));
+    return picked;
 }
 constexpr unsigned sunShadowResolution=2048,cubeShadowResolution=1024;constexpr float sunShadowDistance=2048;
 // TAA: 8-sample Halton(2,3) sub-pixel offsets in pixels, applied in clip space.

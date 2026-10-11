@@ -22,8 +22,8 @@
   - *Visibility* (`shadows=rt` only): sun and dynamic-light shadow rays (`rtVisibility`) scale the
     native per-vertex dynamic lighting by the per-channel visible/unshadowed ratio. The sun is used only
     on non-lightmapped surfaces. Models with the original SHADOW flag also shadow lightmapped level geometry
-    from the baked WMB lights and the sun ([actor shadows](#actor-shadows)), which replaces their fixed-direction
-    A6 planar shadow in the primary view. Without `shadows=rt` the ray-traced backend does not occlude any light:
+    from the baked WMB lights, native point/spot lights and the sun ([actor shadows](#actor-shadows)); where that shadow
+    is drawn it replaces their fixed-direction A6 planar shadow. Without `shadows=rt` the ray-traced backend does not occlude any light:
     A6 point/spot lights and the sun are D3D9 fixed-function hardware lights (`D3DLIGHT` slots enabled
     with `LightEnable`, the sun as `D3DLIGHT` type 3; `reverse/decompiled/runtime/graphics-settings-source/a6-worldlight-contract.txt`),
     which never cast shadows; static shadows exist only in the baked lightmaps. Default RT lighting is
@@ -170,40 +170,66 @@ lightmapped and their WMB lights reach the renderer as baked records, so before 
 nothing visible on them: Demir in level5 with the user's `ultra` setup differed from Vulkan raster by a mean 0.18/255,
 and level5's floor is too dark for the planar shadow, so he had no shadow at all.
 
-With `shadows=rt` (`rt_signals.comp` `actorShadow`, mask alpha; denoised with the other shadow signals):
+With `shadows=rt` (`rt_signals.comp` `actorShadow`, in the alpha of the shadow signal):
 
 - **Casters**: models with the original SHADOW flag (`DrawInstance::shadowRequested`, the planar-shadow casters: the
   player, enemies, some props) get TLAS instance mask 4 in addition to 2.
-- **Lights**: `render_policy::actor_shadow_lights` picks up to 31 baked WMB lights whose range sphere is nearest to the
-  camera, plus the hardware sun, and appends them after the 32 shading records (level5 has 45 baked lights; the
-  shading upload keeps native slots first and is unchanged).
-- **Receivers**: lightmapped pixels. Each light weighs luma x N.L x linear falloff 1 - d/range (the squared
-  `enhancedBaked` falloff left the lamp shadow of a standing actor, which falls beyond the lamp's bright disk, at under
-  3% of the light there). One baked light per pixel and frame is traced, chosen in proportion to its weight, toward a
-  jittered point on it (soft shadows, as above); a caster hit counts only if the level geometry lets that light reach
-  the receiver (otherwise the lightmap holds none of it). The sun is traced as well and counts only where the level
-  geometry passes it, so indoor levels get no sun shadow. The lightmap is multiplied by
-  1 - SHADOW_ALPHA/100 x (occluded share of the weighted light), so one fully blocked light darkens like the original
-  planar shadow, several lights give several partial shadows, and the shadow fades out where the lights fade (total
-  weight below 0.05).
-- **Planar shadow**: the primary view no longer draws the planar shadow of a visible SHADOW caster.
+- **Lights**: `render_policy::actor_shadow_lights` picks the baked WMB lights and native point/spot lights (entity
+  lights such as `ev`'s wall lamp, a D3D light the lightmap does not hold) whose range contains a caster, deepest first,
+  up to 31, plus the hardware sun. They are appended after the 32 shading records, whose upload is unchanged (level5 has
+  45 baked lights).
+- **Receivers**: lightmapped pixels. Each light weighs luma x N.L x falloff (baked: linear 1 - d/range, as the squared
+  `enhancedBaked` falloff left a standing actor's lamp shadow beyond the lamp's bright disk at under 3% of the light
+  there; native: its D3D attenuation and cone; sun: 1), at most 1. Per pixel and frame the dominant light, one other light
+  picked in proportion to its weight (standing for all the others) and the sun are traced against the casters, toward a
+  point jittered within clamp(0.005 range, 0.5, 2) units: lamps are small, and the 2-12 unit soft-shadow sphere blurred a
+  body's shadow away a few metres from it. A blocked baked light counts only where the level geometry lets it reach the
+  receiver (otherwise the lightmap holds none of it); native lights shine through walls like the D3D lights they are
+  (and `ev`'s sits inside its wall fixture). The sun counts only where the level lets it through, so indoor levels get no
+  sun shadow.
+- **Darkness**: SHADOW_ALPHA/100 x min(occluded weight / strongest weight, 1), faded where the strongest weight is below
+  0.02. Blocking the dominant light darkens the surface exactly like the original planar shadow (`rgb *=` the factor
+  after lighting, PBR and GI, before fog: the planar shadow is black alpha-blended over the lit surface); a weaker light
+  gives a proportionally lighter shadow, several lights several shadows. The signal is accumulated over frames like the
+  other shadow signals but not blurred spatially (the a-trous blur halved a body's shadow strip).
+- **Planar shadow**: kept unless the actor shadow was drawn. Each caster that darkens a pixel by at least SHADOW_ALPHA/2
+  counts it per TLAS instance (`casterPixels`, a host-visible buffer per frame slot, read when the slot comes round, two
+  frames later); a visible caster with at least 64 such pixels at signal resolution loses its planar shadow in the
+  primary view. A caster whose shadow would fall only on models, or that has no light in range, keeps it.
 
 Unchanged: default ray tracing, Vulkan raster, `shadows=shadowmap` and OpenGL draw the planar shadow as before. Lamp-walk
-captures (level5, save slot 01, 4 positions) are byte-identical between the previous and this build for OpenGL default,
-Vulkan raster (`original`), Vulkan RT default and Vulkan raster `shadows=shadowmap`.
+captures (level5, save slot 01, 4 positions) are byte-identical between 0.3.0 and this build for OpenGL default, Vulkan
+raster (`original`), Vulkan RT default and Vulkan raster `shadows=shadowmap`.
 
 Measured with the user's launcher setup (`ultra`, `vulkan-rt`, `shadows=rt`, GI, rough reflections, denoise, PBR,
-MSAA 2, FSR quality, 1920x1080), level5 lamp walk (Demir at 20-50 units from a 5-light lamp cluster): the shadow now
-falls from his feet away from the lamp and turns with his position (he stands north, west and north-east of the lamp
-in the three walk positions; in the west position the lamp's lit disk is beside him and the shadow points the other
-way). Before -> after RT frames differ by a mean 0.37-0.86/255, 15k-58k pixels by more than 8 levels. Captures (private, game assets): `reverse/rt-actor-shadows/level5-*-{rt-before,rt-after,raster,original}.png`
-and `*-crop-before-vs-after.png`. `k22-render-check --vulkan-rt` checks it on a lightmapped floor with one baked light:
-the floor 22 units beside the caster drops from 255 to 126/128 on the side away from the light, the shadow changes
-sides with the light, and the planar control shadow (128 by default RT) is gone.
+MSAA 2, FSR quality, 1920x1080) against the same setup on `vulkan-raster` (RT off: `shadows=shadowmap` plus the planar
+shadow). Darkness = 1 - frame / the same frame without that shadow (display luma, pixels darkened by at least 0.1;
+mean includes the soft edges, p90 is the core). The planar shadow is 0.50 by construction (SHADOW_ALPHA 50).
 
-Cost (`K22_GPU_TIMING=1`, level5 bench, `ultra`): `rt_signals` 0.77 -> 0.93-0.98 ms, GPU frame 3.21 -> 3.31-3.39 ms.
-Tracing every weighted light instead of one sampled light cost 1.10 ms (305 -> 275 FPS in a quiet run). The FPS of the
-final runs (206-277) is not comparable: other workloads loaded the host's CPU at the time.
+| View (save) | RT actor shadow: pixels, mean, p90 | Raster planar shadow: pixels, mean, p90 |
+| --- | --- | --- |
+| level5 spawn (01) | 86433, 0.30, 0.50 | 40007, 0.47, 0.54 |
+| level5 north of lamp | 194151, 0.36, 0.50 | 60344, 0.44, 0.54 |
+| level5 west of lamp | 118761, 0.39, 0.53 | 52107, 0.45, 0.53 |
+| level5 north-east of lamp | 98413, 0.31, 0.50 | 51046, 0.47, 0.54 |
+| ev (06) | 72155, 0.40, 0.50 | 8483, 0.47, 0.50 |
+| kriz (09) | 8834, 0.32, 0.49 | 565, 0.41, 0.49 |
+| tnel24 (15) | 119313, 0.46, 0.54 | 2, - , - |
+| cam1 (01) | 23282, 0.43, 0.52 | 7773, 0.49, 0.53 |
+
+The level5 counts include chairs and desks (also SHADOW casters). In `ev`, Ebru's shadow from the wall lamp (a native
+light 30 units from her) now falls from her feet across the floor toward the television, where the planar shadow was a
+blob in the fixed sun direction; in level5 Demir's shadow points away from the 5-light lamp cluster and turns as he walks
+round it; tnel24's floor was too dark for any planar shadow and now shows the player's. Captures (private, game assets):
+`reverse/rt-actor-shadows/*-{raster,rt}.png`, `*-crop-raster-vs-rt.png` and `darkness-maps-*.png` (raster/RT frames
+above, planar/actor darkness below). `k22-render-check --vulkan-rt` checks it on a lightmapped floor with one baked
+light: the floor 22 units beside the caster drops from 255 to 126/128 on the side away from the light, the shadow changes
+sides with the light, the planar control shadow (128 by default RT) is gone, and with the light out of range the
+planar shadow stays.
+
+Cost (`K22_GPU_TIMING=1`, level5 bench, `ultra`, two runs each): `rt_signals` 0.76 -> 0.99-1.00 ms, GPU frame
+3.17-3.18 -> 3.34-3.38 ms, 307 -> 289-292 FPS. Tracing every weighted light instead of the dominant one plus one sampled
+light cost 1.10 ms (305 -> 275 FPS).
 
 ## Performance
 
@@ -255,8 +281,9 @@ Root causes found and fixed:
 - With `tessellation=1` the BLAS still holds the base mesh: ray-traced shadows, GI and reflections see model
   silhouettes without the PN bulge.
 - Actor shadows fall only on lightmapped level surfaces. Models (radiators, curtains, other actors) and decal models
-  (the level5 blood pool) receive none, while the caster's planar shadow is gone in the primary view: in `ev` (save 6)
-  the room light is behind the camera, so Ebru's shadow belongs on the radiator and curtain behind her and is not drawn.
+  (the level5 blood pool) receive none; a caster keeps its planar shadow only when no actor shadow of it is drawn at all,
+  so a shadow split between floor and furniture shows only its floor part.
 - Mirror/portal views, SHADOW entities that are themselves invisible, translucent and MSAA-edge pixels keep the old
   behaviour (planar shadow, or no actor shadow); a baked light inside solid geometry casts no actor shadow (its level
-  ray is blocked). `shadows=shadowmap` has no actor shadows from baked lights (one cube map for one dynamic light).
+  ray is blocked). The planar decision lags two frames. `shadows=shadowmap` has no actor shadows from baked lights (one
+  cube map for one dynamic light).

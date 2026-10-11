@@ -60,29 +60,55 @@ vec3 hitRadiance(uint instanceIndex,uint geometryIndex,uint triangle,bool front,
         illumination+=clamp(b.rgb*abs(b.a)*attenuation,0.0,1.0)*max(dot(n,L),0.0);}
     return linear(albedo.rgb*illumination)*albedo.a;
 }
-// Actor shadows on lightmapped surfaces (the A6 planar shadow's replacement): the lightmaps already hold the static light and
-// its world shadows, so only models with the original SHADOW flag (TLAS mask 4) are traced, toward the baked WMB lights and
-// the sun, area-jittered like the soft shadows. Each light weighs luma x N.L x linear falloff 1 - d/range (the sun only where
-// the level lets it reach the receiver); a blocked light counts only where the level geometry passes it (else the lightmap
-// holds none of it). Result: lightmap factor 1 - SHADOW_ALPHA x occluded share, so a single blocked light darkens like the
-// original planar shadow, several lights give several partial shadows, and the shadow fades where the lights fade (0.05).
-// Per pixel and frame one baked light is traced, picked in proportion to its weight (reservoir sampling; its occlusion
-// estimates the occluded share, the denoiser averages it), plus the sun; the long sun ray toward the level runs only where
-// a caster blocks (render_policy appends at most one sun).
+// Actor shadows on lightmapped surfaces (the A6 planar shadow's replacement). The lightmaps already hold the static light
+// and its world shadows, so only models with the original SHADOW flag (TLAS mask 4) are traced, toward the lights of
+// render_policy::actor_shadow_lights (baked WMB and native point/spot lights whose range holds a caster, and the sun),
+// toward a point jittered within clamp(0.005 range, 0.5, 2) units (lamp bulbs are small: the 2-12 unit soft-shadow sphere
+// blurred a body's shadow away a few metres from it). Weight: luma x N.L x falloff (baked: linear 1 - d/range; native: its D3D
+// attenuation and cone; sun: 1), at most 1. A blocked baked light counts only where the level geometry lets it reach the
+// receiver (else the lightmap holds none of it); the sun counts only there at all, so indoor levels get no sun shadow.
+// Darkness = SHADOW_ALPHA x min(occluded weight / strongest weight, 1): blocking the receiver's dominant light darkens it
+// like the original planar shadow, a weaker light gives a proportionally lighter shadow, and the shadow fades where even
+// the strongest light is faint (weight 0.02). Per pixel and frame: the dominant light, one other light picked in proportion
+// to its weight (it stands for all the others), and the sun. Each caster that darkened a pixel by at least half of
+// SHADOW_ALPHA counts it in casterPixels (per TLAS instance), which decides on the CPU whether its planar shadow is replaced.
+layout(set=0,binding=21,std430) buffer CasterPixels { uint casterPixels[]; };
+float actorWeight(int i,vec3 p,vec3 n,out vec3 L){
+    vec4 a=lightData[i*5],b=lightData[i*5+1],d=lightData[i*5+2],e=lightData[i*5+3],c=lightData[i*5+4];
+    vec3 delta=a.xyz-p;float distance=length(delta),attenuation=1.0;L=d.w==3.0?-d.xyz:delta/max(distance,0.0001);
+    if(d.w!=3.0&&b.a<0.0)attenuation=max(1.0-distance/max(a.w,0.0001),0.0);
+    else if(d.w!=3.0){attenuation=distance<=a.w?1.0/max(e.x+e.y*distance+e.z*distance*distance,0.0001):0.0;
+        if(d.w==2.0){float rho=dot(-L,d.xyz);attenuation*=rho>=c.x?1.0:rho<=c.y?0.0:pow((rho-c.y)/max(c.x-c.y,0.0001),e.w);}}
+    return min(luma(b.rgb*abs(b.a))*attenuation,1.0)*max(dot(n,L),0.0);
+}
+// Any alpha-tested (as the contact rays) SHADOW caster up to reach: its TLAS instance index, else -1.
+int casterHit(vec3 origin,vec3 direction,float reach){
+    if(reach<=0.001)return -1;
+    rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsTerminateOnFirstHitEXT,4,origin,0.001,direction,reach);
+    while(rayQueryProceedEXT(q))if(rayQueryGetIntersectionTypeEXT(q,false)==gl_RayQueryCandidateIntersectionTriangleEXT&&!rtAdditive(rayQueryGetIntersectionInstanceCustomIndexEXT(q,false),rayQueryGetIntersectionGeometryIndexEXT(q,false))&&rtHitColor(q,false).a>=0.5)rayQueryConfirmIntersectionEXT(q);
+    return rayQueryGetIntersectionTypeEXT(q,true)!=gl_RayQueryCommittedIntersectionNoneEXT?int(rayQueryGetIntersectionInstanceCustomIndexEXT(q,true)):-1;
+}
+// A point/spot light blocked by a caster: the caster instance, else -1. A baked light must also pass the level geometry;
+// native lights are D3D hardware lights that shine through walls (and often sit in wall fixtures, as in ev), so they need not.
+int lightCaster(int i,vec3 origin){
+    vec4 a=lightData[i*5];vec3 toward=a.xyz+sphereOffset()*clamp(a.w*0.005,0.5,2.0)-origin;float reach=length(toward);vec3 direction=toward/max(reach,0.0001);reach=max(reach-rtLightClearance,0.0);
+    int hit=casterHit(origin,direction,reach);return hit>=0&&(lightData[i*5+1].a>=0.0||rtVisibility(origin,direction,reach,1u)>=0.5)?hit:-1;
+}
 float actorShadow(vec3 origin,vec3 n){
-    float total=0.0,sunLight=0.0;int chosen=-1;vec3 sunL=vec3(0);
-    for(int j=0;j<int(g.actor.y);++j){int i=int(g.actor.x)+j;vec4 a=lightData[i*5],b=lightData[i*5+1],d=lightData[i*5+2];
-        bool sun=d.w==3.0;vec3 delta=a.xyz-origin;float distance=length(delta);vec3 L=sun?-d.xyz:delta/max(distance,0.0001);
-        float falloff=sun?1.0:max(1.0-distance/max(a.w,0.0001),0.0),c=luma(b.rgb*abs(b.a))*falloff*max(dot(n,L),0.0);if(c<=0.001)continue;
-        if(sun){sunLight=c;sunL=L;}else{total+=c;if(rnd()*total<c)chosen=i;}
-    }
-    float occluded=0.0,sunCaster=0.0;vec3 sunDirection=vec3(0);
-    if(chosen>=0){vec4 a=lightData[chosen*5];vec3 toward=a.xyz+sphereOffset()*clamp(a.w*0.03,2.0,12.0)-origin;float reach=length(toward);vec3 direction=toward/max(reach,0.0001);reach=max(reach-rtLightClearance,0.0);
-        float caster=1.0-rtVisibility(origin,direction,reach,4u);if(caster>0.0)occluded=total*caster*rtVisibility(origin,direction,reach,1u);}
-    if(sunLight>0.0){mat3 frame=basis(sunL);float r=g.sun.w*sqrt(rnd()),phi=6.2831853*rnd();sunDirection=normalize(frame*vec3(r*cos(phi),r*sin(phi),1.0));sunCaster=1.0-rtVisibility(origin,sunDirection,g.eye.w,4u);}
-    if(occluded<=0.0&&sunCaster<=0.0)return 1.0;
-    if(sunLight>0.0){sunLight*=rtVisibility(origin,sunDirection,g.eye.w,1u);total+=sunLight;occluded+=sunLight*sunCaster;}
-    return 1.0-g.actor.z*occluded/max(total,0.05);
+    float total=0.0,strongest=0.0,sunLight=0.0;int dominant=-1,sun=-1;vec3 L,sunL=vec3(0);
+    for(int j=0;j<int(g.actor.y);++j){int i=int(g.actor.x)+j;float c=actorWeight(i,origin,n,L);if(c<=0.001)continue;
+        if(lightData[i*5+2].w==3.0){sun=i;sunLight=c;sunL=L;continue;}
+        total+=c;if(c>strongest){strongest=c;dominant=i;}}
+    float rest=total-strongest,seen=0.0;int other=-1;
+    if(rest>0.001)for(int j=0;j<int(g.actor.y);++j){int i=int(g.actor.x)+j;if(i==dominant||i==sun)continue;float c=actorWeight(i,origin,n,L);if(c<=0.001)continue;seen+=c;if(rnd()*seen<c)other=i;}
+    int casters[3]=int[3](dominant>=0?lightCaster(dominant,origin):-1,other>=0?lightCaster(other,origin):-1,-1);
+    float occluded=(casters[0]>=0?strongest:0.0)+(casters[1]>=0?rest:0.0);vec3 sunDirection=vec3(0);
+    if(sun>=0){mat3 frame=basis(sunL);float r=g.sun.w*sqrt(rnd()),phi=6.2831853*rnd();sunDirection=normalize(frame*vec3(r*cos(phi),r*sin(phi),1.0));casters[2]=casterHit(origin,sunDirection,g.eye.w);}
+    if(occluded<=0.0&&casters[2]<0)return 1.0;
+    if(sun>=0){sunLight*=rtVisibility(origin,sunDirection,g.eye.w,1u);if(sunLight<=0.001)casters[2]=-1;else{strongest=max(strongest,sunLight);if(casters[2]>=0)occluded+=sunLight;}}
+    float darkness=g.actor.z*min(occluded/max(strongest,0.0001),1.0)*min(strongest/0.02,1.0);
+    if(darkness>=0.5*g.actor.z)for(int k=0;k<3;++k)if(casters[k]>=0&&uint(casters[k])<uint(casterPixels.length()))atomicAdd(casterPixels[casters[k]],1u);
+    return 1.0-darkness;
 }
 // rtReflection with the transmitted fraction returned separately (the receiving color is not known here).
 vec4 reflectionLayers(vec3 origin,vec3 direction,float maxDistance){

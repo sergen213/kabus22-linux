@@ -22,7 +22,7 @@ Honest list of what is not established or not implemented. See [PROGRESS.md](PRO
 ## Rendering
 
 - Nondefault stencil shadows, software world light and VIEW render-to-bitmap remain unsupported.
-- `shadows=rt` actor shadows (light-following, replacing the planar shadow in the primary view) fall only on lightmapped level surfaces, not on models or decals; where an actor's shadow belongs on a model it is simply absent ([RAYTRACING.md](RAYTRACING.md#limits)).
+- `shadows=rt` actor shadows (light-following; they replace a caster's planar shadow only where they are actually drawn) fall only on lightmapped level surfaces, not on models or decals ([RAYTRACING.md](RAYTRACING.md#limits)).
 - Ray tracing needs ray queries, acceleration structures, buffer device addresses, descriptor indexing and shader int64; 1024-material-sampler ceiling. Presets disable unsupported features with a notice; explicit `--renderer vulkan` / RT requests fail instead of falling back.
 - Bloom works in LDR thresholds when PBR/HDR is off, so bright white paper can glow like a light source.
 - FSR 3.1 (`fsr=...`, Vulkan): foreground VIEW entities start from cleared depth/stencil (the background depth is at the render size); view-space entities of the primary view share the camera motion and rely on the reactive mask. No frame generation.

@@ -1778,7 +1778,8 @@ void rt_reflection_checks(std::span<const std::byte> mix,std::span<const std::by
 
 // shadows=rt actor shadows (rt_signals.comp actorShadow): a SHADOW-flag model between a baked WMB light and a lightmapped
 // floor shadows the floor on the side away from the light, the shadow changes sides when the light does, and the caster's
-// fixed-direction planar shadow (drawn by default ray tracing, the positive control) is no longer drawn in that view.
+// fixed-direction planar shadow (drawn by default ray tracing, the positive control) is replaced once the GPU reports the
+// actor shadow drawn (two frames later). A caster without a light in range keeps its planar shadow.
 void rt_actor_shadow_checks() {
     using namespace k22;
     TempDirectory captures;
@@ -1803,6 +1804,7 @@ void rt_actor_shadow_checks() {
     // Floor points 22 units either side of the caster along x (screen vertical; 60 units half view), outside its silhouette;
     // 5x5 mean luma against the 1-sample stochastic signal.
     auto sides=[&](Renderer&renderer,const char*name){
+        for(int i=0;i<3;++i)renderer.draw(frame); // The caster feedback of a frame slot is read when the slot comes round again.
         const auto pixels=captured_pixels(renderer,frame,captures.path/name);const auto m=renderer.metrics();
         if(auto*keep=std::getenv("K22_CAPTURE_DIR"))std::filesystem::copy_file(captures.path/name,std::filesystem::path(keep)/name,std::filesystem::copy_options::overwrite_existing);
         auto mean=[&](float y){double sum=0;for(int dy=-2;dy<=2;++dy)for(int dx=-2;dx<=2;++dx){auto p=capture_pixel(pixels,m,.5f+dx/float(m.drawableWidth),y+dy/float(m.drawableHeight));sum+=.299*p[0]+.587*p[1]+.114*p[2];}return sum/25;};
@@ -1821,6 +1823,9 @@ void rt_actor_shadow_checks() {
     std::cout<<"RT actor shadow: planar control "<<control[0]<<"/"<<control[1]<<", light -x "<<left[0]<<"/"<<left[1]<<", light +x "<<right[0]<<"/"<<right[1]<<std::endl;
     if(!(shadowed(left,0)&&shadowed(right,1))&&!(shadowed(left,1)&&shadowed(right,0)))
         throw std::runtime_error("shadows=rt actor shadow does not follow the baked light, or the fixed planar shadow is still drawn");
+    lamp.range=10;
+    const auto unlit=sides(renderer,"actor-unlit.ppm");
+    if(!shadowed(unlit,shadowed(control,0)?0:1))throw std::runtime_error("shadows=rt removed a planar shadow without drawing an actor shadow");
 }
 
 // A moving, vertex-animated actor under a following camera with the full temporal stack (TAA, and RT shadows/GI/
@@ -1909,12 +1914,15 @@ void graphics_policy_checks() {
      auto up=project_ndc(cube_face_matrix(l,0,1,500),add(l,Vec3{100,50,0}));require(up.y<0,"GL cube +X face has world +Y at texel row 0 (NDC -Y)");}
     {std::vector<RenderLight>lights(5);lights[0].baked=true;lights[1].synthetic=true;lights[2].type=3;lights[3].position={1000,0,0};lights[4].position={50,0,0};lights[4].range=200;
      require(shadow_light_index(lights,{0,0,0})==4,"cube shadow follows the strongest nearby dynamic light");lights.resize(3);require(shadow_light_index(lights,{0,0,0})==-1,"no eligible shadow light");}
-    {std::vector<RenderLight>lights(42);lights[0].type=1;lights[1].synthetic=true;lights[1].type=3; // native point, hardware sun
-     for(std::size_t i=2;i<lights.size();++i){lights[i].baked=lights[i].synthetic=true;lights[i].position={float(1000-20*int(i)),0,0};lights[i].range=50;}
-     lights[2].range=2000; // far away, but its range reaches the camera
-     auto picked=actor_shadow_lights(lights,{0,0,0});
-     require(picked.size()==actorShadowLightLimit&&picked.back()==1&&picked.front()==2&&picked[1]==41&&std::ranges::find(picked,0u)==picked.end()&&std::ranges::find(picked,3u)==picked.end(),"actor shadows trace the baked lights nearest to the camera by range, then the sun");
-     lights.resize(1);require(actor_shadow_lights(lights,{0,0,0}).empty(),"native dynamic lights are not actor-shadow lights");}
+    {std::vector<RenderLight>lights(44);lights[0].type=1;lights[0].range=500;lights[1].synthetic=true;lights[1].type=3; // native point, hardware sun
+     lights[2].synthetic=true;lights[2].type=1; // a synthetic non-baked point is not a hardware light
+     lights[3].type=3;lights[3].range=500; // script directional light: no position
+     for(std::size_t i=4;i<lights.size();++i){lights[i].baked=lights[i].synthetic=true;lights[i].position={float(20*int(i)),0,0};lights[i].range=100;}
+     const std::array<Vec3,2>casters{{{0,0,0},{2000,0,0}}};
+     auto picked=actor_shadow_lights(lights,casters);
+     // Ranges that hold a caster: native point (gap -500) and baked lights at x 20i < 100 from the first caster.
+     require(picked==std::vector<std::uint32_t>{0,4,1},"actor shadows trace the lights whose range holds a caster, deepest first, then the sun");
+     require(actor_shadow_lights(lights,{}).empty(),"no SHADOW caster, no actor-shadow lights");}
     {std::array<Vec2,8>seen{};for(int i=0;i<8;++i){seen[i]=taa_jitter(i);require(std::abs(seen[i].x)<=.5f&&std::abs(seen[i].y)<=.5f,"jitter within one pixel");for(int j=0;j<i;++j)require(seen[i].x!=seen[j].x||seen[i].y!=seen[j].y,"8 distinct jitter offsets");}
      require(taa_jitter(8).x==seen[0].x&&std::abs(halton(1,2)-.5f)<1e-6f&&std::abs(halton(2,3)-2/3.f)<1e-6f&&std::abs(halton(4,3)-4/9.f)<1e-6f,"Halton(2,3) sequence");
      Camera c;auto vp=camera_matrix(c,16/9.f);auto j=jittered(vp,{.25f,-.5f},1920,1080);Vec3 p{200,30,10};auto a=project_ndc(vp,p),b=project_ndc(j,p);require(std::abs(b.x-a.x-.5f/1920)<1e-5f&&std::abs(b.y-a.y+1.f/1080)<1e-5f&&std::abs(b.z-a.z)<1e-6f,"jitter moves clip XY by whole sub-pixel offsets only");}
