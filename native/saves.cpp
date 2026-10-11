@@ -48,14 +48,16 @@ std::string now_utc(){auto t=std::chrono::system_clock::to_time_t(std::chrono::s
 std::string fnv1a64(std::span<const std::uint8_t> bytes){std::uint64_t h=0xcbf29ce484222325ull;for(auto b:bytes){h^=b;h*=0x100000001b3ull;}char text[17];std::snprintf(text,sizeof text,"%016llx",static_cast<unsigned long long>(h));return text;}
 std::string format_meta(const Meta& m){
  auto clean=[](std::string v){for(char& c:v)if(c=='\n'||c=='\r')c=' ';return v;};
- return "kabus22-save-meta "+std::to_string(m.format)+"\nengine="+clean(m.engine)+"\nwritten="+clean(m.written)+"\nentry="+clean(m.entry)+"\nscript="+clean(m.script)+"\norigin="+clean(m.origin)+"\n"+(m.position.empty()?"":"position="+clean(m.position)+"\n");
+ static constexpr std::array<std::string_view,3> characters{"demir","ebru","inzar"};
+ return "kabus22-save-meta "+std::to_string(m.format)+"\nengine="+clean(m.engine)+"\nwritten="+clean(m.written)+"\nentry="+clean(m.entry)+"\nscript="+clean(m.script)+"\norigin="+clean(m.origin)+"\n"+(m.position.empty()?"":"position="+clean(m.position)+"\n")+(m.character>=0&&m.character<3?"character="+std::string(characters[m.character])+"\n":"");
 }
 std::optional<Meta> parse_meta(std::string_view text){
  constexpr std::string_view magic="kabus22-save-meta ";Meta m;if(!text.starts_with(magic))return std::nullopt;
  auto line=text.substr(magic.size(),text.find('\n')-magic.size());auto [p,e]=std::from_chars(line.data(),line.data()+line.size(),m.format);if(e!=std::errc{}||p!=line.data()+line.size()||m.format<1)return std::nullopt;
  text=text.find('\n')==std::string_view::npos?std::string_view{}:text.substr(text.find('\n')+1);
  while(!text.empty()){auto end=text.find('\n');auto row=text.substr(0,end);text=end==std::string_view::npos?std::string_view{}:text.substr(end+1);if(row.empty())continue;auto eq=row.find('=');if(eq==std::string_view::npos)return std::nullopt;auto key=row.substr(0,eq);std::string value(row.substr(eq+1));
-  if(key=="engine")m.engine=value;else if(key=="written")m.written=value;else if(key=="entry")m.entry=value;else if(key=="script")m.script=value;else if(key=="origin")m.origin=value;else if(key=="position")m.position=value;} // Unknown keys: forward-compatible.
+  if(key=="engine")m.engine=value;else if(key=="written")m.written=value;else if(key=="entry")m.entry=value;else if(key=="script")m.script=value;else if(key=="origin")m.origin=value;else if(key=="position")m.position=value;
+  else if(key=="character")m.character=value=="demir"?0:value=="ebru"?1:value=="inzar"?2:-1;} // Unknown keys: forward-compatible.
  return m;
 }
 void write_meta(const fs::path& save,const Meta& m){auto text=format_meta(m);auto path=save;path+=".meta";write_atomic(path,std::span(reinterpret_cast<const std::uint8_t*>(text.data()),text.size()));}

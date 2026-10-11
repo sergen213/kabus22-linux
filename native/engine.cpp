@@ -679,6 +679,7 @@ void Engine::resolve_builtin_font(){
  bitmapImages.emplace(font.bits,image);if(sprite)bitmapImages.emplace(sprite.bits,std::move(image));
 }
 void Engine::configure_language(Runtime& runtime,std::string_view language,bool explicitChoice){
+ language_=std::string(language);
  // The widescreen catalog protocol extends the original options record by one byte.
  if(!runtime.function("load_subtitle"))return;
  // Patch DilMenu/dil_degistir DD_Dil: 0 TR, 1 EN, 2 DE, 3 ES, 4 RU, 5 PL (byte 32 of options.k22).
@@ -1032,6 +1033,7 @@ void Engine::tick(Runtime& runtime,const Input& in){ensure_font_palette(runtime.
  auto timeRaw=number("fps_lock")!=0?Value::from_double(16/std::max(1.0,number("fps_max"))).raw():frameRaw;auto minfps=std::max(1.0,number("fps_min"));timeRaw=std::clamp(timeRaw,51,std::max(51,Value::from_double(16/minfps).raw()));auto mul=[](std::int32_t a,std::int32_t b){auto n=std::int64_t(a)*b+512;auto q=n>=0?n/1024:-((-n+1023)/1024);return std::bit_cast<std::int32_t>(std::uint32_t(q));};timeRaw=mul(timeRaw,global("time_factor").raw());auto prior=global("time").raw();auto diff=std::bit_cast<std::int32_t>(std::uint32_t(prior)-std::uint32_t(timeRaw));timeRaw=std::bit_cast<std::int32_t>(std::uint32_t(timeRaw)+std::uint32_t(mul(diff,global("time_smooth").raw())));set_global("time",Value::from_raw(timeRaw));set_global("time_fac",Value::from_raw(0x100000/std::max(51,timeRaw)));
  if(renderer){auto m=renderer->metrics();currentWidth_=m.width;currentHeight_=m.height;set_vector(global_vector("screen_size"),{float(m.width),float(m.height),0});}
  if(nativeDisplay_&&(displayWidth_!=currentWidth_||displayHeight_!=currentHeight_))prepare_display();
+ if(state.profile==SemanticProfile::CampaignA6&&character_tick(runtime,in)){media.update();make_frame();character_overlay();console_overlay();return;}
  update_input(runtime);make_frame(state.profile!=SemanticProfile::BonusA7);if(renderer)for(auto& c:frame_.cameras)if(c.portalId&&!c.portalTarget)if(auto surface=Renderer::portal_surface(frame_,c,renderer->metrics())){set_field(c.sourceId,"portal_x",surface->position.x);set_field(c.sourceId,"portal_y",surface->position.y);set_field(c.sourceId,"portal_z",surface->position.z);set_field(c.sourceId,"pnormal_x",surface->normal.x);set_field(c.sourceId,"pnormal_y",surface->normal.y);set_field(c.sourceId,"pnormal_z",surface->normal.z);}
  if(state.profile==SemanticProfile::CampaignA6)update_ui(runtime);runtime.tick(timeRaw,global("freeze_mode").raw());if(!viewsPrepared_){prepare(runtime);viewsPrepared_=true;}
  console_tick(runtime); // native console cheats/quickload position; no-op unless used (native/console.cpp)
@@ -1048,6 +1050,7 @@ void Engine::tick(Runtime& runtime,const Input& in){ensure_font_palette(runtime.
  if(state.profile==SemanticProfile::CampaignA6){physics.step(runtime);update_first_person();}
  media.master_volume(number("sound_vol"),number("midi_vol"));media.update();auto camera=global("camera");if(camera.kind==Value::Kind::Object)media.listener(position(camera.bits),field(camera.bits,"pan"));make_frame();
  if(state.profile==SemanticProfile::BonusA7)update_ui(runtime);
+ if(state.profile==SemanticProfile::CampaignA6)character_overlay();
  console_overlay();
  if(state.profile==SemanticProfile::BonusA7&&pendingExit_){pendingExit_=false;quit=true;}
 }
@@ -1075,6 +1078,9 @@ const Input& Engine::skip_intro(Runtime& runtime,const Input& in){
 Value Engine::builtin(Runtime& runtime,ProcessContext& ctx,std::string_view name,std::span<const Argument> args){
  ensure_font_palette(runtime.compiler_settings().entry);
  display_admitted();
+ if(name=="k22_body_player")return Value::from_int(body_character());
+ if(name=="k22_menu_player")return Value::from_int(menu_character());
+ if(name=="k22_weapon_player")return Value::from_int(weapon_character());
  if(state.profile==SemanticProfile::BonusA7){
   auto count=[&](std::size_t n){if(args.size()!=n)throw std::runtime_error(std::string(name)+": invalid argument count");};
   auto numeric=[&](std::size_t i){auto v=args[i].current();if(v.kind!=Value::Kind::Number)throw std::runtime_error(std::string(name)+": numeric argument required");return v.raw();};
@@ -1377,7 +1383,7 @@ std::optional<Value> Engine::service_builtin(Runtime& runtime,ProcessContext&,st
   // GA_AyarlariKaydet writes the in-memory native tier; persist the user's authored GA_Cozunurluk instead.
   if(data.writable&&!data.bytes.empty()&&core_equal(data.output.filename().string(),"options.k22")&&display_admitted())data.bytes[0]=authoredResolution_;
   svc_flush(data);
-  if(data.writable&&saves::slot_number(data.output.filename().string())>=0){const auto& entry=runtime.compiler_settings().entry;if(!saveScriptKnown_){if(assets.contains(entry))saveScript_=saves::fnv1a64(assets.read(entry));saveScriptKnown_=true;}saves::write_meta(data.output,{saves::MetaFormat,K22_VERSION,saves::now_utc(),entry,saveScript_,"native",quickSaving?saved_position():""});}
+  if(data.writable&&saves::slot_number(data.output.filename().string())>=0){const auto& entry=runtime.compiler_settings().entry;if(!saveScriptKnown_){if(assets.contains(entry))saveScript_=saves::fnv1a64(assets.read(entry));saveScriptKnown_=true;}saves::write_meta(data.output,{saves::MetaFormat,K22_VERSION,saves::now_utc(),entry,saveScript_,"native",quickSaving?saved_position():"",characterLock});}
   files.erase(std::uint32_t(integer(0)));return Value{};}
  if(name=="file_asc_read"){count(1);auto& data=file();if(data.writable)throw std::runtime_error("file handle is write-only");if(data.cursor==data.bytes.size())return Value::from_int(-1);return Value::from_int(data.bytes[data.cursor++]);}
  if(name=="file_asc_write"){count(2);auto& data=file();auto byte=std::uint8_t(raw(1)>>10);svc_append(data,std::string_view(reinterpret_cast<const char*>(&byte),1));return Value::from_int(byte);}
@@ -2626,6 +2632,7 @@ void Engine::load_level(Runtime& runtime,std::string_view filename) {
  set_global("num_entities",Value::from_int(std::int32_t(std::count_if(entities.begin(),entities.end(),[](const auto& entry){return entry.second.scannable;}))));
  physics.load_world();
  if(state.profile==SemanticProfile::BonusA7){prepare(runtime);viewsPrepared_=true;level_progress(runtime,0);level_progress(runtime,1);}
+ if(state.profile==SemanticProfile::CampaignA6)apply_character_lock(runtime,actions);
  for(auto [id,action]:actions){auto* object=state.get(id);if(object&&object->alive)runtime.enqueue(action,{},id,0);}
 }
 }

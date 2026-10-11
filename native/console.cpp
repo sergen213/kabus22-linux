@@ -10,7 +10,7 @@
 namespace k22 {
 namespace {
 struct Command {std::string_view name,usage,help;};
-constexpr std::array<Command,18> commands{{
+constexpr std::array<Command,19> commands{{
  {"help","help [COMMAND]","list the commands, or show one command's usage"},
  {"save","save","quicksave (F5): writes the next slot of the game's own save list, plus the player position"},
  {"load","load [SLOT]","quickload (F9): loads the newest slot, or kayitSLOT.sav (0-98)"},
@@ -28,6 +28,7 @@ constexpr std::array<Command,18> commands{{
  {"fps","fps","toggle the frame-rate counter"},
  {"timescale","timescale [FACTOR]","print or set TIME_FACTOR (0.1-10, 1 = normal)"},
  {"clear","clear","clear the console"},
+ {"character","character [original|demir|ebru|inzar]","print or set the character lock (docs/CHARACTER_LOCK.md); applies from the next level entry"},
  {"quit","quit","exit the game immediately"},
 }};
 // Per Aktif_Player (0 Demir, 1 Ebru, 2 Inzar): health VAR and its new-game value (Yeni_Oyun_Deger.wdl Yeni_Oyun_Kolay:12-16).
@@ -58,8 +59,10 @@ std::string Engine::saved_position()const{
  auto p=live_player();if(!p)return {};auto v=position(p);
  return std::to_string(int(number("LY_AktifLevelID")))+' '+show(v.x)+' '+show(v.y)+' '+show(v.z)+' '+show(field(p,"pan"));
 }
+// A slot read is a load: its sidecar restores the quicksave position and the character lock (none: original, the body follows the
+// story); the loaded Aktif_Player is adopted without a switch prompt.
 void Engine::read_saved_position(const std::filesystem::path& slot){
- positionRestore.reset();auto meta=saves::read_meta(slot);if(!meta||meta->position.empty())return;
+ positionRestore.reset();auto meta=saves::read_meta(slot);characterLock=meta?meta->character:-1;switchPrompt_=-1;adoptStory_=true;if(!meta||meta->position.empty())return;
  std::istringstream in(meta->position);PositionRestore r;if(in>>r.level>>r.position.x>>r.position.y>>r.position.z>>r.pan&&r.level>0)positionRestore=r;
 }
 // YukleMenu.wdl LV_LevelKaydeta: SLG_LevelKaydet(Aktif_SaveNo,label) -> YD_OyunuKaydet -> SLG_Kaydet, the original slot writer and
@@ -99,7 +102,7 @@ std::string Engine::quickload(Runtime& runtime,int slot){
 }
 void Engine::console_tick(Runtime&){
  if(!god_&&!noclip_&&!positionRestore)return;
- const auto p=live_player();const int character=std::clamp(int(number("Aktif_Player")),0,2);
+ const auto p=live_player();const int character=body_character();
  // Damage lowers ENERJI (SKILL1) and the player loop compares it with the health VAR; keeping both at full undoes this frame's hits.
  if(god_&&p&&field(p,"skill1")>0){const auto max=healthMax[character];if(field(p,"skill1")<max)set_field(p,"skill1",max);if(number(healthVars[character])<max)set_global(healthVars[character],Value::from_double(max));}
  if(noclip_&&p){if(p!=noclipPlayer_)noclipPlayer_=p;if(!(flags(p)&512))set_field(p,"passable",1);}
@@ -201,8 +204,13 @@ std::string Engine::console_command(Runtime& runtime,std::string_view line){
    if(auto why=gameplay_blocked(runtime);!why.empty())return "Cannot change level now: "+why;
    set_global("LY_HedefLevel",Value::from_int(int(id)));return "Going to level "+std::to_string(id)+' '+wmb(id);
   }
+  if(c=="character"){
+   static constexpr std::array<std::string_view,4> choices{"original","demir","ebru","inzar"};
+   if(w.size()>1){auto it=std::find(choices.begin(),choices.end(),lower(w[1]));if(it==choices.end())return "character [original|demir|ebru|inzar]";if(state.profile!=SemanticProfile::CampaignA6)return "character applies to the campaign only";set_character_lock(int(it-choices.begin())-1);}
+   return "character "+std::string(choices[characterLock+1])+" (story: "+std::string(choices[story_character()+1])+")";
+  }
   // Player commands below need the player entity.
-  const auto p=live_player();const int character=std::clamp(int(number("Aktif_Player")),0,2);
+  const auto p=live_player();const int character=body_character();
   if(c!="god"&&c!="noclip"&&c!="give"&&c!="pos"&&c!="tp"&&c!="kill")return "unknown command '"+w[0]+"' (try help)";
   if(!p)return "no player entity";
   // ENERJI = SKILL1 and the health/weapon VARs are the campaign scripts' (oyuncu2.wdl:42, silah.wdl); Bonus uses its own.

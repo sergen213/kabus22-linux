@@ -111,7 +111,7 @@ int main(int argc,char** argv){try{
  engine.controller=k22::load_controller_config(std::cerr);if(engine.controller.modern)std::cerr<<"kabus22: controller mode modern (deadzone "<<engine.controller.deadzone<<", sensitivity "<<engine.controller.sensitivity<<", vibration "<<engine.controller.vibration<<")\n";
  if(bonus){state.compilerMacros.emplace("defmode_d3d","1");state.compilerMacros.emplace("defanti_"+std::to_string(bonusAnti),"1");}else{state.compilerMacros.emplace("defiae_d3d","1");state.compilerMacros.emplace("defses_"+audioLanguage,"1");}
  state.compilerMacros.emplace("defdil_"+language,"1");for(auto& d:defines)state.compilerMacros.insert_or_assign(d,"1");k22::Runtime runtime(state,[&](auto& r,auto& p,auto n,auto args){return engine.builtin(r,p,n,args);});runtime.load(entryName,source,[&](std::string_view name){assets.mount(name);});
- engine.initialize_plugins(runtime);
+ engine.initialize_plugins(runtime);engine.configure_characters(runtime);
  if(!bonus)engine.configure_language(runtime,language,explicitLanguage);
  if(cameraName=="first-person"){if(bonus||lower(entryName)=="k22widescreen.wdl")throw std::runtime_error("--camera first-person applies to the original campaign scripts (patched scripts provide their own F5 camera)");engine.cameraMode=k22::Engine::CameraMode::FirstPerson;}
  const bool originalCampaign=!bonus&&entry.empty()&&lower(entryName)=="k22.wdl";

@@ -26,6 +26,8 @@ public:
  const CompilerSettings& compiler_settings()const;
  std::size_t processes()const;
  bool running(FunctionId)const; // a live suspended process of this function is queued
+ // Native override: reads of GLOBAL in FUNCTIONS, and in the index of ARRAYS[...] anywhere, become the native call CALL(); returns the count.
+ std::size_t reroute_reads(std::string_view global,std::string_view call,std::span<const std::string_view> functions,std::span<const std::string_view> arrays={});
 private: struct Impl;std::unique_ptr<Impl> impl_;
 };
 }
