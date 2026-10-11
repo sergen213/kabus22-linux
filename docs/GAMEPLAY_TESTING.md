@@ -29,9 +29,9 @@ Related: [Gameplay systems](GAMEPLAY_SYSTEMS.md) · [Camera system](CAMERA_SYSTE
 | `joy N button B down\|up`, `joy N axis A V` | joystick 0/1, buttons 0-31, axes 0-5 in -1..1 |
 | `wait until COND [timeout N]` | default timeout 600 frames |
 | `assert COND`, `print EXPR`, `store NAME EXPR` | checks and logging; `@NAME` reads a stored value |
-| `$character`, `$prompt` | the native character lock (-1 original, 0-2) and the open story-switch prompt (the story's character, -1 closed); [CHARACTER_LOCK.md](CHARACTER_LOCK.md) |
+| `$character`, `$prompt`, `$health` | the native character lock (-1 original, 0-2), the open story-switch prompt (the story's character, -1 closed) and the played body's health variable (`oyn_yaralanma`, `ebru_yaralanma`, `koru_yaralanma`); [CHARACTER_LOCK.md](CHARACTER_LOCK.md) |
 | `set GLOBAL\|GLOBAL[i] EXPR` | writes a WDL VAR (or VAR array element) as a number, like a script assignment; used by the level sweep for `LY_AktifLevelID`/`LY_HedefLevel` |
-| `find NAME ACTION` | nearest live entity whose ACTION1 is ACTION, stored as `@NAME` |
+| `find NAME ACTION`, `find NAME enemy` | nearest live entity whose ACTION1 is ACTION, or the nearest visible live Dusmanmi (SKILL11 1) with SKILL1 above 0, stored as `@NAME` |
 | `list ACTION`, `list near R` | log entities running ACTION, or every live entity within R of the player with its file, PASSABLE/POLYGON/NARROW/FAT flags, box, angles, render flags, ALPHA, AMBIENT and FLOOR_DIST (finds action-less blockers, decal/light state) |
 | `walk-to @NAME\|X Y RADIUS [path] [run] [timeout N]` | greedy steering with the default arrow bindings, plus a blind sidestep when stuck. `path` first plans a route (below) and re-plans when stuck |
 | `route RADIUS X1 Y1 X2 Y2 … [run] [timeout N]` | walk-to through fixed waypoints, re-anchoring on the nearest one when knocked off |
@@ -43,13 +43,13 @@ Related: [Gameplay systems](GAMEPLAY_SYSTEMS.md) · [Camera system](CAMERA_SYSTE
 | `pad live` | whole file: real controller/joystick input passes through (rendered runs with a pad) |
 | `expect-exit [timeout N]` | last step: passes when the original scripts end the process (for example `CikisMenu.wdl` Exit) |
 
-`# continues: OTHER` in a scenario makes `run.cmake` reuse OTHER's private XDG tree without a fresh save import, so a sequence of files models restarts of one installation. `# mode: bonus` runs the file against `--mode bonus --data "<game>/Kabus 22 Mode"`.
+`# continues: OTHER` in a scenario makes `run.cmake` reuse OTHER's private XDG tree without a fresh save import, so a sequence of files models restarts of one installation. `# mode: bonus` runs the file against `--mode bonus --data "<game>/Kabus 22 Mode"`. `# character: demir|ebru|inzar` runs it with `--character` (it wins over `-DCHARACTER=`).
 
 **`path` planning** (`native/scenario.cpp plan()`, test-only, read-only engine queries): 8-neighbour A* over 24-unit cells. A cell's height is the floor under it (point `Engine::collide` trace) plus the player's own lift; an edge needs a climb or drop of at most 32 and a clear sweep of the player's own hull (`collide` with USE_BOX + IGNORE_PASSABLE, the flags `ent_move` uses) raised 16 units, which stands in for the scripted step-up of `dmr_yercekimi`. Cells are keyed by XY and a 48-unit height band, so stacked floors (kizic spiral stairs) are separate nodes; an entity goal must also be reached within 96 units of height. Each plan logs its waypoints (`planned N waypoints … via (x,y) …`). A failure reports the nearest reachable cell and the cell count. Ceiling: entities are taken as they stand when planning, and the 60000-cell cap bounds very open maps.
 
 `$movieframe` is `media_playing` of the full-screen movie (1-based decoded frame) and `$wall` is wall-clock seconds; together they measure movie timing.
 
-Expressions use `GLOBAL`, `GLOBAL[i]`, `GLOBAL.field`, `GLOBAL[i].field` (pointer words in VAR arrays work), `@stored`, `@stored.field`, the pseudo-field `.alive`, and the terms `$level` (last `level_load` file), `$frame`, `$movie` (a full-screen `media_play` is playing), `$count(ACTION)`, `$dist(@e)`, `$facing(@e)` (signed degrees, positive means turn left) and `$levelminz`/`$levelmaxz` (the loaded WMB's geometry bounds). `+`/`-` combine terms; `== != < <= > >=` compare; `&&` binds tighter than `||` (no parentheses, no `*`). Skill DEFINE aliases such as `Enerji` are not visible; use `skill1`.
+Expressions use `GLOBAL`, `GLOBAL[i]` (the index is itself an expression: `S_Kursun_Sayisi[@w]`, `NS_Nesneler[EM_CursorNesne+EM_NesneKafa]`), `GLOBAL.field`, `GLOBAL[i].field` (pointer words in VAR arrays work), `@stored`, `@stored.field`, the pseudo-field `.alive`, and the terms `$level` (last `level_load` file), `$frame`, `$movie` (a full-screen `media_play` is playing), `$count(ACTION)`, `$dist(@e)`, `$facing(@e)` (signed degrees, positive means turn left) and `$levelminz`/`$levelmaxz` (the loaded WMB's geometry bounds). `+`/`-` combine terms; `== != < <= > >=` compare; `&&` binds tighter than `||` (no parentheses, no `*`). Skill DEFINE aliases such as `Enerji` are not visible; use `skill1`.
 
 **`load-save` justification:** it presses the original keys through `AnaMenu` cursor 1 and the `YukleMenu` cursor (`YUM_Cursor+YUM_Kafa`). The original `Yukleme_Kontrol` then runs `YD_OyunuYukle("kayitN.sav")` and sets `LY_HedefLevel` (`YukleMenu.wdl:318-343`). No engine shortcut is involved.
 

@@ -41,6 +41,12 @@ Native rules when locked (`native/character.cpp`):
    - Inzar uses her sword and spells and never reads `Aktif_Silah`.
 4. **Switch prompt** (`Engine::character_tick`, top of `Engine::tick`). A change of the story's `Aktif_Player` during play opens the prompt and pauses the scripts (no script tick, the frame and sound continue). New Game (`YeniOyunBaslat` running) and slot loads adopt the story value silently until the next level entry.
 5. **Console health and god mode** use the body's health variable (`oyn_yaralanma`, `ebru_yaralanma`, `koru_yaralanma`).
+6. **Control gate.** Demir's and Ebru's actions (`oyuncu2.wdl`, `oyuncu2_ebru.wdl`) stop on `oyuncu_pasif`, Inzar's and her spells (`koruyucu.wdl`, `koru_buyuler.wdl`) on `koruyucu_pasif`; no body action writes its gate. The scripted fights release only the story character's gate (Lain `kotu_koruyucu.wdl:6486` and Seytan's intro `cinematic.wdl:9050` only `koruyucu_pasif`, the final boss `boss.wdl:896` only `oyuncu_pasif`). Locked, every gate read in those files becomes `k22_body_*_pasif()`, the story character's gate (unlocked: the variable itself). A body therefore also stands still in the other story's cutscenes.
+7. **Boss fights for a gun body** (Lain and Seytan are Inzar's fights in the story):
+   - Bullet hits (`silah.wdl Ates_Et:651-658`) read `kan_mertip[3*(you.skill2-1)+n]` by enemy type 1-6. Lain (`kotukoru_ai`) and Seytan (`devil_ai`) set no type and would index -2, so they get type 1 at placement (all six rows are equal; `skill2` is otherwise only compared with 4).
+   - Lain's hit reaction (`Kotukoru_Yaralan`) branches on the attack kind in `skill3`: Inzar's kinds and firearm 2. Any other gun fell through, ended Lain's AI below 0 Enerji and stopped the story. Locked, `Ates_Et:680` (`you.skill3=aktif_silah`) records kind 2 for Lain (`k22_bullet_hit_kind`, `Runtime::reroute_assigned_read`).
+   - Seytan's attacks on the player use globals that only Inzar's action answers (`koruyucu.wdl:1619-1887`): the floor logo (`seytan_logo_aktif`, `one_vurusu_aktif` 4) pulls her into a dash strike, a swing or the black blast (5) knocks her back for 12/24, the fire breath (3) knocks her back. While the logo is set Seytan cannot die (`seytan.wdl:958`). For a gun body both are cleared every frame (`Engine::character_tick`).
+   - Demir's story poses the player through `oy_Oynat`/`Hareket_Hizi` (Demir's 8-entry weapon tables; Buyukes after Lain, `cinematic.wdl`, `BUL_Saat.wdl`). An Ebru body holding her magnum (8) indexed past them; those reads see the pistol (1) (`k22_pose_weapon`).
 
 ## Inventory of character dependences (ISO scripts)
 
@@ -107,7 +113,11 @@ All headless unless noted (`docs/GAMEPLAY_TESTING.md`):
 - `character_ebru_new_game`: selector (Right twice), Demir's opening as Ebru, Demir-only magazine pickups, the crowbar refused as in the story, Demir's pistol chosen in the original inventory and fired, grenade refused, quicksave/quickload keeps the lock (`character=ebru`).
 - `character_inzar_crowbar`: Ebru's crowbar chain played by Inzar (Sd, Start4, item 16, Kk door pried, `v_ebrukanirt_ok`).
 - `character_switch_prompt`: prompt opens on a story write, scripts paused, keep and switch both work, the next level places the chosen body.
-- With `run.cmake -DCHARACTER=ebru|inzar`: `world_item_combine`, `quicksave1_roundtrip`, `quicksave2_restart`, `demir_level5_camera` and `combat_kriz_game_over` pass for both, `combat_kriz_aa_gun` for Inzar. The other runs stop at assertions written for Demir's body (`oyn_yaralanma`, `koruyucu_pasif`) or at harness steering (`walk-to`/`route` timeouts with Ebru's and Inzar's movement), not at script errors.
+- With `run.cmake -DCHARACTER=ebru|inzar`: `world_item_combine`, `quicksave1_roundtrip`, `quicksave2_restart`, `demir_level5_camera` and `combat_kriz_game_over` pass for both, `combat_kriz_aa_gun` for Inzar. The other runs stop at assertions written for Demir's body (`oyn_yaralanma`, `koruyucu_pasif`) or at harness steering (`walk-to`/`route` timeouts with Ebru's and Inzar's movement), not at script errors. They were not adapted yet (`$health` now gives the body's health variable).
+- Boss fights (`# character:` scenarios in `gameplay_scenarios`), headless, fixed seed:
+  - `character_boss_lain_demir`, `character_boss_lain_ebru`: Lain killed with the story's firearm, `lain_sona_erdi`, the switch prompt kept Ebru, Buyukes with the locked body, Buyukes autosave.
+  - `character_boss_seytan_demir`, `character_boss_seytan_ebru`: Tnel13 → Seytan_k, shotgun from the inventory, energy items between rounds (10 and 7 used), Seytan killed, story switch to Ebru (prompt kept Demir), wake-up movie, Ebrudus with the locked body.
+  - Final boss (`boss.wmb`, Demir's fight) as Ebru and Inzar: **not established.** Ebru (shotgun, `find NAME enemy` targeting, energy items) kills the summoned creatures until `boss_oyun_mode` 1 and `boss_yarasayi` 0 at about frame 13000 (seed 0), then the engine stops advancing frames at frame 18828 while she fires at the boss (reproducible; no backtrace, ptrace is restricted). Inzar cannot melee the boss without standing in its shield (`boss.wdl boss_kalkan`: 2·TIME health per tick within 160 of (311,131)), her spell menu is not offered in Demir's story, and her ranged spell 4 costs 23 mana for 10 damage against about 1000 needed. The end itself (`ebruboss_ol` → `gaile_kullan_ok`, item 38 used → `v_oyunsonu_basla`) has no character gate.
 - On the desktop (`DISPLAY=:0`, OpenGL 1280x720): the three `character_*` scenarios pass with captures of the selector, Ebru at Start4's burning car, the switch prompt, and Inzar at Start4 and the Kk cutscene.
 
 ## Limitations
@@ -116,3 +126,6 @@ All headless unless noted (`docs/GAMEPLAY_TESTING.md`):
 - Demir's "it's locked" voice line and other story voice lines are not replaced for another body.
 - Ebru fires the story's firearms with her magnum pose. Weapon models are not attached to her hand.
 - The question at a story switch appears when the story writes the new character, usually just before the transition's fade.
+- Seytan's swings and black blast hurt Inzar only through her own reaction, so a gun body takes no damage from them (its fire breath and fireballs still hurt).
+- After an energy item, Ebru cannot reload until she is hit again (`oyuncu2_ebru.wdl:1684` reloads only while `ebru_yaralanma==my.enerji`; `KuBiGoMenu.wdl:144` raises `player.skill1` only). This is the original script; it applies in her own story too.
+- An energy item caps health at 100 (`KuBiGoMenu.wdl:144`), below Inzar's 200.

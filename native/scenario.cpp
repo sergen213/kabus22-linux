@@ -263,9 +263,12 @@ bool Scenario::step(Engine& engine,Runtime& runtime,Renderer* renderer,Input& in
     else{s.keys.set(left,f>band);s.keys.set(right,f< -band);s.keys.set(up,!turn&&std::fabs(f)<60);s.keys.set(run,!turn&&step.down);}
     ++s.progress;s.apply(in);return true;}
    case Op::Find:{
-    auto action=runtime.function(step.condition);ObjectId best=0;double bestDistance=0;Eval near{engine,runtime,s.stored,frame,{}};
-    for(const auto& [id,data]:engine.entities)if(runs(engine,id,action)){auto d=near.player()?near.dist(id):0;if(!best||d<bestDistance){best=id;bestDistance=d;}}
-    if(!best){++s.failed;s.report(step,"FAIL",frame,action?"no live entity runs this action":"unknown action");s.aborted=true;break;}
+    // find NAME enemy: the nearest visible live Dusmanmi (SKILL11 1, klasik_yara.wdl:61) with Enerji (SKILL1) above 0.
+    const bool enemy=step.condition=="enemy";auto action=enemy?FunctionId{}:runtime.function(step.condition);ObjectId best=0;double bestDistance=0;Eval near{engine,runtime,s.stored,frame,{}};
+    for(const auto& [id,data]:engine.entities){const auto* o=engine.state.get(id);
+     if(enemy?!(o&&o->alive&&id!=near.player()&&engine.field(id,"skill11")==1&&engine.field(id,"skill1")>0&&engine.field(id,"invisible")==0):!runs(engine,id,action))continue;
+     auto d=near.player()?near.dist(id):0;if(!best||d<bestDistance){best=id;bestDistance=d;}}
+    if(!best){++s.failed;s.report(step,"FAIL",frame,enemy?"no live enemy":action?"no live entity runs this action":"unknown action");s.aborted=true;break;}
     s.stored[step.name]={false,double(best),{}};++s.passed;s.report(step,"PASS",frame,"entity "+std::to_string(best)+" at distance "+std::to_string(int(bestDistance)));s.next();break;}
    case Op::List:{
     const bool nearby=step.condition=="near";auto action=nearby?FunctionId{}:runtime.function(step.condition);Eval near{engine,runtime,s.stored,frame,{}};std::ostringstream o;int n=0;
