@@ -17,6 +17,7 @@ press Right
 press Right
 # Left/Right do not move the original NORMAL/HARD cursor.
 assert YM_Cursor == 0
+capture selector_ebru
 press Return
 frames 300
 press Space
@@ -31,6 +32,7 @@ assert Aktif_Player == 0
 assert $count(Oyuncu_Ebru) == 1 && $count(Oyuncu_Demir) == 0
 assert player.skill1 == 100 && ebru_yaralanma == 100
 assert $prompt == -1
+capture ebru_start4
 # Magazines on the dead soldiers (unic 51, 52): Demir's gate (aktif_player==0) passes, the story is Demir's.
 store mg Kursun_Sayisi[3]
 walk-to -1383 404 20 timeout 900
@@ -64,6 +66,7 @@ down S
 wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 600
 store rounds S_Kursun_Sayisi[1]
 press-until D S_Kursun_Sayisi[1] < @rounds timeout 600
+capture ebru_fires_pistol
 up S
 wait until silah_kaldir == 0 timeout 900
 # Grenades are thrown by Demir's action only: Ebru keeps her firearm.
@@ -86,6 +89,7 @@ press-until Return $movie == 0 && LY_AktifLevelID == 1 && level_yuklendi_ok == 1
 wait until LY_AktifLevelID == 1 && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
 frames 2
 assert $character == 1 && Aktif_Player == 0
+capture ebru_reloaded
 assert $count(Oyuncu_Ebru) == 1 && $count(Oyuncu_Demir) == 0
 assert player.x > @x - 1 && player.x < @x + 1 && player.y > @y - 1 && player.y < @y + 1
 assert unic_obje_dizi[51] == 1 && unic_obje_dizi[52] == 1 && unic_obje_dizi[10] == 0

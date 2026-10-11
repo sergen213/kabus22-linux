@@ -26,6 +26,7 @@ wait until LY_HedefLevel == 0 && level_yuklendi_ok == 1 && koruyucu_pasif == 0 &
 assert $level == "start4.wmb" && Aktif_Player == 1
 assert $count(oyuncu_koruyucu) == 1 && $count(Oyuncu_Ebru) + $count(Oyuncu_Demir) == 0
 assert koru_efektbas_ok == 1
+capture inzar_start4
 store n0 NS_NesneSayisi
 walk-to -338 175 20 path run timeout 4000
 route 20 -169 182 -42 160 156 195 206 230 run timeout 4000
@@ -54,6 +55,8 @@ press Return
 wait until EM_Bolge == 7 && EM_CursorKuBiGo == 0 timeout 300
 press Return
 wait until v_ebrukanirt_start == 1 timeout 300
+frames 60
+capture kk_kanirt_cutscene
 wait until v_ebrukanirt_ok == 1 timeout 6000
 wait until oyuncu_pasif == 0 && koruyucu_pasif == 0 timeout 3000
 assert Aktif_Player == 1 && $count(oyuncu_koruyucu) == 1 && player != 0

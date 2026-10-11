@@ -14,6 +14,7 @@ assert $character == 0 && $prompt == -1
 set Aktif_Player 1
 frames 2
 assert $prompt == 1
+capture switch_prompt
 # Paused: a held turn key does not turn the player (Up/Down move the prompt cursor).
 store pan player.pan
 down Left
