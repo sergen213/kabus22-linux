@@ -59,7 +59,7 @@ struct Eval {
    if(name=="dist"||name=="facing"){if(!take("(")||!take("@"))fail("expected (@name)");auto v=stored_term();if(!take(")"))fail("expected )");auto id=ObjectId(v.number);return {false,name=="dist"?dist(id):facing(id),{}};}
    fail("unknown $"+name);}
   auto name=ident();auto it=engine.state.globals.find(name);if(it==engine.state.globals.end())fail("unknown WDL global "+name);Value v=it->second.value;
-  if(take("[")){space();std::size_t index=0;if(take("@"))index=std::size_t(stored_term().number);else{auto b=p;while(p<s.size()&&std::isdigit(static_cast<unsigned char>(s[p])))++p;index=std::stoul(std::string(s.substr(b,p-b)));}if(!take("]"))fail("expected ]");auto* o=v.kind==Value::Kind::Object?object(v.bits):nullptr;if(!o||index>=o->array.size())fail(name+"["+std::to_string(index)+"] is not an array element");v=o->array[index].value;}
+  if(take("[")){auto i=sum();if(i.text||i.number<0)fail("bad index");const auto index=std::size_t(i.number);if(!take("]"))fail("expected ]");auto* o=v.kind==Value::Kind::Object?object(v.bits):nullptr;if(!o||index>=o->array.size())fail(name+"["+std::to_string(index)+"] is not an array element");v=o->array[index].value;}
   // WDL VAR arrays carry pointers as raw words (Number bits), globals as Object handles.
   if(take("."))return {false,field(v.bits,ident()),{}};
   if(v.kind==Value::Kind::Object)if(auto* o=object(v.bits);o&&o->kind==Object::Kind::String)return {true,0,o->text};

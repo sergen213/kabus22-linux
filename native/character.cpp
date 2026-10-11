@@ -120,6 +120,13 @@ bool Engine::character_tick(Runtime& runtime,const Input& in){
  }
  if(switchPrompt_<0){
   character_weapons(runtime,false);
+  // Seytan's attacks on the player go through globals that only Inzar's action answers (koruyucu.wdl:1619-1887): its floor logo
+  // (efect2.wdl buyu_seytanlogo:5008, seytan_logo_aktif=1, one_vurusu_aktif=4) pulls her into a dash strike, a swing or the black
+  // blast (one_vurusu_aktif=5) knocks her back for 12/24 health, the fire breath (3) knocks her back (its damage is direct,
+  // seytan.wdl:391); each reaction then clears one_vurusu_aktif and seytan_logo_aktif. While the logo is set Seytan cannot die
+  // (seytan.wdl:958 Seytan_Ol holds it at Enerji 1 in Seytan_BuyuBekle). A gun body has none of these reactions: they are cleared
+  // at once (no strike, no knock-back; the swing costs nothing, docs/CHARACTER_LOCK.md Limitations).
+  if(characterLock>=0&&characterLock!=2&&(number("seytan_logo_aktif")!=0||number("one_vurusu_aktif")!=0)){set_global("seytan_logo_aktif",Value{});set_global("one_vurusu_aktif",Value{});}
   if(characterLock<0||adoptStory_||storyAtLevel_<0)return false;
   const int s=story_character();if(s==storyAtLevel_)return false;
   storyAtLevel_=s;if(s==characterLock)return false;
