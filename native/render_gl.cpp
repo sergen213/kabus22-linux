@@ -1195,7 +1195,7 @@ void GLBackend::purge_model(const Model*model){
         if(material.lightmap&&material.lightmap.use_count()==1)purge_image(material.lightmap.get());
     }
 }
-void GLBackend::release_scene(){
+void GLBackend::release_scene(const Model* keep){(void)keep; // TODO-door
     auto&i=*impl_;
     i.drain_completion();
     i.retainedColorValid=i.portalColorValid=false;

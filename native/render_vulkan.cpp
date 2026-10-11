@@ -519,7 +519,8 @@ void VulkanBackend::draw(const RenderFrame& frame,WindowMetrics metrics) {
 void VulkanBackend::capture(std::string_view path,WindowMetrics metrics)const{state_->readback(path,metrics);}
 void VulkanBackend::drain(){state_->drain();}
 void VulkanBackend::invalidate(){state_->invalidate();}
-void VulkanBackend::release_scene(){state_->drain();vk22::raster_release(*state_->raster);vk22::rt_release(*state_->rays);state_->retainedColorValid=false;state_->portalColorValid=false;}
+void VulkanBackend::release_scene(const Model* keep){(void)keep; // TODO-door
+state_->drain();vk22::raster_release(*state_->raster);vk22::rt_release(*state_->rays);state_->retainedColorValid=false;state_->portalColorValid=false;}
 void VulkanBackend::purge_model(const Model* model) {
     state_->drain();
     vk22::raster_purge_model(*state_->raster,model);
