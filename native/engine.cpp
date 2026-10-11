@@ -655,7 +655,7 @@ static double legacy_particle_quants(double arc,int width){
  const int shift=14-int((width-1)/320.0+.5);
  return std::ldexp(1.0,15-shift)*2*std::tan(std::clamp(std::abs(arc),1.0,175.0)*std::numbers::pi/360)/width;
 }
-static bool core_equal(std::string_view a,std::string_view b){return !CaseLess{}(a,b)&&!CaseLess{}(b,a);}
+static bool core_equal(std::string_view a,std::string_view b){return case_equal(a,b);}
 static const NativeMask* core_mask(Object::Kind kind,std::string_view name,SemanticProfile profile){if(kind==Object::Kind::Particle)kind=Object::Kind::Entity;
  if(profile==SemanticProfile::BonusA7&&kind==Object::Kind::View&&core_equal(name,"NOENTITIES")){static constexpr NativeMask noEntities{Object::Kind::View,"NOENTITIES","flags",0x10000u};return &noEntities;}
  if(profile==SemanticProfile::BonusA7&&(kind==Object::Kind::Panel||kind==Object::Kind::Text)&&core_equal(name,"FILTER")){
@@ -1035,12 +1035,12 @@ void Engine::tick(Runtime& runtime,const Input& in){ensure_font_palette(runtime.
  update_input(runtime);make_frame(state.profile!=SemanticProfile::BonusA7);if(renderer)for(auto& c:frame_.cameras)if(c.portalId&&!c.portalTarget)if(auto surface=Renderer::portal_surface(frame_,c,renderer->metrics())){set_field(c.sourceId,"portal_x",surface->position.x);set_field(c.sourceId,"portal_y",surface->position.y);set_field(c.sourceId,"portal_z",surface->position.z);set_field(c.sourceId,"pnormal_x",surface->normal.x);set_field(c.sourceId,"pnormal_y",surface->normal.y);set_field(c.sourceId,"pnormal_z",surface->normal.z);}
  if(state.profile==SemanticProfile::CampaignA6)update_ui(runtime);runtime.tick(timeRaw,global("freeze_mode").raw());if(!viewsPrepared_){prepare(runtime);viewsPrepared_=true;}
  console_tick(runtime); // native console cheats/quickload position; no-op unless used (native/console.cpp)
- if(global("freeze_mode").raw()<1&&global("debug_mode").raw()<1){const std::size_t particleCount=activeParticles.size();for(std::size_t i=0;i<particleCount&&i<activeParticles.size();++i){auto pd=activeParticles[i];auto* o=state.get(pd.object);if(!o||!o->alive)continue;
+ if(global("freeze_mode").raw()<1&&global("debug_mode").raw()<1){const std::uint32_t moveMask=core_mask(Object::Kind::Particle,"move",state.profile)->mask;const std::size_t particleCount=activeParticles.size();for(std::size_t i=0;i<particleCount&&i<activeParticles.size();++i){auto pd=activeParticles[i];auto* o=state.get(pd.object);if(!o||!o->alive)continue;
  auto integrate=[&](std::string_view p,std::string_view velocity){auto& a=o->field(p).value;auto b=o->field(velocity).value.raw();a=Value::from_raw(std::bit_cast<std::int32_t>(a.bits+std::uint32_t(mul(b,timeRaw))));};
  if(pd.legacy){set_global("my_age",pd.first?Value{}:Value::from_raw(std::bit_cast<std::int32_t>(global("total_ticks").bits-std::uint32_t(pd.birthTick))));set_vector(global_vector("my_pos"),position(pd.object));set_vector(global_vector("my_speed"),{float(field(pd.object,"vel_x")),float(field(pd.object,"vel_y")),float(field(pd.object,"vel_z"))});set_vector(global_vector("my_color"),{float(field(pd.object,"blue")),float(field(pd.object,"green")),float(field(pd.object,"red"))});for(auto [g,f]:{std::pair{"my_size","size"},std::pair{"my_alpha","alpha"},std::pair{"my_flare","flare"},std::pair{"my_transparent","transparent"},std::pair{"my_bright","bright"}})set_global(g,Value::from_double(field(pd.object,f)));set_global("my_map",o->field("bmap").value);set_global("my_action",o->field("function").value);
  auto fn=global("my_action");if(fn.kind==Value::Kind::Function)runtime.start(fn.bits,{},0,0);o=state.get(pd.object);if(!o||!o->alive)continue;fn=global("my_action");if(!fn.bits){runtime.kill_for_entity(pd.object);state.retire(pd.object);continue;}o->field("function").value=fn;o->field("bmap").value=global("my_map");set_position(pd.object,vector(global_vector("my_pos")));auto speed=vector(global_vector("my_speed"));set_field(pd.object,"vel_x",speed.x);set_field(pd.object,"vel_y",speed.y);set_field(pd.object,"vel_z",speed.z);auto color=vector(global_vector("my_color"));set_field(pd.object,"blue",color.x);set_field(pd.object,"green",color.y);set_field(pd.object,"red",color.z);for(auto [g,f]:{std::pair{"my_size","size"},std::pair{"my_alpha","alpha"},std::pair{"my_flare","flare"},std::pair{"my_transparent","transparent"},std::pair{"my_bright","bright"}})set_field(pd.object,f,number(g));integrate("x","vel_x");integrate("y","vel_y");integrate("z","vel_z");if(i<activeParticles.size()&&activeParticles[i].object==pd.object)activeParticles[i].first=false;
- }else {auto fn=callback(pd.object,"function");if(fn)runtime.start(fn,{},pd.object,0);o=state.get(pd.object);if(!o||!o->alive)continue;auto& lifespan=o->field("lifespan").value;if(lifespan.raw()<1){runtime.kill_for_entity(pd.object);state.retire(pd.object);continue;}lifespan=Value::from_raw(std::bit_cast<std::int32_t>(lifespan.bits-std::uint32_t(timeRaw)));if(field(pd.object,"move")){integrate("x","vel_x");integrate("y","vel_y");integrate("z","vel_z");auto& vz=o->field("vel_z").value;vz=Value::from_raw(std::bit_cast<std::int32_t>(vz.bits-std::uint32_t(mul(o->field("gravity").value.raw(),timeRaw))));}}
- if(o->alive)o->field("flags").value=Value::from_raw(std::bit_cast<std::int32_t>(o->field("flags").value.bits&~0x01000000u));
+ }else {auto fn=callback(pd.object,"function");if(fn)runtime.start(fn,{},pd.object,0);o=state.get(pd.object);if(!o||!o->alive)continue;auto& lifespan=o->field("lifespan").value;if(lifespan.raw()<1){runtime.kill_for_entity(pd.object);state.retire(pd.object);continue;}lifespan=Value::from_raw(std::bit_cast<std::int32_t>(lifespan.bits-std::uint32_t(timeRaw)));if(o->field("flags").value.bits&moveMask){integrate("x","vel_x");integrate("y","vel_y");integrate("z","vel_z");auto& vz=o->field("vel_z").value;vz=Value::from_raw(std::bit_cast<std::int32_t>(vz.bits-std::uint32_t(mul(o->field("gravity").value.raw(),timeRaw))));}}
+ if(o->alive){auto& particleFlags=o->field("flags").value;particleFlags=Value::from_raw(std::bit_cast<std::int32_t>(particleFlags.bits&~0x01000000u));}
  }}
  std::erase_if(activeParticles,[&](const auto& p){auto* o=state.get(p.object);return !o||!o->alive;});set_global("num_particles",Value::from_int(std::int32_t(activeParticles.size())));
  if(state.profile==SemanticProfile::BonusA7){if(pendingLevelLoad&&!pendingExit_){auto next=std::move(pendingLevel);pendingLevelLoad=false;load_level(runtime,next);}update_query_actors(runtime);}
@@ -1178,7 +1178,7 @@ Value Engine::builtin(Runtime& runtime,ProcessContext& ctx,std::string_view name
 namespace k22 {
 namespace {
 constexpr double svc_pi=std::numbers::pi;
-bool svc_equal(std::string_view a,std::string_view b){return !CaseLess{}(a,b)&&!CaseLess{}(b,a);}
+bool svc_equal(std::string_view a,std::string_view b){return case_equal(a,b);}
 std::filesystem::path svc_relative(std::string_view name){
  std::string normalized(name);for(char& c:normalized){if(c=='\\')c='/';else if(c>='A'&&c<='Z')c+=32;}
  std::filesystem::path path(normalized);if(path.empty()||path.is_absolute()||path.filename().empty()||path.filename()=="."||normalized.find(':')!=std::string::npos)throw std::runtime_error("invalid private file name");
@@ -1844,12 +1844,19 @@ Engine::Hit Engine::collide_legacy(Vec3 start,Vec3 end,std::uint32_t mode,Object
  if(best.status&1)best.fraction=0;
  else{
   const auto sweptMin=wSub(wAdd(wMin(start,end),queryMin),{1,1,1}),sweptMax=wAdd(wAdd(wMax(start,end),queryMax),{1,1,1});
-  for(const auto* object:state.handles){
-   if(!object||!object->alive)continue;const auto id=object->id;const auto found=entities.find(id);
-   if(found==entities.end()||!found->second.scannable||!found->second.model||found->second.type==0||field(id,"view")!=0||id==ignore||((mode&2)&&id==you))continue;
-   const auto& data=found->second;if(movement&&data.legacyPushEpoch==legacyMoveEpoch_)continue;const auto f=flags(id);const bool pass=(f&512)!=0;
-   if((!movement&&(mode&512)&&actor&&field(id,"push")<field(actor,"push"))||((mode&4)&&pass)||((mode&0x100000)&&(f&256))||((mode&8)&&pass&&data.type!=4))continue;
+  // Candidates in birth (handle) order. Cheap EntityData filters run before any field lookup: scanning the whole
+  // handle ledger (every object ever born) per trace made shell-casing traces cost O(objects) each.
+  auto& candidates=collideScratch_;candidates.clear();
+  for(const auto& [id,data]:entities){
+   if(!data.scannable||!data.model||data.type==0||id==ignore||((mode&2)&&id==you)||(movement&&data.legacyPushEpoch==legacyMoveEpoch_))continue;
    if(((mode&128)&&data.type==4)||((mode&16)&&data.type==2)||((mode&32)&&data.type==1)||((mode&256)&&data.type==5))continue;
+   const auto* object=state.get(id);if(object&&object->alive&&field(id,"view")==0)candidates.push_back(id);
+  }
+  std::sort(candidates.begin(),candidates.end());
+  for(const ObjectId id:candidates){
+   const auto& data=entities.find(id)->second;
+   const auto f=flags(id);const bool pass=(f&512)!=0;
+   if((!movement&&(mode&512)&&actor&&field(id,"push")<field(actor,"push"))||((mode&4)&&pass)||((mode&0x100000)&&(f&256))||((mode&8)&&pass&&data.type!=4))continue;
    const auto pos=position(id);
    Vec3 lo=wAdd(pos,{float(field(id,"min_x")),float(field(id,"min_y")),float(field(id,"min_z"))}),hi=wAdd(pos,{float(field(id,"max_x")),float(field(id,"max_y")),float(field(id,"max_z"))});
    if(sweptMin.x>hi.x||sweptMin.y>hi.y||sweptMin.z>hi.z||sweptMax.x<lo.x||sweptMax.y<lo.y||sweptMax.z<lo.z)continue;
@@ -2870,7 +2877,9 @@ void Engine::make_frame(bool mouseOutput){
  };
  const auto pointFalloff=vector(global_vector("D3D_POINTLIGHTFALLOFF")),spotFalloff=vector(global_vector("D3D_SPOTLIGHTFALLOFF")),spotCone=vector(global_vector("D3D_SPOTLIGHTCONE"));
  // handles is State's retained birth ledger; reclaimed deque payload positions are not birth order.
- for(const auto* objectPtr:state.handles){if(!objectPtr||!objectPtr->alive)continue;const auto& object=*objectPtr;auto found=entities.find(object.id);if(found==entities.end())continue;auto& data=found->second;const auto raw=ui_value(object,"lightrange").raw();if(raw<1){data.lightResident=false;continue;}const float radius=float(raw)/1024.f;auto* slot=light_slot(object.id,false,data.lightResident,radius);data.lightResident=true;if(!slot)continue;auto& light=slot->light;
+ // Live entities in birth (handle) order, without scanning the whole handle ledger.
+ WorldQuerySnapshot order(*this,true);order.ids->clear();for(const auto& [id,data]:entities){const auto* o=state.get(id);if(o&&o->alive)order.ids->push_back(id);}std::sort(order.ids->begin(),order.ids->end());
+ for(const ObjectId id:*order.ids){const auto& object=state.require(id);auto& data=entities.at(id);const auto raw=ui_value(object,"lightrange").raw();if(raw<1){data.lightResident=false;continue;}const float radius=float(raw)/1024.f;auto* slot=light_slot(object.id,false,data.lightResident,radius);data.lightResident=true;if(!slot)continue;auto& light=slot->light;
   if(bonusMouse?radius>0.1f:frame_.hardwareLighting)light.type=(ui_value(object,"flags3").bits&2u)?2:1;
   light.position=position(object.id);light.range=radius+200;light.intensity=1;light.baked=false;light.synthetic=false;
   // The current native pose is shared with ordinary packets; do not invent a second parent/interpolation pose.
@@ -2954,7 +2963,21 @@ void Engine::make_frame(bool mouseOutput){
  // Campaign emit() particles: screen-pixel SIZE (legacy_particle_quants) at the selected original video mode's width (native display: 1024 tier).
  // ponytail: one conversion from the camera view's ARC for every view; per-view ARC only if a non-camera view shows emit particles.
  double legacyScale=1;if(state.profile==SemanticProfile::CampaignA6){const int mode=global("video_mode").raw()>>10;const auto* view=state.get(global("camera").bits);legacyScale=legacy_particle_quants(view?ui_number(*view,"arc",60):60,mode>=6&&mode<=10?a6VideoModes[std::size_t(mode-6)][0]:std::max(currentWidth_,1));}
- for(const auto& active:activeParticles){const Object* o=state.get(active.object);if(!o||!o->alive)continue;Particle p;p.position=position(o->id);auto image=bitmap(ui_value(*o,"bmap"));p.image=image.image;const float opacity=ui_number(*o,"alpha",100)/100;p.color=rgb(*o,1);p.color.a=state.profile==SemanticProfile::BonusA7?opacity:std::clamp(opacity,0.0f,1.0f);p.alphaRaw=o->fields.contains("alpha")?ui_value(*o,"alpha").raw():102400;p.translucent=field(o->id,"transparent");p.size=float(ui_number(*o,"size",1)*(active.legacy?legacyScale:1));p.angle=ui_number(*o,"angle");p.additive=field(o->id,"bright");p.velocity={ui_number(*o,"vel_x"),ui_number(*o,"vel_y"),ui_number(*o,"vel_z")};p.scaleZ=ui_number(*o,"scale_z",1);p.overlay=field(o->id,"overlay");p.flare=field(o->id,"flare");p.invertFlare=p.flare&&p.translucent;p.beam=field(o->id,"beam");p.streak=field(o->id,"streak");p.materialIndex=material_index(ui_value(*o,"material"));particles_.push_back(p);}
+ // One hash lookup per particle field (29k fire particles on a burning duma): no Engine::field mask/alias detour for plain
+ // fields, FLAGS read once for the TRANSPARENT/BRIGHT/OVERLAY/FLARE/BEAM/STREAK masks, and each BMAP resolved once per frame.
+ const auto particleMask=[&](std::string_view name){const auto* m=core_mask(Object::Kind::Particle,name,state.profile);if(!m||!core_equal(m->backing,"flags"))throw std::runtime_error("particle flag mask is not FLAGS-backed");return m->mask;};
+ const std::uint32_t brightMask=particleMask("bright"),flareMask=particleMask("flare"),beamMask=particleMask("beam"),transparentMask=particleMask("transparent"),overlayMask=particleMask("overlay"),streakMask=particleMask("streak");
+ std::unordered_map<std::uint64_t,UIBitmap> particleBitmaps;
+ for(const auto& active:activeParticles){const Object* o=state.get(active.object);if(!o||!o->alive)continue;Particle p;
+  auto slot=[&](std::string_view key)->const Value*{auto i=o->fields.find(key);return i==o->fields.end()?nullptr:&i->second.value;};
+  auto number=[&](std::string_view key,float fallback=0){const Value* v=slot(key);return v?float(v->real()):fallback;};
+  const Value* flagValue=slot("flags");const std::uint32_t flagBits=flagValue?flagValue->bits:0;
+  p.position={number("x"),number("y"),number("z")};
+  const Value* bmapSlot=slot("bmap");const Value bmap=bmapSlot?*bmapSlot:Value{};
+  if(bmap){auto [cached,inserted]=particleBitmaps.try_emplace(std::uint64_t(bmap.kind)<<32|bmap.bits);if(inserted)cached->second=bitmap(bmap);p.image=cached->second.image;}
+  const Value* alpha=slot("alpha");const float opacity=(alpha?float(alpha->real()):100)/100;p.color={number("red",255)/255,number("green",255)/255,number("blue",255)/255,1};p.color.a=state.profile==SemanticProfile::BonusA7?opacity:std::clamp(opacity,0.0f,1.0f);p.alphaRaw=alpha?alpha->raw():102400;
+  p.translucent=(flagBits&transparentMask)!=0;p.size=float(number("size",1)*(active.legacy?legacyScale:1));p.angle=number("angle");p.additive=(flagBits&brightMask)!=0;p.velocity={number("vel_x"),number("vel_y"),number("vel_z")};p.scaleZ=number("scale_z",1);p.overlay=(flagBits&overlayMask)!=0;p.flare=(flagBits&flareMask)!=0;p.invertFlare=p.flare&&p.translucent;p.beam=(flagBits&beamMask)!=0;p.streak=(flagBits&streakMask)!=0;
+  const Value* material=slot("material");p.materialIndex=material_index(material?*material:Value{});particles_.push_back(p);}
  ui_order(uiObjects_,[&](ObjectId a,ObjectId b){return ui_number(state.require(a),"layer")<ui_number(state.require(b),"layer");});
  auto text_command=[&](const Object& o,std::string_view text,Value fontValue,float x,float y,int* budget=nullptr,int scroll=0){
   if(auto zero=text.find('\0');zero!=std::string_view::npos)text=text.substr(0,zero);

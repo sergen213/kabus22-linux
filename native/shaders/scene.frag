@@ -31,6 +31,8 @@ layout(location=6) in vec3 effectView;
 layout(location=7) in vec3 vertexMaterialDiffuse;
 layout(location=8) in vec3 vertexMaterialSpecular;
 layout(location=10) in vec4 previousClip;
+layout(location=11) flat in vec4 instanceTint;
+layout(location=12) flat in vec4 instanceFlags;
 layout(location=0) out vec4 color;
 layout(set=0,binding=1) uniform sampler2D skin;
 layout(set=0,binding=2) uniform sampler2D lightmap;
@@ -170,9 +172,10 @@ void main(){
         color=(skillMain.x*preparedAmbient+skillMain.y*clamp(dot(effectLight,bump),0,1)*sunlight+vec4(specular))*texel;
         return;
     }
-    if(overlay&&(max(max(texel.r,texel.g),texel.b)<0.001||texel.a<0.5))discard;
-    if(flare&&!textureAlpha){float brightness=max(max(texel.r,texel.g),texel.b);texel.a*=invertFlare?1-brightness:brightness;}
-    vec4 t=texel*tint;t.a*=alpha;if(t.a<0.01)discard;
+    bool drawOverlay=particleInstanced?instanceFlags.y!=0:overlay,drawFlare=particleInstanced?instanceFlags.x!=0:flare,drawInvertFlare=particleInstanced?instanceFlags.z!=0:invertFlare;
+    if(drawOverlay&&(max(max(texel.r,texel.g),texel.b)<0.001||texel.a<0.5))discard;
+    if(drawFlare&&!textureAlpha){float brightness=max(max(texel.r,texel.g),texel.b);texel.a*=drawInvertFlare?1-brightness:brightness;}
+    vec4 t=texel*(particleInstanced?instanceTint:tint);t.a*=alpha;if(t.a<0.01)discard;
     if(k22Pass!=0){color=k22Pass==2?gbufferData(coord):k22Pass==3?motionData():vec4(0);return;}
 #if K22_RAY_QUERY
     bool signals=onSignalPixel();signalShadows=signals&&(k22RtSignals&1)!=0;

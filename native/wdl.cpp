@@ -191,22 +191,23 @@ struct Runtime::Impl {
  Argument evaluate(const Expr& e,Process* p=nullptr){
   auto result=[](Value v,Ref ref={}){return Argument{v,ref};};
   auto arg=[&](std::size_t i){return evaluate(*e.args.at(i),p);};
+  const std::string_view opv=e.op; // size-first compares; std::string==const char* is strlen+memcmp
   try{switch(e.kind){
    case Expr::Literal:return result(e.value);
    case Expr::Name:{
-    if(e.op=="null"||e.op=="off"||e.op=="false")return result(Value{});
-    if(e.op=="on"||e.op=="true")return result(Value::from_int(1));
+    if(opv=="null"||opv=="off"||opv=="false")return result(Value{});
+    if(opv=="on"||opv=="true")return result(Value::from_int(1));
     auto slotArgument=[&](Slot& slot)->Argument{if(slot.value.kind==Value::Kind::Object){auto* o=state.get(slot.value.bits);if(o&&o->kind==Object::Kind::Vector&&!o->array.empty())return {o->array[0].value,{&o->array[0],o->id,{},0}};}return {slot.value,{&slot,slot.value.kind==Value::Kind::Object?slot.value.bits:0}};};
-    if(p){if(e.op=="me"||e.op=="your")return slotArgument(p->locals.at(e.op=="me"?"my":"you"));auto bound=p->bindings.find(e.op);if(bound!=p->bindings.end())return {bound->second.current(),bound->second.ref};auto it=p->locals.find(e.op);if(it!=p->locals.end())return slotArgument(it->second);}
+    if(p){if(opv=="me"||opv=="your")return slotArgument(p->locals.at(opv=="me"?"my":"you"));auto bound=p->bindings.find(e.op);if(bound!=p->bindings.end())return {bound->second.current(),bound->second.ref};auto it=p->locals.find(e.op);if(it!=p->locals.end())return slotArgument(it->second);}
     auto it=state.globals.find(e.op);if(it!=state.globals.end()){auto view=state.numericGlobals.find(e.op);if(view!=state.numericGlobals.end())return result(it->second.value,{&it->second,view->second,"x"});return slotArgument(it->second);}
     auto fn=names.find(e.op);if(fn!=names.end())return result(Value::function(fn->second));
     fail(e.loc,"unknown symbol '"+e.op+"'");
    }
    case Expr::Member:{
-    auto a=arg(0);auto v=a.current();ObjectId id=v.kind==Value::Kind::Object?v.bits:a.ref.owner;auto* owner=state.get(a.ref.owner);if(owner&&owner->kind==Object::Kind::Vector&&scalar_storage(owner->id)&&v.kind!=Value::Kind::Object&&e.op!="x"&&e.op!="y"&&e.op!="z"&&e.op!="pan"&&e.op!="tilt"&&e.op!="roll"&&e.op!="blue"&&e.op!="green"&&e.op!="red")fail(e.loc,"member '"+e.op+"' on non-object parameter");if(owner&&owner->kind==Object::Kind::Vector&&e.args[0]->kind==Expr::Name&&(!scalar_storage(owner->id)||v.kind!=Value::Kind::Object))id=owner->id;if(!id)fail(e.loc,"member '"+e.op+"' on null/non-object");auto& o=state.require(id);
-    bool component=e.op=="x"||e.op=="y"||e.op=="z"||e.op=="pan"||e.op=="tilt"||e.op=="roll";std::size_t componentIndex=e.op=="x"||e.op=="pan"?0:e.op=="y"||e.op=="tilt"?1:2;
+    auto a=arg(0);auto v=a.current();ObjectId id=v.kind==Value::Kind::Object?v.bits:a.ref.owner;auto* owner=state.get(a.ref.owner);if(owner&&owner->kind==Object::Kind::Vector&&scalar_storage(owner->id)&&v.kind!=Value::Kind::Object&&opv!="x"&&opv!="y"&&opv!="z"&&opv!="pan"&&opv!="tilt"&&opv!="roll"&&opv!="blue"&&opv!="green"&&opv!="red")fail(e.loc,"member '"+e.op+"' on non-object parameter");if(owner&&owner->kind==Object::Kind::Vector&&e.args[0]->kind==Expr::Name&&(!scalar_storage(owner->id)||v.kind!=Value::Kind::Object))id=owner->id;if(!id)fail(e.loc,"member '"+e.op+"' on null/non-object");auto& o=state.require(id);
+    bool component=opv=="x"||opv=="y"||opv=="z"||opv=="pan"||opv=="tilt"||opv=="roll";std::size_t componentIndex=opv=="x"||opv=="pan"?0:opv=="y"||opv=="tilt"?1:2;
     if(component&&a.ref.owner==id&&a.ref.field.starts_with("skill")){int start=0;auto suffix=a.ref.field.substr(5);auto parsed=std::from_chars(suffix.data(),suffix.data()+suffix.size(),start);if(parsed.ec!=std::errc{})fail(e.loc,"invalid skill vector base");auto ref=state.member(id,"skill"+std::to_string(start+componentIndex));return result(ref.get(),ref);}
-    if(o.kind==Object::Kind::Text&&e.op=="string"){auto index=o.field("index").value.integer();if(index<1||std::size_t(index)>o.array.size())return result(Value{}, {nullptr,o.id,"string"});auto n=std::size_t(index-1);return result(o.array[n].value,{&o.array[n],o.id,"string",n});}
+    if(o.kind==Object::Kind::Text&&opv=="string"){auto index=o.field("index").value.integer();if(index<1||std::size_t(index)>o.array.size())return result(Value{}, {nullptr,o.id,"string"});auto n=std::size_t(index-1);return result(o.array[n].value,{&o.array[n],o.id,"string",n});}
     if(o.kind==Object::Kind::Vector&&!o.scalar&&component){
      std::size_t n=(a.ref.owner==id?a.ref.index:0)+componentIndex;if(n>=o.array.size())fail(e.loc,"vector component out of bounds");return result(o.array[n].value,{&o.array[n],o.id,e.op,n});
     }
@@ -228,17 +229,17 @@ struct Runtime::Impl {
    case Expr::Conditional:{auto c=arg(0).current();return c?arg(1):arg(2);}
    case Expr::Unary:{
     auto a=arg(0);auto v=a.current();
-    if(e.op=="&"||e.op=="*"){if(!a.ref)fail(e.loc,"reference operator on non-reference");return a;}
-    if(e.op=="+" )return result(v);
-    if(e.op=="-")return result(Value::from_raw(std::bit_cast<std::int32_t>(0u-v.bits)));
-    if(e.op=="!")return result(Value::from_int(!bool(v)));
-    if(e.op=="~")return result(Value::from_raw(std::bit_cast<std::int32_t>(~v.bits)));
-    if(!a.ref.slot)fail(e.loc,"increment requires writable reference");bool dec=e.op=="--"||e.op=="post--";auto next=Value::from_raw(std::bit_cast<std::int32_t>(v.bits+(dec?0u-1024u:1024u)));a.ref.set(next);return e.op.starts_with("post")?result(v):result(next,a.ref);
+    if(opv=="&"||opv=="*"){if(!a.ref)fail(e.loc,"reference operator on non-reference");return a;}
+    if(opv=="+" )return result(v);
+    if(opv=="-")return result(Value::from_raw(std::bit_cast<std::int32_t>(0u-v.bits)));
+    if(opv=="!")return result(Value::from_int(!bool(v)));
+    if(opv=="~")return result(Value::from_raw(std::bit_cast<std::int32_t>(~v.bits)));
+    if(!a.ref.slot)fail(e.loc,"increment requires writable reference");bool dec=opv=="--"||opv=="post--";auto next=Value::from_raw(std::bit_cast<std::int32_t>(v.bits+(dec?0u-1024u:1024u)));a.ref.set(next);return opv.starts_with("post")?result(v):result(next,a.ref);
    }
    case Expr::Binary:{
-    Argument a,b;Value x,y;if(e.op=="%"){b=arg(1);y=b.current();a=arg(0);x=a.current();}else{a=arg(0);x=a.current();b=arg(1);y=b.current();}auto op=e.op;bool assign=op=="="||(op.size()==2&&op[1]=='='&&op!="=="&&op!="!="&&op!="<="&&op!=">=");
+    Argument a,b;Value x,y;if(opv=="%"){b=arg(1);y=b.current();a=arg(0);x=a.current();}else{a=arg(0);x=a.current();b=arg(1);y=b.current();}std::string_view op=e.op;bool assign=op=="="||(op.size()==2&&op[1]=='='&&op!="=="&&op!="!="&&op!="<="&&op!=">=");
     if(op=="="){if(!a.ref.slot)fail(e.loc,"assignment requires writable reference");a.ref.set(y);return result(y,a.ref);}
-    if(assign)op.resize(1);
+    if(assign)op=op.substr(0,1);
     auto raw=[](std::uint32_t v){return Value::from_raw(std::bit_cast<std::int32_t>(v));};Value v;
     if(op=="+")v=raw(x.bits+y.bits);else if(op=="-")v=raw(x.bits-y.bits);
     else if(op=="*"){std::int64_t n=std::int64_t(x.raw())*y.raw();if(n<0&&n>=-4294967296LL)n+=1023;v=raw(std::uint32_t(n>>10));}
@@ -248,13 +249,15 @@ struct Runtime::Impl {
     else if(op=="<")v=Value::from_int(x.raw()<y.raw());else if(op==">")v=Value::from_int(x.raw()>y.raw());else if(op=="<=")v=Value::from_int(x.raw()<=y.raw());else if(op==">=")v=Value::from_int(x.raw()>=y.raw());
     else if(op=="&&")v=Value::from_int(bool(x)&&bool(y));else if(op=="||")v=Value::from_int(bool(x)||bool(y));
     else if(op=="&")v=raw(x.bits&y.bits);else if(op=="|")v=raw(x.bits|y.bits);else if(op=="^")v=raw(x.bits^y.bits);
-    else if(op=="<<")v=raw(x.bits<<(y.integer()&31));else if(op==">>")v=Value::from_raw(x.raw()>>(y.integer()&31));else fail(e.loc,"unknown operator "+op);
+    else if(op=="<<")v=raw(x.bits<<(y.integer()&31));else if(op==">>")v=Value::from_raw(x.raw()>>(y.integer()&31));else fail(e.loc,"unknown operator "+std::string(op));
     if(assign){if(!a.ref.slot)fail(e.loc,"compound assignment requires writable reference");a.ref.set(v);return result(v,a.ref);}return result(v);
    }
    case Expr::Call:{
     if(e.args.size()>65)fail(e.loc,"call exceeds 64 arguments");
-    std::array<Argument,64> args{};for(std::size_t i=e.args.size();i-->1;){auto& value=args[i-1];value=arg(i);value.value=value.current();value.captured=true;}
-    std::span<const Argument> values(args.data(),e.args.size()-1);const Expr& target=*e.args[0];std::string_view name=target.kind==Expr::Name?target.op:std::string_view{};
+    // Most calls pass few arguments: avoid constructing/destroying 64 Arguments (~6 KB) per call expression.
+    std::array<Argument,8> small;std::vector<Argument> large;Argument* args=small.data();if(e.args.size()-1>small.size()){large.resize(e.args.size()-1);args=large.data();}
+    for(std::size_t i=e.args.size();i-->1;){auto& value=args[i-1];value=arg(i);value.value=value.current();value.captured=true;}
+    std::span<const Argument> values(args,e.args.size()-1);const Expr& target=*e.args[0];std::string_view name=target.kind==Expr::Name?target.op:std::string_view{};
     if(p){p->context.my=context_slot(*p,"my").value.bits;p->context.you=context_slot(*p,"you").value.bits;}
     if(name=="wait"||name=="waitt"||name=="sleep"){
      if(!p)fail(e.loc,"wait in declaration initializer");if(values.size()!=1)fail(e.loc,"wait requires one argument");auto n=values[0].current().raw();
@@ -374,7 +377,7 @@ struct Runtime::Impl {
   p.schedulerFlags=functions[id].schedulerFlags;
   auto& f=functions[id];p.ownedLocals.reserve(f.params.size()+6+f.localDefinitions.size());auto value_slot=[&](std::string_view name,Value value){auto& object=local_storage(p,name,3,true);object.array[0].value=value;p.locals[std::string(name)].value=Value::object(object.id);};
   try{value_slot("my",Value::object(my));value_slot("you",Value::object(you));for(std::size_t i=0;i<f.params.size();++i){auto& parameter=f.params[i];auto a=i<args.size()?args[i]:Argument{};if(parameter.reference){if(!a.ref)fail(f.loc,"reference parameter "+parameter.name+" requires lvalue");a.captured=false;p.bindings[parameter.name]=a;hold_reference(a);}else value_slot(parameter.name,a.current());}
-   for(std::size_t i=0;i<4;++i)value_slot("_arg"+std::to_string(i+1),i<args.size()?args[i].current():Value{});
+   static constexpr std::array<std::string_view,4> argNames{"_arg1","_arg2","_arg3","_arg4"};for(std::size_t i=0;i<4;++i)value_slot(argNames[i],i<args.size()?args[i].current():Value{});
    for(auto& [name,size]:f.localDefinitions)if(!p.locals.contains(name)){auto& object=local_storage(p,name,size);p.locals[name].value=Value::object(object.id);}
   }catch(...){release(p);throw;}
  }

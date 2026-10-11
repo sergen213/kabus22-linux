@@ -94,6 +94,8 @@ float rayMaxDistance(){return u.dataCameraPosition.w;}
 #define textKey (u.dataParameters[1].y!=0)
 #define cursorKey (u.dataParameters[1].z!=0)
 #define enabled (u.dataParameters[1].w!=0)
+// Scene program: instanced CPU particles, per-instance model/tint/flags in binding 6 (24 floats each).
+#define particleInstanced (u.dataParameters[1].x!=0)
 #define reversed (u.dataParameters[2].x!=0)
 #define layer int(u.dataParameters[2].y)
 #define level int(u.dataParameters[2].z)

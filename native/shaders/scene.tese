@@ -24,6 +24,8 @@ layout(location=5) out vec3 effectLight;
 layout(location=6) out vec3 effectView;
 layout(location=7) out vec3 vertexMaterialDiffuse;
 layout(location=8) out vec3 vertexMaterialSpecular;
+layout(location=11) flat out vec4 instanceTint;  // scene.frag interface; only particleInstanced draws (never tessellated) read it.
+layout(location=12) flat out vec4 instanceFlags;
 layout(location=9) out vec3 worldTangent;
 layout(location=10) out vec4 previousClip;
 layout(push_constant) uniform CasterPush { mat4 casterViewProjection; } casterPush;
@@ -35,6 +37,7 @@ layout(push_constant) uniform CasterPush { mat4 casterViewProjection; } casterPu
 vec3 edgePoint(vec3 a,vec3 b,vec3 n,float k){return (2.0*a+b-k*dot(b-a,n)*n)/3.0;}
 vec3 edgeNormal(vec3 a,vec3 b,vec3 na,vec3 nb){vec3 e=b-a;float l=dot(e,e);vec3 h=na+nb-(l>0.0?2.0*dot(e,na+nb)/l:0.0)*e;return dot(h,h)>0.0?normalize(h):na;}
 void main(){
+    instanceTint=tint;instanceFlags=vec4(0);
     vec3 w=gl_TessCoord;
     #define LINEAR(V) (V[0]*w.x+V[1]*w.y+V[2]*w.z)
     uv=LINEAR(inUv);lmuv=LINEAR(inLightUv);vertexDynamicLight=LINEAR(inDynamicLight);effectLight=LINEAR(inEffectLight);effectView=LINEAR(inEffectView);
