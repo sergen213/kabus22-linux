@@ -17,6 +17,13 @@ constexpr std::array<std::string_view,14> bodyFunctions{
 constexpr std::array<std::string_view,1> bodyArrays{"player_yuksekli"}; // LV_*_Giris: player.z-=player_yuksekli[Aktif_Player]
 constexpr std::array<std::string_view,1> menuFunctions{"EM_Kernel"};      // M: item inventory or Inzar's spell menu
 constexpr std::array<std::string_view,1> weaponFunctions{"EM_KuBiGoSMenu"}; // weapon chosen: Demir morphs his gun model
+// Control gate: Demir's and Ebru's actions stop on oyuncu_pasif, Inzar's (and her spells) on koruyucu_pasif. The story scripts hold
+// and release the story character's gate (Lain and Seytan_k release only koruyucu_pasif, the final boss only oyuncu_pasif), so a
+// locked body reads the story's gate instead of its own. No body action writes its gate.
+constexpr std::array<std::string_view,2> demirEbruFiles{"oyuncu2.wdl","oyuncu2_ebru.wdl"};
+constexpr std::array<std::string_view,2> inzarFiles{"koruyucu.wdl","koru_buyuler.wdl"};
+constexpr std::array<std::string_view,1> ebruFiles{"oyuncu2_ebru.wdl"};
+constexpr std::array<std::string_view,2> posingFunctions{"oy_Oynat","Hareket_Hizi"};
 // Glyph cells of the original language-independent menu atlas (TusYonetim.wdl TYI_Tus*): 170x32 cells, one key label each.
 struct Cell {char c;int x,y;};
 constexpr std::array<Cell,28> cells{{{'Q',0,320},{'W',0,352},{'E',0,384},{'R',0,416},{'T',0,448},{'Y',0,480},{'U',0,512},{'I',0,544},{'O',0,576},{'P',0,608},
@@ -25,17 +32,42 @@ constexpr std::array<Cell,28> cells{{{'Q',0,320},{'W',0,352},{'E',0,384},{'R',0,
 }
 int Engine::story_character()const{return std::clamp(int(number("Aktif_Player")),0,2);}
 int Engine::body_character()const{return characterLock>=0?characterLock:story_character();}
-// Inzar's body opens the item inventory outside her own story (items are needed there) and her spell menu inside it; a gun body
-// never gets the spell menu. Unlocked: Aktif_Player.
 // A weapon Demir cannot hold (Ebru's magnum) is not morphed onto his gun; character_weapons swaps it for the pistol.
 int Engine::weapon_character()const{const int b=body_character(),w=int(number("Aktif_Silah"));return b==0&&(w<1||w>7)?-1:b;}
-int Engine::menu_character()const{const int s=story_character();return characterLock>=0&&characterLock!=2&&s==2?characterLock:s;}
+// M (EnvanterMenu.wdl EM_Kernel:333-335) reads Aktif_Player three times per press: Demir or Ebru toggle the item inventory
+// (EnvanterAcKapat), Inzar her spell menu (KoruyucuAcKapat). A gun body gets the inventory in Inzar's story. Inzar's body keeps her
+// spell menu everywhere; outside her own story the items are needed too, so there M cycles: closed → spell menu → (M) the spell
+// menu closes and the item inventory opens on the next frame (character_tick) → (M) closed. The three reads of one press see one
+// answer (latched until the next frame). The level-entry gate (:315, M not held) sees the story. Unlocked: Aktif_Player.
+int Engine::menu_character(){
+ const int s=story_character();
+ if(characterLock<0||characterLock==s)return s;
+ if(characterLock!=2)return s==2?characterLock:s;
+ if(number("Key_Menu")==0)return s;
+ if(menuLatch_<0){menuLatch_=number("EM_Acik")!=0?s:2;menuInventory_=menuLatch_==2&&number("KOM_Acik")!=0;}
+ return menuLatch_;
+}
 void Engine::configure_characters(Runtime& runtime,int defaultLock){
  if(state.profile==SemanticProfile::BonusA7)return;
  characterDefault=std::clamp(defaultLock,-1,2);newGameChoice_=characterDefault+1;
  runtime.reroute_reads("Aktif_Player","k22_body_player",bodyFunctions,bodyArrays);
  runtime.reroute_reads("Aktif_Player","k22_menu_player",menuFunctions);
  runtime.reroute_reads("Aktif_Player","k22_weapon_player",weaponFunctions);
+ runtime.reroute_reads("oyuncu_pasif","k22_body_oyuncu_pasif",{},{},demirEbruFiles);
+ runtime.reroute_reads("koruyucu_pasif","k22_body_koruyucu_pasif",{},{},inzarFiles);
+ // Hit kinds (dmr_yaralan_tip) set by Demir-story attackers: 2 burning (the final boss's fire efect2.wdl:5887, cino_yara.wdl:223),
+ // 3 Atilgan's swing (atilgan_yara.wdl:128). Demir's action reacts to 0-3 (oyuncu2.wdl:1812-2022), Ebru's only to 0 and 1
+ // (oyuncu2_ebru.wdl:1239/1303). Hurt by kind 2 or 3 she matched neither branch; holding the aim key, d_ates_go (:1397) jumped back
+ // to e_yaralan_go with no wait(1) and the frame never ended. Locked, her action reads 2 as 0 (hurt) and 3 as 1 (knock-back).
+ runtime.reroute_reads("dmr_yaralan_tip","k22_ebru_hit_kind",{},{},ebruFiles);
+ // Lain's hit reaction (kotu_koruyucu.wdl Kotukoru_Yaralan:5291) branches on the attack kind in skill3: Inzar's sword and spell
+ // kinds and firearm 2. Ates_Et (silah.wdl:680) records the firearm number there, so any other gun fell through every branch and
+ // ended Lain's AI with its Enerji below 0 (no Kotukoru_Ol, no progression). A locked game records Lain's bullet hits as kind 2.
+ runtime.reroute_assigned_read("Ates_Et","skill3","aktif_silah","k22_bullet_hit_kind");
+ // Demir's story scenes pose the player through oy_Oynat and Hareket_Hizi (oyuncu2.wdl:540/396: t_Silah.String[Aktif_Silah], 8
+ // strings; Action_Zaman[Aktif_Silah*20+n], 160), called from cinematic.wdl, BUL_Saat.wdl and kotu_koruyucu.wdl buyukes_koruses.
+ // An Ebru body there may still hold her magnum (8): those reads see the pistol (1).
+ runtime.reroute_reads("Aktif_Silah","k22_pose_weapon",posingFunctions);
 }
 void Engine::set_character_lock(int character){characterLock=std::clamp(character,-1,2);storyAtLevel_=story_character();adoptStory_=false;switchPrompt_=-1;}
 // load_level, before the placed actions start. The entity that would become the player for the story character runs the locked
@@ -59,6 +91,11 @@ void Engine::apply_character_lock(Runtime& runtime,std::vector<std::pair<ObjectI
  // Ebru's action selects her magnum (Aktif_Silah 8) at every spawn; outside her story she keeps the firearm the story carried.
  if(body&&b==1){const int w=int(number("Aktif_Silah"));ebruWeapon_=w>=1&&w<=5?w:0;}
  if(body&&b==0)character_weapons(runtime,true); // before his action's Silah_Ekle reads Aktif_Silah
+ // A bullet hit (silah.wdl Ates_Et:651-658) reads the blood table kan_mertip[3*(you.skill2-1)+n] by enemy type, skill2 1-6. Every
+ // enemy action sets its type except Lain's and Seytan's, which only Inzar fights in the story: a gun body would index -2. All six
+ // kan_mertip rows are equal, so they get type 1 (skill2 is otherwise only compared with 4: hedef.wdl:78, oyuncu2.wdl:628).
+ if(b!=2){const auto lain=runtime.function("kotukoru_ai"),devil=runtime.function("devil_ai");
+  for(auto& [id,action]:actions)if(action&&(action==lain||action==devil))if(auto& t=state.require(id).field("skill2").value;t.raw()==0)t=Value::from_int(1);}
 }
 // Weapons a locked body can hold (every frame while locked). Demir's tables (Silah_isimleri, t_Silah) stop at weapon 7: in Ebru's
 // inventory he fires her magnum rounds from his pistol. Ebru's model has one pose set; she fires the story's firearms 1-5 or her
@@ -99,6 +136,35 @@ bool Engine::character_tick(Runtime& runtime,const Input& in){
  }
  if(switchPrompt_<0){
   character_weapons(runtime,false);
+  // Seytan's attacks on the player go through globals that only Inzar's action answers (koruyucu.wdl:1619-1887): its floor logo
+  // (efect2.wdl buyu_seytanlogo:5008, seytan_logo_aktif=1, one_vurusu_aktif=4) pulls her into a dash strike, a swing or the black
+  // blast (one_vurusu_aktif=5) knocks her back for 12/24 health, the fire breath (3) knocks her back (its damage is direct,
+  // seytan.wdl:391); each reaction then clears one_vurusu_aktif and seytan_logo_aktif. While the logo is set Seytan cannot die
+  // (seytan.wdl:958 Seytan_Ol holds it at Enerji 1 in Seytan_BuyuBekle). A gun body has none of these reactions: they are cleared
+  // at once (no strike, no knock-back; the swing costs nothing, docs/CHARACTER_LOCK.md Limitations).
+  if(characterLock>=0&&characterLock!=2&&(number("seytan_logo_aktif")!=0||number("one_vurusu_aktif")!=0)){set_global("seytan_logo_aktif",Value{});set_global("one_vurusu_aktif",Value{});}
+  // Inzar's M cycle (menu_character): the spell menu closed on the last frame's press, the item inventory opens now.
+  menuLatch_=-1;
+  if(menuInventory_&&number("KOM_Acik")==0){menuInventory_=false;if(number("EM_Acik")==0)runtime.start("EnvanterAcKapat");}
+  // The final boss (boss.wdl boss_ai, Enerji 1800) is Demir's fight, fought from range: the invisible solid boss_engel.wmb (box ±168
+  // around (316,131), inside it the boss_kalkan shield) keeps the player at least ~100 from the boss, beyond Inzar's sword. Her
+  // ranged spell 4 (koru_adu_buyu: 10 per bolt, 23 of 230 mana) would need about 100 bolts for the ~1000 the story requires
+  // (1500→1000 once the creatures are gone, then 990→below 500 while the possessed Ebru stands guard). Locked to Inzar, each
+  // frame's loss of the boss's health while the player has control is multiplied by bossDamageScale (20): a bolt hits for 200, so
+  // 1800→1000 takes 4 and 990→below 500 takes 3, 161 of her 230 mana (the creatures before refill it through her sword).
+  if(characterLock==2){
+   const auto boss=global("boss_ent");const auto* o=boss.kind==Value::Kind::Object?state.get(boss.bits):nullptr;
+   if(o&&o->alive&&callback(boss.bits,"action1")==runtime.function("boss_ai")){
+    double h=field(boss.bits,"skill1");
+    if(boss.bits==bossId_&&h<bossHealth_&&number("oyuncu_pasif")==0){h=bossHealth_-(bossHealth_-h)*bossDamageScale;set_field(boss.bits,"skill1",h);}
+    bossId_=boss.bits;bossHealth_=h;
+   }else bossId_=0;
+  }
+  // Final boss, second phase: the possessed Ebru (boss_ebru_ai) guards the boss. Each shot aimed at it turns her into the line
+  // (silah.wdl Ates_Et:546-558 sets boss_ebruhedefpan; ebruboss_DurusAcim moves her there), so Demir's way through is a grenade
+  // or mine, whose blast hurts the boss by distance (hedef.wdl Dusman_Tarama:59-77). Ebru's body throws neither (rule 3): for her
+  // the guard keeps her place beside the boss (pan 180, K22.wdl:262), and shots from off that line reach it.
+  if(characterLock==1&&number("boss_ebruhedefpan")!=180)set_global("boss_ebruhedefpan",Value::from_int(180));
   if(characterLock<0||adoptStory_||storyAtLevel_<0)return false;
   const int s=story_character();if(s==storyAtLevel_)return false;
   storyAtLevel_=s;if(s==characterLock)return false;

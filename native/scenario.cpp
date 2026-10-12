@@ -54,13 +54,14 @@ struct Eval {
    if(name=="movie")return {false,engine.movie&&engine.media.movie_playing(engine.movie)?1.0:0.0,{}}; // full-screen media_play (no target bitmap)
    if(name=="character")return {false,double(engine.characterLock),{}}; // native character lock: -1 original, 0 Demir, 1 Ebru, 2 Inzar
    if(name=="prompt")return {false,double(engine.character_prompt()),{}}; // story-switch prompt: the story's character, -1 when closed
+   if(name=="health"){static constexpr std::string_view vars[]{"oyn_yaralanma","ebru_yaralanma","koru_yaralanma"};return {false,engine.number(vars[engine.body_character()]),{}};} // the played body's health variable
    if(name=="movieframe")return {false,engine.movie?engine.media.movie_status(engine.movie):0.0,{}}; // media_playing: 1-based decoded frame, 0 when stopped
    if(name=="wall"){static const auto start=std::chrono::steady_clock::now();return {false,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count(),{}};} // seconds since first $wall read
    if(name=="count"){if(!take("("))fail("expected (");auto action=runtime.function(ident());if(!take(")"))fail("expected )");if(!action)fail("unknown action");int n=0;for(const auto& [id,data]:engine.entities)n+=runs(engine,id,action);return {false,double(n),{}};}
    if(name=="dist"||name=="facing"){if(!take("(")||!take("@"))fail("expected (@name)");auto v=stored_term();if(!take(")"))fail("expected )");auto id=ObjectId(v.number);return {false,name=="dist"?dist(id):facing(id),{}};}
    fail("unknown $"+name);}
   auto name=ident();auto it=engine.state.globals.find(name);if(it==engine.state.globals.end())fail("unknown WDL global "+name);Value v=it->second.value;
-  if(take("[")){space();auto b=p;while(p<s.size()&&std::isdigit(static_cast<unsigned char>(s[p])))++p;auto index=std::stoul(std::string(s.substr(b,p-b)));if(!take("]"))fail("expected ]");auto* o=v.kind==Value::Kind::Object?object(v.bits):nullptr;if(!o||index>=o->array.size())fail(name+"["+std::to_string(index)+"] is not an array element");v=o->array[index].value;}
+  if(take("[")){auto i=sum();if(i.text||i.number<0)fail("bad index");const auto index=std::size_t(i.number);if(!take("]"))fail("expected ]");auto* o=v.kind==Value::Kind::Object?object(v.bits):nullptr;if(!o||index>=o->array.size())fail(name+"["+std::to_string(index)+"] is not an array element");v=o->array[index].value;}
   // WDL VAR arrays carry pointers as raw words (Number bits), globals as Object handles.
   if(take("."))return {false,field(v.bits,ident()),{}};
   if(v.kind==Value::Kind::Object)if(auto* o=object(v.bits);o&&o->kind==Object::Kind::String)return {true,0,o->text};
@@ -264,9 +265,12 @@ bool Scenario::step(Engine& engine,Runtime& runtime,Renderer* renderer,Input& in
     else{s.keys.set(left,f>band);s.keys.set(right,f< -band);s.keys.set(up,!turn&&std::fabs(f)<60);s.keys.set(run,!turn&&step.down);}
     ++s.progress;s.apply(in);return true;}
    case Op::Find:{
-    auto action=runtime.function(step.condition);ObjectId best=0;double bestDistance=0;Eval near{engine,runtime,s.stored,frame,{}};
-    for(const auto& [id,data]:engine.entities)if(runs(engine,id,action)){auto d=near.player()?near.dist(id):0;if(!best||d<bestDistance){best=id;bestDistance=d;}}
-    if(!best){++s.failed;s.report(step,"FAIL",frame,action?"no live entity runs this action":"unknown action");s.aborted=true;break;}
+    // find NAME enemy: the nearest visible live Dusmanmi (SKILL11 1, klasik_yara.wdl:61) with Enerji (SKILL1) above 0.
+    const bool enemy=step.condition=="enemy";auto action=enemy?FunctionId{}:runtime.function(step.condition);ObjectId best=0;double bestDistance=0;Eval near{engine,runtime,s.stored,frame,{}};
+    for(const auto& [id,data]:engine.entities){const auto* o=engine.state.get(id);
+     if(enemy?!(o&&o->alive&&id!=near.player()&&engine.field(id,"skill11")==1&&engine.field(id,"skill1")>0&&engine.field(id,"invisible")==0):!runs(engine,id,action))continue;
+     auto d=near.player()?near.dist(id):0;if(!best||d<bestDistance){best=id;bestDistance=d;}}
+    if(!best){++s.failed;s.report(step,"FAIL",frame,enemy?"no live enemy":action?"no live entity runs this action":"unknown action");s.aborted=true;break;}
     s.stored[step.name]={false,double(best),{}};++s.passed;s.report(step,"PASS",frame,"entity "+std::to_string(best)+" at distance "+std::to_string(int(bestDistance)));s.next();break;}
    case Op::List:{
     const bool nearby=step.condition=="near";auto action=nearby?FunctionId{}:runtime.function(step.condition);Eval near{engine,runtime,s.stored,frame,{}};std::ostringstream o;int n=0;

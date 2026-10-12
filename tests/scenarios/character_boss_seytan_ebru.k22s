@@ -1,0 +1,955 @@
+# requires: saves
+# character: ebru
+# Character lock (docs/CHARACTER_LOCK.md): Ebru, a gun body, fights Seytan (devil_ai, seytan.wdl), Inzar's boss in the story.
+# Inzar's Tnel13 (slot 19 = kayit18.sav) -> Seytan_k (62) the way its LY_Kapi does (LevelYonetim.wdl LY_Tarama: LY_HedefLevel 62).
+# video_seytan1_k (cinematic.wdl:8973) releases only koruyucu_pasif and sets devil_fight_start; the locked body obeys the story's
+# gate. The shotgun (weapon 2, 45 damage, Silahlar[6]) is chosen through the original inventory and fired in re-aiming rounds.
+# Seytan's floor logo would hold Seytan at Enerji 1 until Inzar's dash strike (seytan_logo_aktif); a gun body is released at once.
+# Between rounds a body at 45 health or less uses an energy item (4-6) from the original inventory (KuBiGoMenu.wdl:136 Kullan).
+# Seytan_Ol switches the story to Ebru (Aktif_Player 1) and LY_HedefLevel 65 (Ebrudus, after the wake-up movie).
+realtime off
+load-save 18
+wait until LY_HedefLevel == 0 && level_yuklendi_ok == 1 && LYP_Fade.visible == 0 timeout 6000
+assert LY_AktifLevelID == 42 && Aktif_Player == 2
+set LY_HedefLevel 62
+wait until LY_AktifLevelID == 62 timeout 3000
+assert $level == "seytan_k.wmb"
+assert $character == 1 && $count(Oyuncu_Ebru) == 1 && $count(oyuncu_koruyucu) == 0
+find boss devil_ai
+assert @boss.skill2 == 1
+wait until $movie timeout 1200
+press Escape
+wait until koruyucu_pasif == 0 && $movie == 0 && devil_fight_start == 1 timeout 1200
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+press Return
+wait until EM_Bolge == 2 timeout 300
+press Up
+press-until Right EM_CursorNesne+EM_NesneKafa >= 6 timeout 600
+press-until Left EM_CursorNesne+EM_NesneKafa <= 6 timeout 600
+assert Silahlar[6] == 2
+press Return
+wait until EM_Bolge == 6 timeout 300
+press Return
+wait until Aktif_Silah == 2 && EM_Bolge == 2 timeout 300
+press M
+wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 600
+store b0 @boss.skill1
+press-until D @boss.skill1 < @b0 timeout 900
+capture seytan_gun_body_hit
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+turn-to @boss 15 timeout 900
+store g $frame
+press-until D @boss.skill1 <= 0 || player.skill1 <= 0 || Aktif_Player == 1 || $frame > @g + 240 timeout 600
+press-until Return S_Kursun_Sayisi[2] > 0 || Kursun_Sayisi[2] == 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 300
+up S
+wait until silah_kaldir == 0 && EnvaterAcilabilirmi == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 900
+press-until M EM_Acik == 1 || player.skill1 > 45 || player.skill1 <= 0 || @boss.skill1 <= 0 || Aktif_Player == 1 timeout 60
+press-until Down EM_CursorSiNeDo == 1 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until Down NS_Nesneler[EM_CursorNesne+EM_NesneKafa] >= 4 && NS_Nesneler[EM_CursorNesne+EM_NesneKafa] <= 6 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 7 || EM_Acik == 0 timeout 60
+press-until Return EM_Bolge == 3 || EM_Acik == 0 timeout 60
+press-until M EM_Acik == 0 timeout 120
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 || player.skill1 <= 0 || Aktif_Player == 1 timeout 600
+up S
+assert player.skill1 > 0
+wait until @boss.skill1 <= 0 || Aktif_Player == 1 timeout 600
+capture seytan_gun_body_death
+wait until Aktif_Player == 1 timeout 3000
+# LevelYukle 62 -> 65 plays the Ebru wake-up movie (LevelYonetim.wdl:921, EbruYukle, video_ismi_str20).
+wait until $movie timeout 3000
+press Escape
+wait until LY_AktifLevelID == 65 && level_yuklendi_ok == 1 timeout 3000
+assert $level == "ebrudus.wmb"
+assert $character == 1 && $count(Oyuncu_Ebru) == 1 && $count(oyuncu_koruyucu) == 0
+wait until oyuncu_pasif == 0 timeout 1200
+frames 120
+capture seytan_gun_body_ebrudus

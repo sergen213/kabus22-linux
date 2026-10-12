@@ -4,7 +4,7 @@
 # "# mode: bonus" runs the Bonus game (--mode bonus --data "GAME_ROOT/Kabus 22 Mode").
 # "# graphics: KEY=VALUE" passes --graphics KEY=VALUE (for example seamless_doors=off).
 # -DONLY=REGEX runs the matching scenario names; -DCHARACTER=demir|ebru|inzar adds --character (docs/CHARACTER_LOCK.md), so the
-# loaded original saves play as that character.
+# loaded original saves play as that character. "# character: NAME" in a scenario does the same for that file (and wins).
 file(GLOB scenarios "${SCENARIOS}/*.k22s")
 list(SORT scenarios)
 set(failed "")
@@ -41,7 +41,9 @@ foreach(scenario IN LISTS scenarios)
   endif()
   set(data "${GAME}")
   set(mode "")
-  if(CHARACTER)
+  if(text MATCHES "# character: ([a-z]+)")
+    set(mode --character ${CMAKE_MATCH_1})
+  elseif(CHARACTER)
     set(mode --character ${CHARACTER})
   endif()
   if(text MATCHES "# mode: bonus")

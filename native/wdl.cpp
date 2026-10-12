@@ -469,7 +469,7 @@ const ParseMetrics& Runtime::metrics()const{return impl_->metrics;}
 std::size_t Runtime::processes()const{return std::count_if(impl_->queued.begin(),impl_->queued.end(),[](auto& p){return !p->cancelled;});}
 bool Runtime::running(FunctionId id)const{return id&&std::any_of(impl_->queued.begin(),impl_->queued.end(),[id](auto& p){return !p->cancelled&&p->function==id;});}
 const Runtime::CompilerSettings& Runtime::compiler_settings()const{return impl_->compilerSettings;}
-std::size_t Runtime::reroute_reads(std::string_view global,std::string_view call,std::span<const std::string_view> functions,std::span<const std::string_view> arrays){
+std::size_t Runtime::reroute_reads(std::string_view global,std::string_view call,std::span<const std::string_view> functions,std::span<const std::string_view> arrays,std::span<const std::string_view> files){
  std::size_t count=0;
  auto assignment=[](const Expr& e){return (e.kind==Expr::Binary&&precedence(e.op)==1)||(e.kind==Expr::Unary&&(e.op.ends_with("++")||e.op.ends_with("--")));};
  std::function<void(E&,bool,bool)> walk=[&](E& e,bool all,bool target){
@@ -478,7 +478,19 @@ std::size_t Runtime::reroute_reads(std::string_view global,std::string_view call
   const bool indexed=e->kind==Expr::Index&&e->args[0]->kind==Expr::Name&&std::any_of(arrays.begin(),arrays.end(),[&](auto a){return case_equal(a,e->args[0]->op);});
   for(std::size_t i=0;i<e->args.size();++i)walk(e->args[i],all||(indexed&&i==1),i==0&&assignment(*e));
  };
- for(auto& f:impl_->functions){const bool all=std::any_of(functions.begin(),functions.end(),[&](auto n){return case_equal(n,f.name);});for(auto& ins:f.code)walk(ins.expr,all,false);}
+ auto in_file=[&](const Function& f){std::string_view n=f.loc.file;n=n.substr(n.find_last_of("/\\")+1);return std::any_of(files.begin(),files.end(),[&](auto x){return case_equal(x,n);});};
+ for(auto& f:impl_->functions){const bool all=in_file(f)||std::any_of(functions.begin(),functions.end(),[&](auto n){return case_equal(n,f.name);});for(auto& ins:f.code)walk(ins.expr,all,false);}
+ return count;
+}
+std::size_t Runtime::reroute_assigned_read(std::string_view function,std::string_view field,std::string_view global,std::string_view call){
+ std::size_t count=0;
+ std::function<void(E&)> walk=[&](E& e){
+  if(!e)return;
+  if(e->kind==Expr::Binary&&e->op=="="&&e->args[0]->kind==Expr::Member&&case_equal(e->args[0]->op,field)&&e->args[1]->kind==Expr::Name&&case_equal(e->args[1]->op,global)){
+   auto& r=e->args[1];auto c=std::make_unique<Expr>();c->kind=Expr::Call;c->dispatch=Expr::Native;c->loc=r->loc;auto n=std::make_unique<Expr>();n->kind=Expr::Name;n->loc=r->loc;n->op=std::string(call);c->args.push_back(std::move(n));r=std::move(c);++count;return;}
+  for(auto& a:e->args)walk(a);
+ };
+ for(auto& f:impl_->functions)if(case_equal(f.name,function))for(auto& ins:f.code)walk(ins.expr);
  return count;
 }
 }
