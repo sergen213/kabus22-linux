@@ -1,4 +1,5 @@
 # requires: saves
+# bodies: demir (grenades and mines are thrown by Demir's action only; docs/CHARACTER_LOCK.md rule 3)
 # Demir's arsenal at Tüneller (slot 12 = kayit11.sav, 12 inventory entries). Every weapon is selected through the original
 # inventory: M → Silahlar → weapon → Kullan (Envantermenu.wdl EM_TusKontrol/EM_Kernel, NesneMenu.wdl EM_NesneSiMenu, KuBiGoMenu.wdl:40-49).
 # Firearms: hold S (raise, oyuncu2.wdl:2108-2196), D fires (silah.wdl Ates_Et:533 S_Kursun_Sayisi-=1), Enter reloads from the

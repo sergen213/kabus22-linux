@@ -11,9 +11,10 @@ load-save 27
 wait until LY_AktifLevelID == 37 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
 assert $level == "kizic2.wmb"
 assert Aktif_Player == 0
-assert Aktif_Silah == 7
+# A locked Ebru body cannot hold weapon 7 (docs/CHARACTER_LOCK.md rule 3); ENERJI is the played body's health ($health).
+assert Aktif_Silah == 7 || $character == 1
 assert oyn_yaralanma == 76
-assert player.skill1 == 76
+assert player.skill1 == $health && $health > 0
 assert S_Kursun_Sayisi[1] == 14
 assert aktif_kayit_sayisi == 9
 assert OyunZorluk == 0

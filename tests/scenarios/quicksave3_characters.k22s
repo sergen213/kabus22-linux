@@ -1,6 +1,8 @@
 # requires: saves
 # Quicksave/quickload and god for the other two characters: Inzar (koruyucu_pasif, koru_yaralanma 200, kayit15.sav Tnel24) and
 # Ebru (oyuncu_pasif, ebru_yaralanma 100, kayit6.sav Ev), reached from Inzar through the console "load 6".
+# With -DCHARACTER the locked body plays both stories; the gates stay the story's, god refills the body's health ($health: 200
+# for Inzar, 100 for Demir and Ebru).
 realtime off
 load-save 15
 wait until LY_AktifLevelID == 39 && level_yuklendi_ok == 1 && player != 0 && koruyucu_pasif == 0 timeout 7200
@@ -20,14 +22,14 @@ wait until LY_AktifLevelID == 0 timeout 60
 wait until LY_AktifLevelID == 39 && level_yuklendi_ok == 1 && koruyucu_pasif == 0 timeout 3600
 frames 2
 assert player.x > @x - 1 && player.x < @x + 1 && player.y > @y - 1 && player.y < @y + 1
-# Inzar moves only while koru_yaralanma == ENERJI (koruyucu.wdl:688); god keeps both at 200.
+# Inzar moves only while koru_yaralanma == ENERJI (koruyucu.wdl:688); god keeps both at the body's full health.
 press `
 type god
 press Return
-type set player.skill1 120
+type set player.skill1 60
 press Return
 frames 2
-assert player.skill1 == 200 && koru_yaralanma == 200
+assert player.skill1 == $health && $health == 200 && $character != 0 && $character != 1 || player.skill1 == $health && $health == 100 && $character >= 0 && $character != 2
 type god
 press Return
 type load 6

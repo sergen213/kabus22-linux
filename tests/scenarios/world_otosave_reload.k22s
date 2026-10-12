@@ -1,5 +1,6 @@
 # requires: saves
 # continues: inzar_lain_boss
+# bodies: inzar (continues inzar_lain_boss)
 # Restart after inzar_lain_boss, whose Buyukes arrival fired otosave_fish (skill1 14) and wrote kayit27.sav.
 # The autosave's slot reloads through the original YukleMenu into Buyukes as Demir, with the autosave flag kept.
 realtime off

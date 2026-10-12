@@ -1,4 +1,5 @@
 # requires: saves
+# bodies: ebru (her own magnum; Inzar has no firearms)
 # Ebru at Kanalizasyon (slot 20 = kayit19.sav): her only weapon, the Magnum (8), selected through the original inventory
 # (M → Silahlar → slot 0 → Kullan), raised with S, fired with D (silah.wdl Ates_Et), reloaded with Enter (oyuncu2_ebru.wdl:1675 →
 # Oy_Kursun_Doldur), then the S+Q kick (oyuncu2_ebru.wdl:1500, ent_frame "teme", player.skill32 0→100).

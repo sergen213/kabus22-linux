@@ -100,6 +100,8 @@ find item NS_Nesne
 assert @item.skill1 == 21
 store n1 NS_NesneSayisi
 walk-to @item 30 timeout 600
+# Inzar's walk stop still carries her about 14 units, out of PL_KapiTara's 60-degree cone: settle, then face the item.
+frames 30
 turn-to @item 6
 press-until D NS_NesneSayisi == @n1 + 1 timeout 300
 assert @item.invisible == 1

@@ -96,10 +96,14 @@ std::vector<float> plan(Engine& e,ObjectId player,Vec3 from,Vec3 goal,float radi
  auto key=[&](std::int64_t x,std::int64_t y,float z){const auto b=std::int64_t(std::floor((z-from.z)/48));return ((x+(1<<20))<<42)|((y+(1<<20))<<21)|(b+(1<<20));};
  auto togo=[&](Vec3 p){return level?std::hypot(flat(p,goal),p.z-goal.z):flat(p,goal);};
  std::unordered_map<std::int64_t,Node> nodes;using Open=std::pair<float,std::int64_t>;std::priority_queue<Open,std::vector<Open>,std::greater<>> open;
- nodes[key(0,0,from.z)]={from,0,-1,0,0};open.push({togo(from),key(0,0,from.z)});std::int64_t found=-1;float nearestD=togo(from);Vec3 nearestP=from;
+ nodes[key(0,0,from.z)]={from,0,-1,0,0};open.push({togo(from),key(0,0,from.z)});std::int64_t found=-1,fallback=-1;float nearestD=togo(from),fallbackD=INFINITY;Vec3 nearestP=from;
  for(int expanded=0;!open.empty()&&expanded<60000;){
   const auto k=open.top().second;open.pop();auto& n=nodes[k];if(n.closed)continue;n.closed=true;++expanded;const Node cur=n;
   if(const float d=flat(cur.p,goal);d<radius&&(!level||std::fabs(cur.p.z-goal.z)<96)){found=k;break;}else if(const float t=togo(cur.p);t<nearestD){nearestD=t;nearestP=cur.p;}
+  // The grid is anchored at the player, so its nearest cell can miss RADIUS by a few units; a cell within one more cell whose straight
+  // sweep reaches halfway into RADIUS (toward the goal, which may itself touch a wall) is used when nothing inside RADIUS is reachable.
+  if(const float d=flat(cur.p,goal);d<radius+cell&&d<fallbackD&&(!level||std::fabs(cur.p.z-goal.z)<96)){const float s=radius*.5f/d;
+   if(clear(cur.p,{goal.x+(cur.p.x-goal.x)*s,goal.y+(cur.p.y-goal.y)*s,cur.p.z})){fallback=k;fallbackD=d;}}
   const std::int64_t ix=cur.ix,iy=cur.iy;
   for(int dx=-1;dx<=1;++dx)for(int dy=-1;dy<=1;++dy){if(!dx&&!dy)continue;
    const float x=from.x+float(ix+dx)*cell,y=from.y+float(iy+dy)*cell;const auto fz=floorAt(x,y,cur.p.z-lift);
@@ -108,10 +112,11 @@ std::vector<float> plan(Engine& e,ObjectId player,Vec3 from,Vec3 goal,float radi
    const float g=cur.g+std::hypot(flat(cur.p,p),p.z-cur.p.z);if(it!=nodes.end()&&it->second.g<=g)continue;if(!clear(cur.p,p))continue;
    nodes[nk]={p,g,k,int(ix+dx),int(iy+dy)};open.push({g+togo(p),nk});}
  }
+ if(found<0)found=fallback;
  if(found<0){why="no hull path; nearest reachable cell ("+std::to_string(int(nearestP.x))+","+std::to_string(int(nearestP.y))+","+std::to_string(int(nearestP.z))+") is "+std::to_string(int(nearestD))+" from the goal ("+std::to_string(nodes.size())+" cells)";return {};}
  std::vector<Vec3> cells;for(auto k=found;k>=0;k=nodes[k].parent)cells.push_back(nodes[k].p);std::reverse(cells.begin(),cells.end());
  std::vector<float> out;for(std::size_t i=0;i+1<cells.size();){auto j=cells.size()-1;while(j>i+1&&!clear(cells[i],cells[j]))--j;out.push_back(cells[j].x);out.push_back(cells[j].y);i=j;}
- out.push_back(goal.x);out.push_back(goal.y); // final leg: the goal itself (the last cell is already within RADIUS of it)
+ out.push_back(goal.x);out.push_back(goal.y); // final leg: the goal itself (the last cell is within RADIUS of it, or a clear sweep away)
  return out;
 }
 }
@@ -256,13 +261,16 @@ bool Scenario::step(Engine& engine,Runtime& runtime,Renderer* renderer,Input& in
     if(done){release();++s.passed;s.report(step,"PASS",frame,"after "+std::to_string(s.progress)+" frames"+where);s.next();break;}
     if(s.progress>=step.count){release();++s.failed;s.report(step,"FAIL",frame,"timeout, distance "+std::to_string(int(d))+" facing "+std::to_string(int(f))+where);s.aborted=true;break;}
     // ponytail: greedy steering plus a blind sidestep (alternating sides) after 40 frames without 2 units of progress; "path" re-plans (5x max), routes re-anchor.
+    // Only frames with Up held count as "no progress" (Inzar turns in place slowly), and normal steering gets its 40 frames after each sidestep.
+    // The sidestep starts with 10 frames of no keys: Inzar's action (koruyucu.wdl) can stall in a stance while a key stays held (frame and
+    // position frozen until Up is released), so a stuck body first gets every key released.
     // Frame counts are 1/60 s frames, scaled to the step (fps_limit), so a turn in place is not taken for "stuck" at high rates.
     const auto frames60=[&](double n){return long(std::lround(n/(60*in.dt)));};
-    if(!turn){if(s.progress==0||d<s.best-2){s.best=d;s.lastImprove=s.progress;}if(!s.escape&&s.progress-s.lastImprove>frames60(40)){s.escape=int(frames60(45));++s.escapes;s.lastImprove=s.progress;
+    if(!turn){if(s.progress==0||d<s.best-2){s.best=d;s.lastImprove=s.progress;}if(!s.escape&&s.progress-s.lastImprove>frames60(40)){s.escape=int(frames60(55));++s.escapes;s.lastImprove=s.progress;
      if(planned){if(s.replans++<5&&!replan())break;}
      else if(!step.path.empty()){auto nearest=s.leg;for(std::size_t i=0;2*i<step.path.size();++i)if(at.dist(Vec3{step.path[2*i],step.path[2*i+1],pos.z})<at.dist(Vec3{step.path[2*nearest],step.path[2*nearest+1],pos.z}))nearest=i;if(nearest!=s.leg){s.leg=nearest;s.best=INFINITY;s.report(step,"INFO",frame,"stuck, re-anchored on leg "+std::to_string(s.leg)+where);}}}}
-    if(s.escape){--s.escape;const bool steer=s.escape>=frames60(30),side=s.escapes%2;s.keys.set(left,steer&&side);s.keys.set(right,steer&&!side);s.keys.set(up,true);s.keys.set(run,step.down);}
-    else{s.keys.set(left,f>band);s.keys.set(right,f< -band);s.keys.set(up,!turn&&std::fabs(f)<60);s.keys.set(run,!turn&&step.down);}
+    if(s.escape){if(!--s.escape)s.lastImprove=s.progress;const bool idle=s.escape>=frames60(45),steer=!idle&&s.escape>=frames60(30),side=s.escapes%2;s.keys.set(left,steer&&side);s.keys.set(right,steer&&!side);s.keys.set(up,!idle);s.keys.set(run,!idle&&step.down);}
+    else{s.keys.set(left,f>band);s.keys.set(right,f< -band);s.keys.set(up,!turn&&std::fabs(f)<60);s.keys.set(run,!turn&&step.down);if(!s.keys[up])s.lastImprove=s.progress;}
     ++s.progress;s.apply(in);return true;}
    case Op::Find:{
     // find NAME enemy: the nearest visible live Dusmanmi (SKILL11 1, klasik_yara.wdl:61) with Enerji (SKILL1) above 0.
