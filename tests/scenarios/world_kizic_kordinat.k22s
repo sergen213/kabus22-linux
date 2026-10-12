@@ -20,7 +20,7 @@ find door kapi_kriz_ctrl
 walk-to @door 50 path timeout 6000
 turn-to @door 6
 # Use item 52 through M -> Nesneler -> slot -> Kullan (as world_cam1_padlock): NS_AktifNesneNo 52 -> v_kapikriz_basla 1.
-press M
+press-until M EM_Acik == 1 timeout 120
 wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
 press-until Down EM_CursorSiNeDo == 1 timeout 120
 press Return

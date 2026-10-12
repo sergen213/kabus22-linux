@@ -1,4 +1,5 @@
 # requires: saves
+# character: original (the scenario picks Ebru in the New Game selector itself)
 # Character lock (docs/CHARACTER_LOCK.md). New Game with the native character selector above NORMAL/HARD (Right, Right: ORIGINAL ->
 # DEMIR -> EBRU), then Demir's opening (Start4, Aktif_Player stays 0) played by Ebru: the WMB's Oyuncu_Demir runs Oyuncu_Ebru.
 # Story gates still see Demir's story: the soldiers' magazines (silah.wdl KursunKutusu/Kursun_Al, Demir-only), the crowbar by

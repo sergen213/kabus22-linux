@@ -1,4 +1,5 @@
 # requires: saves
+# bodies: demir (god/give assert Demir's health and weapon variables)
 # Native developer console (docs/CONSOLE.md): every command typed through the real toggle key, SDL text input and Return.
 # Demir, kizic2 (level 37), from original kayit10.sav. Command output goes to stderr ("kabus22: console] ...").
 realtime off

@@ -1,4 +1,5 @@
 # requires: saves
+# bodies: ebru (her own save and magnum)
 # Ebru, Ev (slot 07 = kayit6.sav). Regression: oyuncu2_ebru.wdl:70 vec_for_vertex(…,ebru_silah.mdl,169) on a 6-vertex model (A6 clamps, 00449dc0).
 realtime off
 load-save 6

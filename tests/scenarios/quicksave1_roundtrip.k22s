@@ -41,5 +41,5 @@ press M
 wait until freeze_mode == 1 timeout 120
 press F5
 assert Aktif_SaveNo == 28
-press M
+press-until M freeze_mode == 0 timeout 120
 wait until freeze_mode == 0 timeout 300

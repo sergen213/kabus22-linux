@@ -45,7 +45,7 @@ assert $count(oyuncu_koruyucu) == 1
 wait until EnvaterAcilabilirmi == 1 timeout 1200
 walk-to -1414 -202 15 path run timeout 5000
 turn-to -1465 -207 6
-press M
+press-until M EM_Acik == 1 timeout 120
 wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
 press-until Down EM_CursorSiNeDo == 1 timeout 120
 press Return

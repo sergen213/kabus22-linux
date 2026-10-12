@@ -1,4 +1,5 @@
 # requires: saves
+# bodies: inzar (her own save, sword and spells)
 # Inzar vs a duma_yaratik in Tnel10 (slot 17 = kayit16.sav, tnel66 hub, cadde_yara_adet[23] == 3 alive). The duma waits until
 # vec_to_screen(camera) sees it (duma_yara.wdl action duma_yaratik), runs in, strikes Inzar (duma_TekVur/TersVur), reacts to the
 # sword (Key_SilahKaldir, koruyucu.wdl:3434; Yrt_Durum skill21 = a Yrt_Yaralan_* state), dies (duma_Ol, Yrt_ol 9) and is removed

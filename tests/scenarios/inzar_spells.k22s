@@ -1,4 +1,5 @@
 # requires: saves
+# bodies: inzar (her own save, sword and spells)
 # Inzar (Koruyucu), Tnel24 "Gaile Yolu" (slot 16 = kayit15.sav): sword attack (Key_SilahKaldir, koruyucu.wdl:3434), spell choice through
 # the original KoruyucuMenu (M opens via EM_Kernel/KoruyucuAcKapat, Left/Right move KOM_Cursor, Return twice sets buyu_no=KOM_Cursor+1,
 # KoruyucuMenu.wdl:149) and casting with Q (Key_Buyu, koruyucu.wdl:2819). Mana falls by buyu_gereksinimi[buyu_no] (koruyucu.wdl:557).

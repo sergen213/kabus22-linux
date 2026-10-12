@@ -72,7 +72,7 @@ assert aktif_hata_kapi == 17 && v_asmacami_ok == 0
 capture cam1_padlocked
 # Use item 12 from the original inventory: M -> Nesneler -> slot -> Kullan (KuBiGoMenu.wdl EM_KuBiGoNMenu). Opening the
 # inventory compacts it (EM_OrganizeNesneler), so the bolt cutter sits in slot 6.
-press M
+press-until M EM_Acik == 1 timeout 120
 wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
 press-until Down EM_CursorSiNeDo == 1 timeout 120
 press Return

@@ -1,3 +1,4 @@
+# bodies: demir ebru (Demir's new-game health 100; Inzar's body has 200)
 # New Game/Normal through the original intro into the first controllable level (Start4, Demir).
 # YeniMenu.wdl YeniOyunBaslat(0) -> LY_HedefLevel=1 -> LevelYonetim.wdl LevelYukle (intro movie video_ismi_str16, Esc skips).
 realtime off

@@ -1,4 +1,5 @@
 # requires: saves
+# bodies: inzar (her own save, sword and spells)
 # Inzar (Koruyucu), Tnel24 "Gaile Yolu" (slot 16 = kayit15.sav).
 realtime off
 load-save 15
