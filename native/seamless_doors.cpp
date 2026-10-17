@@ -220,7 +220,7 @@ void Engine::door_tick(Runtime& runtime){
                     d=std::hypot(ahead,std::max(0.f,std::abs(dot(r,s.right))-s.halfWidth));c=s.center;}
                 const Vec3 to{c.x-at.x,c.y-at.y,0};const float l=std::hypot(to.x,to.y);return l<1||dot(facing(b),to)>=.5f*l?d:INFINITY;};
             DoorGroup* best=nullptr;float bestReach=96;
-            for(auto& g:door_.groups){const bool eligible=g.armed&&!door_scripted(from,g.target);bool far=true;
+            for(auto& g:door_.groups){const bool eligible=g.armed&&!(g.linked&&!g.link)&&!door_scripted(from,g.target);bool far=true; // linked without a link: the fade
                 for(ObjectId b:bodies){if(!b)continue;const Vec3 at=position(b);if(std::hypot(at.x-g.centroid.x,at.y-g.centroid.y)<=128)far=false;
                     if(eligible)if(float r=reach(g,b);r<bestReach){bestReach=r;best=&g;}}
                 if(far)g.armed=true;}
