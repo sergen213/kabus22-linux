@@ -19,7 +19,7 @@ std::vector<std::string> words(std::string_view line){std::vector<std::string> o
 std::string join(const std::vector<std::string>& w,std::size_t from,std::size_t to){std::string out;for(auto i=from;i<to;++i){if(!out.empty())out+=' ';out+=w[i];}return out;}
 long number(const std::string& text,int line){long n=0;auto [end,error]=std::from_chars(text.data(),text.data()+text.size(),n);if(error!=std::errc{}||end!=text.data()+text.size())throw std::runtime_error("scenario line "+std::to_string(line)+": expected integer, got '"+text+"'");return n;}
 int scancode(const std::string& name,int line){std::string sdl=name;for(auto& c:sdl)if(c=='_')c=' ';auto code=SDL_GetScancodeFromName(sdl.c_str());if(code==SDL_SCANCODE_UNKNOWN)throw std::runtime_error("scenario line "+std::to_string(line)+": unknown SDL scancode name '"+name+"'");return code;}
-enum class Op {Frames,Key,Mouse,MouseButton,JoyButton,JoyAxis,PressUntil,Wait,Assert,Store,Set,Find,List,Capture,Print,Realtime,WalkTo,TurnTo,ExpectExit,Type};
+enum class Op {Frames,Key,Mouse,MouseButton,JoyButton,JoyAxis,PadButton,PadAxis,PressUntil,Wait,Assert,Store,Set,Find,List,Capture,Print,Realtime,WalkTo,TurnTo,ExpectExit,Type};
 struct Step {Op op;int line=0;std::string source,name,condition;int key=0,index=0;long count=0;float x=0,y=0;bool down=false;float radius=0;std::vector<float> path;};
 struct Val {bool text=false;double number=0;std::string string;};
 // WMB placement and ent_create both store the action in ACTION1 (engine.cpp load_level/create_entity).
@@ -127,6 +127,7 @@ struct Scenario::Impl {
  int passed=0,failed=0,skipped=0;std::ostringstream log;std::map<std::string,Val> stored;
  std::bitset<SDL_NUM_SCANCODES> keys,priorKeys;std::bitset<8> mouse,priorMouse;float mouseX=0,mouseY=0,priorX=0,priorY=0;
  std::array<std::bitset<32>,2> joy,priorJoy;std::array<std::array<float,6>,2> axes{};std::array<bool,2> joyUsed{};
+ std::array<std::bitset<SDL_CONTROLLER_BUTTON_MAX>,Input::Pads> pad,priorPad;std::array<std::array<float,SDL_CONTROLLER_AXIS_MAX>,Input::Pads> padAxes{};std::array<bool,Input::Pads> padUsed{};
  // Trailing "timeout N" (frames) applies to wait/press-until.
  static long timeout(std::vector<std::string>& w,int line,long fallback){if(w.size()>=2&&w[w.size()-2]=="timeout"){auto n=number(w.back(),line);w.resize(w.size()-2);return n;}return fallback;}
  void add(Step s){steps.push_back(std::move(s));}
@@ -177,7 +178,14 @@ struct Scenario::Impl {
   // seed N: applies before the scripts start, wherever it appears (main.cpp).
   else if(c=="seed"){need(2);auto n=number(w[1],line);if(n<0||n>0xffffffffL)throw std::runtime_error("scenario line "+std::to_string(line)+": seed 0..4294967295");seed=std::uint32_t(n);return;}
   // pad live: the renderer's real game controller/joystick input passes through (live pad tests, tools/virtual-gamepad); whole file.
-  else if(c=="pad"){need(2);if(w[1]!="live")throw std::runtime_error("scenario line "+std::to_string(line)+": pad live");livePad=true;return;}
+  // pad N down|up|press BUTTON [FRAMES], pad N axis AXIS V: game controller slot N (0/1), SDL names (a, start, dpup, leftx, righttrigger…).
+  else if(c=="pad"){need(2);if(w[1]=="live"){livePad=true;return;}
+   auto bad=[&]{return std::runtime_error("scenario line "+std::to_string(line)+": pad live | pad N down|up|press BUTTON [FRAMES] | pad N axis AXIS -1..1");};
+   need(4);s.index=int(number(w[1],line));if(s.index<0||s.index>=Input::Pads)throw std::runtime_error("scenario line "+std::to_string(line)+": pad 0 or 1");
+   if(w[2]=="axis"){need(5);s.op=Op::PadAxis;s.key=SDL_GameControllerGetAxisFromString(w[3].c_str());s.x=std::stof(w[4]);if(s.key==SDL_CONTROLLER_AXIS_INVALID||std::fabs(s.x)>1)throw bad();}
+   else{s.op=Op::PadButton;s.key=SDL_GameControllerGetButtonFromString(w[3].c_str());if(s.key==SDL_CONTROLLER_BUTTON_INVALID)throw bad();
+    if(w[2]=="press"){s.down=true;add(s);add({Op::Frames,line,s.source,{},{},0,0,w.size()>4?number(w[4],line):3});s.down=false;add(s);add({Op::Frames,line,s.source,{},{},0,0,3});return;}
+    if(w[2]!="down"&&w[2]!="up")throw bad();s.down=w[2]=="down";}}
   // Drives the original YukleMenu (YukleMenu.wdl:169-343) from the main menu with ordinary keys; slot N reads kayitN.sav.
   else if(c=="load-save"){need(2);auto n=std::to_string(number(w[1],line));
    for(auto expanded:{"wait until ParlaklikMenuAcik == 1 || AMP_OyunYukle.visible == 1 timeout 7200","press-until Return ParlaklikMenuAcik == 0 timeout 600","wait until AMP_OyunYukle.visible == 1 timeout 1200","press-until Down AM_Cursor == 1 timeout 600","press-until Return YUMP_Cursor.visible == 1 timeout 600"})parse(expanded,line);
@@ -192,7 +200,7 @@ struct Scenario::Impl {
   in.mouseButtons=mouse;in.mousePressed=mouse&~priorMouse;in.mouseReleased=priorMouse&~mouse;priorMouse=mouse;
   in.mouseX=mouseX;in.mouseY=mouseY;in.mouseDX=mouseX-priorX;in.mouseDY=mouseY-priorY;priorX=mouseX;priorY=mouseY;in.wheelX=in.wheelY=0;in.text=std::move(text);text.clear();
   if(livePad)return;
-  in.controllerButtons.reset();in.controllerPressed.reset();in.controllerReleased.reset();in.controllerAxes.fill(0);
+  for(int p=0;p<Input::Pads;++p){in.controllerConnected[p]=padUsed[p];in.controllerButtons[p]=pad[p];in.controllerPressed[p]=pad[p]&~priorPad[p];in.controllerReleased[p]=priorPad[p]&~pad[p];priorPad[p]=pad[p];in.controllerAxes[p]=padAxes[p];}
   for(int j=0;j<2;++j){in.joystickConnected[j]=joyUsed[j];in.joystickButtons[j]=joy[j];in.joystickPressed[j]=joy[j]&~priorJoy[j];in.joystickReleased[j]=priorJoy[j]&~joy[j];priorJoy[j]=joy[j];in.joystickAxes[j]=axes[j];}
  }
 };
@@ -220,6 +228,8 @@ bool Scenario::step(Engine& engine,Runtime& runtime,Renderer* renderer,Input& in
    case Op::Type:s.text+=step.name;s.next();break;
    case Op::JoyButton:s.joyUsed[step.index]=true;s.joy[step.index].set(std::size_t(step.key),step.down);s.next();break;
    case Op::JoyAxis:s.joyUsed[step.index]=true;s.axes[step.index][step.key]=step.x;s.next();break;
+   case Op::PadButton:s.padUsed[step.index]=true;s.pad[step.index].set(std::size_t(step.key),step.down);s.next();break;
+   case Op::PadAxis:s.padUsed[step.index]=true;s.padAxes[step.index][step.key]=step.x;s.next();break;
    case Op::Realtime:s.realtime=step.down;s.next();break;
    case Op::Wait:case Op::PressUntil:{
     // press-until: check, hold 3 frames, release 3 frames, repeat.

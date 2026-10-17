@@ -38,8 +38,14 @@ struct RenderOptions { int width{1280}, height{720}, samples{4}; float anisotrop
 struct Input {
     std::bitset<SDL_NUM_SCANCODES> keys, pressed, released;
     std::bitset<8> mouseButtons, mousePressed, mouseReleased;
-    std::bitset<SDL_CONTROLLER_BUTTON_MAX> controllerButtons, controllerPressed, controllerReleased;
-    std::array<float,SDL_CONTROLLER_AXIS_MAX> controllerAxes{};
+    // Game controllers in stable slots: the first connected pad is 0; a removed pad frees its slot, the next one fills the lowest free slot.
+    static constexpr int Pads = 2;
+    std::array<std::bitset<SDL_CONTROLLER_BUTTON_MAX>,Pads> controllerButtons, controllerPressed, controllerReleased;
+    std::array<std::array<float,SDL_CONTROLLER_AXIS_MAX>,Pads> controllerAxes{};
+    std::array<bool,Pads> controllerConnected{};
+    bool pad_pressed(int button) const { for(auto& p : controllerPressed) if(p[button]) return true; return false; } // any pad, this frame
+    bool pad_held(int button) const { for(int p = 0; p < Pads; ++p) if(controllerButtons[p][button] || controllerPressed[p][button]) return true; return false; } // any pad
+    bool pad_any() const { for(auto& p : controllerButtons) if(p.any()) return true; return false; } // any button held on any pad
     float mouseX{}, mouseY{}, mouseDX{}, mouseDY{}, wheelX{}, wheelY{};
     std::array<std::bitset<32>,2> joystickButtons, joystickPressed, joystickReleased;
     std::array<std::array<float,6>,2> joystickAxes{};
@@ -237,7 +243,7 @@ public:
     void set_title(std::string_view title);
     void set_position(int x, int y);
     void set_mouse_mode(bool visible, bool relative = false);
-    void rumble(float strength, std::uint32_t milliseconds); // Opened game controller only; unsupported pads ignore it.
+    void rumble(int pad, float strength, std::uint32_t milliseconds = 250); // Game controller slot `pad`; empty slots and pads without rumble ignore it.
     void request_quit();
     void release_scene(const Model* keep = nullptr); // keep: this model's GPU mesh and textures survive (seamless door world)
     void purge_model(const Model* model);

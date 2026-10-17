@@ -135,8 +135,8 @@ bool Engine::character_tick(Runtime& runtime,const Input& in){
  if(number("Yukleme_Yapilsin")!=0)adoptStory_=true;
  const auto menuPanel=global("YMP_Normal");newGameMenu_=menuPanel.kind==Value::Kind::Object&&state.get(menuPanel.bits)&&field(menuPanel.bits,"visible")!=0;
  if(newGameMenu_){
-  const bool left=in.pressed[SDL_SCANCODE_LEFT]||in.pressed[SDL_SCANCODE_KP_4]||in.controllerPressed[SDL_CONTROLLER_BUTTON_DPAD_LEFT];
-  const bool right=in.pressed[SDL_SCANCODE_RIGHT]||in.pressed[SDL_SCANCODE_KP_6]||in.controllerPressed[SDL_CONTROLLER_BUTTON_DPAD_RIGHT];
+  const bool left=in.pressed[SDL_SCANCODE_LEFT]||in.pressed[SDL_SCANCODE_KP_4]||in.pad_pressed(SDL_CONTROLLER_BUTTON_DPAD_LEFT);
+  const bool right=in.pressed[SDL_SCANCODE_RIGHT]||in.pressed[SDL_SCANCODE_KP_6]||in.pad_pressed(SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
   int clicked=0;if(in.mousePressed[SDL_BUTTON_LEFT])for(int i=0;i<2;++i)if(menuArrows_[i].width>0&&in.mouseX>=menuArrows_[i].x&&in.mouseX<menuArrows_[i].x+menuArrows_[i].width&&in.mouseY>=menuArrows_[i].y&&in.mouseY<menuArrows_[i].y+menuArrows_[i].height)clicked=i?1:-1;
   const int step=(right?1:0)-(left?1:0)+clicked;if(step)newGameChoice_=(newGameChoice_+4+step)%4;
  }
@@ -177,13 +177,13 @@ bool Engine::character_tick(Runtime& runtime,const Input& in){
   switchPrompt_=s;promptCursor_=0;promptRelease_=false;promptArmed_=false;notify(std::string("Story switches to ")+std::string(names[s]));
  }
  // Keys held when the question opens (walking) are ignored until released; the answering key is held back from the game too.
- const bool held=in.keys.any()||in.mouseButtons.any()||in.controllerButtons.any()||in.joystickButtons[0].any()||in.joystickButtons[1].any();
+ const bool held=in.keys.any()||in.mouseButtons.any()||in.pad_any()||in.joystickButtons[0].any()||in.joystickButtons[1].any();
  if(promptRelease_){if(held)return true;switchPrompt_=-1;promptRelease_=false;return true;}
  if(!promptArmed_){promptArmed_=!held;return true;}
- if(in.pressed[SDL_SCANCODE_UP]||in.pressed[SDL_SCANCODE_DOWN]||in.pressed[SDL_SCANCODE_KP_8]||in.pressed[SDL_SCANCODE_KP_2]||in.controllerPressed[SDL_CONTROLLER_BUTTON_DPAD_UP]||in.controllerPressed[SDL_CONTROLLER_BUTTON_DPAD_DOWN])promptCursor_^=1;
+ if(in.pressed[SDL_SCANCODE_UP]||in.pressed[SDL_SCANCODE_DOWN]||in.pressed[SDL_SCANCODE_KP_8]||in.pressed[SDL_SCANCODE_KP_2]||in.pad_pressed(SDL_CONTROLLER_BUTTON_DPAD_UP)||in.pad_pressed(SDL_CONTROLLER_BUTTON_DPAD_DOWN))promptCursor_^=1;
  int chosen=-1;
  for(int i=0;i<2;++i){const auto& r=promptRows_[i];if(r.width>0&&in.mouseX>=r.x&&in.mouseX<r.x+r.width&&in.mouseY>=r.y&&in.mouseY<r.y+r.height){if(in.mouseDX||in.mouseDY)promptCursor_=i;if(in.mousePressed[SDL_BUTTON_LEFT])chosen=i;}}
- if(in.pressed[SDL_SCANCODE_RETURN]||in.pressed[SDL_SCANCODE_KP_ENTER]||in.controllerPressed[SDL_CONTROLLER_BUTTON_A]||in.controllerPressed[SDL_CONTROLLER_BUTTON_START]||in.joystickPressed[0][0]||in.joystickPressed[1][0])chosen=promptCursor_;
+ if(in.pressed[SDL_SCANCODE_RETURN]||in.pressed[SDL_SCANCODE_KP_ENTER]||in.pad_pressed(SDL_CONTROLLER_BUTTON_A)||in.pad_pressed(SDL_CONTROLLER_BUTTON_START)||in.joystickPressed[0][0]||in.joystickPressed[1][0])chosen=promptCursor_;
  if(chosen>=0){if(chosen==1)characterLock=switchPrompt_;notify(std::string("Playing as ")+std::string(names[characterLock]));promptRelease_=true;}
  return true;
 }

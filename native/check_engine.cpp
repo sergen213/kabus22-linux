@@ -1760,40 +1760,51 @@ void input_saves_contracts(){
     zone=radial_deadzone(0,-1,0);close(zone[1],-1);
     ControllerConfig modern;modern.modern=true;modern.sensitivity=2;
     Input pad;std::bitset<32> held;pad.joystickButtons[0].set(0); // Raw device bits are replaced, not merged.
-    pad.controllerButtons.set(SDL_CONTROLLER_BUTTON_A);pad.controllerAxes[SDL_CONTROLLER_AXIS_TRIGGERRIGHT]=0.6f;pad.controllerAxes[SDL_CONTROLLER_AXIS_TRIGGERLEFT]=0.4f;
-    pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTX]=0.3f;pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY]=-0.4f;
-    auto force=apply_modern_controller(modern,pad,held);
+    auto& b0=pad.controllerButtons[0];auto& a0=pad.controllerAxes[0];
+    b0.set(SDL_CONTROLLER_BUTTON_A);a0[SDL_CONTROLLER_AXIS_TRIGGERRIGHT]=0.6f;a0[SDL_CONTROLLER_AXIS_TRIGGERLEFT]=0.4f;
+    a0[SDL_CONTROLLER_AXIS_LEFTX]=0.3f;a0[SDL_CONTROLLER_AXIS_LEFTY]=-0.4f;
+    pad.controllerButtons[1].set(SDL_CONTROLLER_BUTTON_X);pad.controllerAxes[1][SDL_CONTROLLER_AXIS_LEFTY]=-1; // Pad 1 never leaks into pad 0's mapping.
+    auto force=apply_modern_controller(modern,pad,0,held);
     assert(pad.joystickButtons[0]==std::bitset<32>((1u<<6)|(1u<<1))&&pad.joystickPressed[0]==pad.joystickButtons[0]&&pad.joystickReleased[0].none()&&held==pad.joystickButtons[0]);
     assert(force.x==0&&force.y==0);close(force.z,40,0.001); // Standing turn 0.49 < half: in-place turning needs Key_Sag==1 (oyuncu2.wdl:1560), so nothing.
-    pad.controllerButtons.reset();pad.controllerPressed.set(SDL_CONTROLLER_BUTTON_START); // Same-frame tap still produces one edge.
-    pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTX]=0;pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY]=-1;pad.controllerAxes[SDL_CONTROLLER_AXIS_RIGHTX]=1;
-    force=apply_modern_controller(modern,pad,held);
+    {Input other=pad;std::bitset<32> h;auto f=apply_modern_controller(modern,other,1,h);assert(other.joystickButtons[0]==std::bitset<32>(1u<<8)&&f.y==2&&f.z==0); // Pad 1 as the legacy pad: X → button 9, forward.
+     f=apply_modern_controller(modern,other,-1,h);assert(other.joystickButtons[0].none()&&other.joystickReleased[0]==std::bitset<32>(1u<<8)&&f.x==0&&f.y==0&&f.z==0);} // -1: a pad at rest.
+    b0.reset();pad.controllerPressed[0].set(SDL_CONTROLLER_BUTTON_START); // Same-frame tap still produces one edge.
+    a0[SDL_CONTROLLER_AXIS_LEFTX]=0;a0[SDL_CONTROLLER_AXIS_LEFTY]=-1;a0[SDL_CONTROLLER_AXIS_RIGHTX]=1;
+    force=apply_modern_controller(modern,pad,0,held);
     assert(pad.joystickButtons[0]==std::bitset<32>((1u<<3)|(1u<<1))&&pad.joystickPressed[0]==std::bitset<32>(1u<<3)&&pad.joystickReleased[0]==std::bitset<32>(1u<<6));
     assert(force.y==2&&force.x==2); // Digital forward (Key_Ileri==1); right stick turns, saturated by sensitivity.
-    pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY]=1;pad.controllerAxes[SDL_CONTROLLER_AXIS_RIGHTX]=-0.1f;force=apply_modern_controller(modern,pad,held);assert(force.y==-2&&force.x==0);
-    pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY]=-1;pad.controllerAxes[SDL_CONTROLLER_AXIS_RIGHTX]=0;pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTX]=0.3f;force=apply_modern_controller(modern,pad,held);
+    a0[SDL_CONTROLLER_AXIS_LEFTY]=1;a0[SDL_CONTROLLER_AXIS_RIGHTX]=-0.1f;force=apply_modern_controller(modern,pad,0,held);assert(force.y==-2&&force.x==0);
+    a0[SDL_CONTROLLER_AXIS_LEFTY]=-1;a0[SDL_CONTROLLER_AXIS_RIGHTX]=0;a0[SDL_CONTROLLER_AXIS_LEFTX]=0.3f;force=apply_modern_controller(modern,pad,0,held);
     close(force.x,2*2*0.3/std::hypot(0.3,1.0),0.0001);assert(force.y==2); // Walking: analog turn (oyuncu2.wdl:820), scaled by sensitivity.
-    pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY]=0;pad.controllerAxes[SDL_CONTROLLER_AXIS_LEFTX]=-0.4f;force=apply_modern_controller(modern,pad,held);assert(force.x==-2&&force.y==0); // Standing: 0.59 left → full in-place turn.
+    a0[SDL_CONTROLLER_AXIS_LEFTY]=0;a0[SDL_CONTROLLER_AXIS_LEFTX]=-0.4f;force=apply_modern_controller(modern,pad,0,held);assert(force.x==-2&&force.y==0); // Standing: 0.59 left → full in-place turn.
+    assert(pad.pad_held(SDL_CONTROLLER_BUTTON_X)&&pad.pad_pressed(SDL_CONTROLLER_BUTTON_START)&&!pad.pad_pressed(SDL_CONTROLLER_BUTTON_X)&&pad.pad_any());
     DamageRumble damage;assert(damage.update(7,100)==0&&damage.update(7,100)==0);close(damage.update(7,80),0.55);assert(damage.update(7,0)==1&&damage.update(9,50)==0&&damage.update(9,60)==0&&damage.update(0,0)==0);
     TempDirectory temporary;SaveEnvironment data(temporary.path);const auto root=temporary.path/"kabus22";
     {
         Assets assets(temporary.path);Media media(assets,false);State state;Engine engine(assets,nullptr,media,state);
         Runtime runtime(state,[&engine](auto& vm,auto& ctx,auto name,auto args){return engine.builtin(vm,ctx,name,args);});
         runtime.load_text("input-saves.wdl","function main() {}");
-        Input frame;frame.controllerAxes[SDL_CONTROLLER_AXIS_LEFTX]=0.5f;frame.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY]=-0.05f;frame.controllerButtons.set(SDL_CONTROLLER_BUTTON_A);frame.joystickButtons[0].set(0);frame.dt=1.0/60;
+        Input frame;frame.controllerAxes[0][SDL_CONTROLLER_AXIS_LEFTX]=0.5f;frame.controllerAxes[0][SDL_CONTROLLER_AXIS_LEFTY]=-0.05f;frame.controllerButtons[0].set(SDL_CONTROLLER_BUTTON_A);frame.joystickButtons[0].set(0);frame.dt=1.0/60;
+        frame.controllerAxes[1][SDL_CONTROLLER_AXIS_LEFTX]=-1;frame.controllerAxes[1][SDL_CONTROLLER_AXIS_LEFTY]=-1;frame.controllerButtons[1].set(SDL_CONTROLLER_BUTTON_B); // Pad 1 never reaches the legacy globals.
         engine.tick(runtime,frame);engine.finish_frame(runtime); // Original mode: raw joystick bits and the A6 00422000 axis scaling.
         assert(engine.number("JOY_1")==1&&engine.number("JOY_7")==0);close_vector(engine.vector(engine.global_vector("joy_force")),{1945.0/1024,0,0},1e-6); // trunc((127-32)*1024*0.02f); |-12|<32 dead zone
-        {Input stick=frame;stick.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY]=-1;stick.controllerAxes[SDL_CONTROLLER_AXIS_LEFTX]=-0.4f;stick.joystickAxes[0]={-0.5f,1,0.1f};
+        {Input stick=frame;stick.controllerAxes[0][SDL_CONTROLLER_AXIS_LEFTY]=-1;stick.controllerAxes[0][SDL_CONTROLLER_AXIS_LEFTX]=-0.4f;stick.joystickAxes[0]={-0.5f,1,0.1f};
          engine.tick(runtime,stick);engine.finish_frame(runtime); // Full forward saturates at 2*JOY_SENSE: Joy_Takip JOY_Ileri=joy_force.y/2=1 walks (Key_Ileri==1).
          close_vector(engine.vector(engine.global_vector("joy_force")),{-1433.0/1024,2,0},1e-6);close_vector(engine.vector(engine.global_vector("joy_raw")),{-128,255,25},1e-6);
          engine.set_global("JOY_SENSE",Value::from_double(0.5));engine.tick(runtime,stick);engine.finish_frame(runtime);
-         close_vector(engine.vector(engine.global_vector("joy_force")),{-716.0/1024,1,0},1e-6);engine.set_global("JOY_SENSE",Value::from_int(1));}
+         close_vector(engine.vector(engine.global_vector("joy_force")),{-716.0/1024,1,0},1e-6);engine.set_global("JOY_SENSE",Value::from_int(1));
+         engine.legacyPad=1;engine.tick(runtime,stick);engine.finish_frame(runtime);close_vector(engine.vector(engine.global_vector("joy_force")),{-2,2,0},1e-6); // Pad 1 as the legacy pad.
+         engine.legacyPad=-1;engine.tick(runtime,stick);engine.finish_frame(runtime);close_vector(engine.vector(engine.global_vector("joy_force")),{0,0,0},1e-6);engine.legacyPad=0;}
         engine.controller=modern;engine.tick(runtime,frame);engine.finish_frame(runtime);
         assert(engine.number("JOY_1")==0&&engine.number("JOY_7")==1);close_vector(engine.vector(engine.global_vector("joy_force")),{2,0,0},0.01); // Standing turn 0.82 ≥ half: full in-place turn.
         const auto player=engine.create_entity(runtime,"",{0,0,0},0);engine.set_global("player",Value::object(player));engine.set_field(player,"skill1",100);
-        engine.tick(runtime,frame);engine.finish_frame(runtime);assert(engine.rumble==0);
-        engine.set_field(player,"skill1",70);engine.tick(runtime,frame);engine.finish_frame(runtime);close(engine.rumble,0.65,0.001);
-        engine.controller.vibration=false;engine.set_field(player,"skill1",40);engine.tick(runtime,frame);engine.finish_frame(runtime);assert(engine.rumble==0);
+        engine.tick(runtime,frame);engine.finish_frame(runtime);assert(engine.rumble[0]==0&&engine.rumble[1]==0);
+        engine.set_field(player,"skill1",70);engine.tick(runtime,frame);engine.finish_frame(runtime);close(engine.rumble[0],0.65,0.001);assert(engine.rumble[1]==0);
+        // Pad 1 rumbles for its own entity (rumbleEntity); the global player stays on the legacy pad.
+        const auto second=engine.create_entity(runtime,"",{0,0,0},0);engine.set_field(second,"skill1",100);engine.rumbleEntity[1]=second;engine.tick(runtime,frame);engine.finish_frame(runtime);
+        engine.set_field(second,"skill1",90);engine.tick(runtime,frame);engine.finish_frame(runtime);assert(engine.rumble[0]==0);close(engine.rumble[1],0.45,0.001);engine.rumbleEntity[1]=0;
+        engine.controller.vibration=false;engine.set_field(player,"skill1",40);engine.tick(runtime,frame);engine.finish_frame(runtime);assert(engine.rumble[0]==0);
         // Source-written save path: backup rotation, atomic replacement and native metadata sidecar.
         ProcessContext context;
         auto save=[&](std::string_view name,std::uint8_t level){
@@ -2033,7 +2044,9 @@ void patch_option_contracts(){
     engine.controller.modern=false;engine.set_field(list,"visible",0);engine.set_global("JOY_Geri",{});
     // Pad A/B are Enter/Esc only in modern mode; in original mode they are JOY_1/JOY_2 (aim/fire), and Enter while aiming
     // reloads instead of firing (oyuncu2.wdl:2529). The d-pad is the arrow keys in both modes.
-    engine.input.controllerButtons.set(SDL_CONTROLLER_BUTTON_A);engine.input.controllerButtons.set(SDL_CONTROLLER_BUTTON_B);engine.input.controllerButtons.set(SDL_CONTROLLER_BUTTON_DPAD_UP);
+    engine.input.controllerButtons[0].set(SDL_CONTROLLER_BUTTON_A);engine.input.controllerButtons[0].set(SDL_CONTROLLER_BUTTON_B);engine.input.controllerButtons[0].set(SDL_CONTROLLER_BUTTON_DPAD_UP);
+    engine.input.controllerButtons[1].set(SDL_CONTROLLER_BUTTON_DPAD_DOWN);assert(!key(80)); // Only the legacy pad stands in for keys.
+    engine.legacyPad=1;assert(key(80)&&!key(72));engine.legacyPad=-1;assert(!key(80)&&!key(72));engine.legacyPad=0;
     assert(!key(28)&&!key(1)&&key(72));engine.controller.modern=true;assert(key(28)&&key(1)&&key(72));
     engine.controller.modern=false;engine.input=Input{};
 
