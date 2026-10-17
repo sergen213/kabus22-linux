@@ -102,7 +102,11 @@
 /// Maximum number of queued frames in the backend
 ///
 /// @ingroup Defines
-#define FFX_MAX_QUEUED_FRAMES          (4)
+// Kabus22 local patch 8: 4 -> 8. The VK backend rotates its per-frame dynamic image views (and constant ring) on every
+// fpUnregisterResources call, i.e. once per FFX dispatch, not per frame; Kabus22 calls GenerateReactiveMask and Dispatch
+// every frame, so 4 slots kept views for 1.5 frames and destroyed them while the previous frame was still on the GPU
+// (VUID-vkDestroyImageView-imageView-01026).
+#define FFX_MAX_QUEUED_FRAMES          (8)
 
 /// Maximum number of resources per effect context
 ///

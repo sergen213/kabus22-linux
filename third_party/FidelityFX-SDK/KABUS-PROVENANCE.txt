@@ -56,6 +56,10 @@ Local patches (each marked "Kabus22 local patch (shared with IKV)" in the source
      surface no longer cross-fades into two half-strength copies (k22-render-check RT probe: 72 -> 4 blended of 82 changed
      pixels); it steps at the rendered cadence. In-shader variant of ETI Yami's application shading-change mask; w = 0
      is exactly upstream.
+  8. (Kabus22 only, marked "Kabus22 local patch 8") sdk/include/FidelityFX/host/ffx_types.h: FFX_MAX_QUEUED_FRAMES 4 -> 8.
+     The VK backend advances its view/constant-ring frame slot on every fpUnregisterResources, i.e. once per dispatch;
+     Kabus22 runs GenerateReactiveMask and Dispatch each frame, so 4 slots destroyed the previous frame's dynamic image
+     views while that frame was still executing (VUID-vkDestroyImageView-imageView-01026, ~1 per frame).
 
 Patched files: unmodified upstream sha256 -> Kabus22 sha256
   sdk/include/FidelityFX/gpu/frameinterpolation/ffx_frameinterpolation.h
@@ -73,8 +77,11 @@ Patched files: unmodified upstream sha256 -> Kabus22 sha256
   sdk/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp
     upstream 0b1f1227535971a818c6367f1c27f115db682aea4371fa0c15e8dbd3b0ba5764
     kabus22  2d40ba406ec223f83d9a1774313584b27f4e898b28a29bba01ff5b4396aa8b1d
+  sdk/include/FidelityFX/host/ffx_types.h
+    upstream 057535d46b7241bb25163a21dc4e59b0029f2d3da6a474b1c1028f921d5eb6f8
+    kabus22  b2912eafd78ddafa90f5dbe0e8c76d9e8476e7f8c9f416926222b68920343d1b
 
-Upstream sha256 of every vendored file (unmodified originals; the 5 patched files differ as listed above)
+Upstream sha256 of every vendored file (unmodified originals; the 6 patched files differ as listed above)
 82cf74fc23885107c7f69249ac3f1dac55898ff68320eb2c753984cae6b2d78a  LICENSE.txt
 a19560f837c09f0c990e98b5925b731135d908e372af41c5895cbfa70cc9e5c8  sdk/include/FidelityFX/gpu/ffx_common_types.h
 e439aa5f516b2d2ebf070ff1d24561f04fa5f00262a2e4f760764a7d07de7997  sdk/include/FidelityFX/gpu/ffx_core.h
@@ -330,3 +337,18 @@ Complete local diff (diff -u upstream kabus22; marker comments read "IKV local p
      return errorCode;
  }
  
+--- upstream/sdk/include/FidelityFX/host/ffx_types.h
++++ kabus22/sdk/include/FidelityFX/host/ffx_types.h
+@@ -102,7 +102,11 @@
+ /// Maximum number of queued frames in the backend
+ ///
+ /// @ingroup Defines
+-#define FFX_MAX_QUEUED_FRAMES          (4)
++// Kabus22 local patch 8: 4 -> 8. The VK backend rotates its per-frame dynamic image views (and constant ring) on every
++// fpUnregisterResources call, i.e. once per FFX dispatch, not per frame; Kabus22 calls GenerateReactiveMask and Dispatch
++// every frame, so 4 slots kept views for 1.5 frames and destroyed them while the previous frame was still on the GPU
++// (VUID-vkDestroyImageView-imageView-01026).
++#define FFX_MAX_QUEUED_FRAMES          (8)
+ 
+ /// Maximum number of resources per effect context
+ ///

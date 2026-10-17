@@ -511,7 +511,8 @@ struct Raster {
         if(f.fsr){fx.fsrDepth=s.image(w,h,VK_FORMAT_R32_SFLOAT,color);fx.fsrMotion=s.image(w,h,VK_FORMAT_R16G16_SFLOAT,color);fx.upscaled=s.image(s.extent.width,s.extent.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|(s.generating?VkImageUsageFlags{VK_IMAGE_USAGE_TRANSFER_SRC_BIT}:0u));readable(fx.upscaled);
             // Frame interpolation copies its source (upscaled) for the next frame and may clear its output.
             if(s.generating){fx.interpolated=s.image(s.extent.width,s.extent.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);readable(fx.interpolated);}
-            fx.opaque=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);fx.reactive=s.image(w,h,VK_FORMAT_R8_UNORM,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);readable(fx.reactive);}
+            // Reactive mask: R32_SFLOAT, the r32f storage format of the SDK's autogen-reactive pass (rw_output_autoreactive).
+            fx.opaque=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);fx.reactive=s.image(w,h,VK_FORMAT_R32_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);readable(fx.reactive);}
         if(f.fxaa&&f.sharpen)fx.sharp=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);
         if(f.taa&&!f.fsr)for(auto&i:fx.taa){i=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);readable(i);} // FSR replaces TAA (composite).
         if(f.bloom)for(unsigned i=0;i<fx.bloom.size();++i)fx.bloom[i]=s.image(std::max(1u,w>>(i+1)),std::max(1u,h>>(i+1)),VK_FORMAT_R16G16B16A16_SFLOAT,color);
@@ -575,8 +576,9 @@ struct Raster {
         const auto&f=s.options.features;if(!(f.ssao||f.fog||f.taa||f.fsr))return;end();
         constexpr auto depthStages=VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;constexpr auto depthAccess=VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         if(destination.depth.samples!=VK_SAMPLE_COUNT_1_BIT){
-            // An empty rendering instance resolves sample 0 of the MSAA depth (Vulkan 1.2 depth/stencil resolve).
-            s.transition(destination.depth,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,depthStages,depthAccess);s.transition(fx.depth,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,depthStages,depthAccess);
+            // An empty rendering instance resolves sample 0 of the MSAA depth (Vulkan 1.2 depth/stencil resolve). The resolve
+            // writes its single-sample target in COLOR_ATTACHMENT_OUTPUT as a color attachment write (sync2 resolve scope).
+            s.transition(destination.depth,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,depthStages,depthAccess);s.transition(fx.depth,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,depthStages|VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,depthAccess|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
             VkRenderingAttachmentInfo d{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};d.imageView=destination.depth.view;d.imageLayout=destination.depth.layout;d.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;d.storeOp=VK_ATTACHMENT_STORE_OP_STORE;d.resolveMode=VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;d.resolveImageView=fx.depth.view;d.resolveImageLayout=fx.depth.layout;
             VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};ri.renderArea={{0,0},s.render};ri.layerCount=1;ri.pDepthAttachment=&d;vkCmdBeginRendering(s.command,&ri);vkCmdEndRendering(s.command);
         }else{
