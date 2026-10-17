@@ -71,6 +71,39 @@ layout(constant_id=0) const bool k22SmoothNormals=false;
 vec3 facet=vec3(0);
 // Primary-view fragments whose depth equals the G-buffer prepass sample use the screen-space RT signals.
 bool onSignalPixel(){return (k22RtSignals&7)!=0&&abs(texelFetch(gbufferDepth,ivec2(gl_FragCoord.xy),0).r-gl_FragCoord.z)<=1e-5;}
+// Other primary-view fragments trace inline rays, which are slow in fragment shaders (scratch traversal stack). Before
+// the first one, a fragment is classified against the prepass depth at its pixel and the 3x3 neighbours (depthSlope: its
+// screen-space depth plane), in this order:
+// 1 occluded: prepass depth in front of the fragment's plane at all nine pixels. The opaque prepass surface overwrites
+//   it, so no rays (1.5 ms of overdraw rays in the kriz infirmary at 1707x960). The neighbourhood keeps MSAA edge
+//   fragments, which a front surface covers at the pixel centre but not at every sample, on their rays.
+// 2 same surface as a neighbour's prepass pixel (MSAA edge fragments: prepass depth there continues the fragment's plane):
+//   that pixel's denoised dynamic-light (rtMask.r) and sun (g) visibility.
+// 3 decal: within 2 units of the prepass surface under its pixel (blood sprites on the floor, not in the prepass): that
+//   surface's dynamic-light visibility; the sun keeps its ray (lightmapped surfaces carry no sun signal). A few
+//   overlapping blood sprites traced 1.7 ms at 1707x960.
+// 0 anything else (translucent surfaces, sky-backed pixels, no shadows=rt signal) traces.
+vec2 depthSlope=vec2(0);int inlineClass=-1;vec2 surfaceVisibility=vec2(1);
+bool onDecalSurface(float gd){
+    if(gd>=1.0)return false;
+    // The prepass point on this fragment's view ray: clip z/w (GL convention, scene.vert remaps it) equals 2 gd - 1.
+    vec3 ray=worldPosition-cameraPosition;vec4 c0=viewProjection*vec4(cameraPosition,1),dc=viewProjection*vec4(ray,0);
+    float g=2.0*gd-1.0,den=g*dc.w-dc.z;if(abs(den)<1e-12)return false;
+    return abs((c0.z-g*c0.w)/den-1.0)*length(ray)<=2.0;
+}
+int classifyInline(){
+    if(inlineClass>=0)return inlineClass;
+    inlineClass=0;if((k22RtSignals&7)==0)return 0;
+    ivec2 p=ivec2(gl_FragCoord.xy),last=textureSize(gbufferDepth,0)-1,match=ivec2(-1);float z=gl_FragCoord.z;
+    float tolerance=1e-5+0.25*(abs(depthSlope.x)+abs(depthSlope.y));bool covered=true;
+    for(int i=0;i<9;++i){ivec2 q=clamp(p+ivec2(i%3-1,i/3-1),ivec2(0),last);float d=texelFetch(gbufferDepth,q,0).r,plane=z+dot(depthSlope,vec2(q-p));
+        covered=covered&&d+1e-5<plane;if(match.x<0&&abs(d-plane)<=tolerance)match=q;}
+    if(covered)inlineClass=1;
+    else if((k22RtSignals&1)==0)inlineClass=0;
+    else if(match.x>=0){inlineClass=2;surfaceVisibility=texelFetch(rtMask,match,0).rg;}
+    else if(onDecalSurface(texelFetch(gbufferDepth,p,0).r)){inlineClass=3;surfaceVisibility.x=texelFetch(rtMask,p,0).r;}
+    return inlineClass;
+}
 vec4 gbufferData(vec2 coord){
     vec3 n=normalize(worldNormal);if(dot(n,cameraPosition-worldPosition)<0.0)n=-n;
     if(k22SmoothNormals){n=normalize(worldNormal);if(dot(n,facet)<0.0)n=-n;}
@@ -86,9 +119,25 @@ vec4 motionData(){return vec4(vec2(previousClip.x,-previousClip.y)/previousClip.
 // with the optional shadows=rt (k22RtShadowMode), never on the default ray-traced path.
 float directVisibility(vec3 direction,float maxDistance){
     float magnitude=length(direction);
-    return k22RtShadowMode&&magnitude>0&&maxDistance>0?rtVisibility(worldPosition,direction/magnitude,maxDistance):1;
+    return k22RtShadowMode&&magnitude>0&&maxDistance>0&&classifyInline()!=1?rtVisibility(worldPosition,direction/magnitude,maxDistance):1;
 }
 float lightVisibility(vec3 delta,float distance){return directVisibility(delta,distance-rtLightClearance);}
+// Inline ray toward native light i (its direction for directional lights) and the sun, traced once per fragment: the
+// legacy light loops and the PBR specular loop ask for the same rays. Cached visibility is 8-bit, four per uint: a
+// dynamically indexed float[32] cost more than it saved where few rays repeat (level5 scene pass +0.06 ms).
+uint tracedLights=0u;uint lightRays[8]=uint[8](0u,0u,0u,0u,0u,0u,0u,0u);float sunRay=-1.0;
+float lightRay(int i){
+    if(k22RtShadowMode&&classifyInline()>=2)return surfaceVisibility.x;
+    if(i<32&&(tracedLights&(1u<<i))!=0u)return float((lightRays[i>>2]>>((i&3)*8))&255u)/255.0;
+    vec4 a=lightData[i*5],d=lightData[i*5+2];vec3 delta=a.xyz-worldPosition;
+    float v=d.w==3?directVisibility(-d.xyz,rayMaxDistance()):lightVisibility(delta,length(delta));
+    if(i<32){tracedLights|=1u<<i;lightRays[i>>2]|=uint(v*255.0+0.5)<<((i&3)*8);}
+    return v;
+}
+float sunVisibilityRay(){
+    if(k22RtShadowMode&&classifyInline()==2)return surfaceVisibility.y;
+    if(sunRay<0.0)sunRay=directVisibility(sunDirection,rayMaxDistance());return sunRay;
+}
 vec3 visibleNativeDynamic(vec3 p,vec3 n){
     vec3 result=vec3(0),unshadowed=vec3(0);
     for(int i=0;i<lightCount;++i){
@@ -102,14 +151,14 @@ vec3 visibleNativeDynamic(vec3 p,vec3 n){
         float diffuse=max(dot(n,direction),0);
         vec3 contribution=b.rgb*abs(b.a)*attenuation*diffuse;
         unshadowed+=contribution;
-        if(attenuation>0&&diffuse>0)result+=contribution*(d.w==3?directVisibility(direction,rayMaxDistance()):lightVisibility(direction,distance));
+        if(attenuation>0&&diffuse>0)result+=contribution*lightRay(i);
     }
     result=clamp(result,0,1);unshadowed=clamp(unshadowed,0,1);
     vec3 visibility=vec3(unshadowed.x>0?result.x/unshadowed.x:1,unshadowed.y>0?result.y/unshadowed.y:1,unshadowed.z>0?result.z/unshadowed.z:1);
     return vertexDynamicLight*visibility;
 }
 vec3 reflectedRadiance(vec3 rgb){
-    if(!portalEnabled&&reflectionWeight>0){
+    if(!portalEnabled&&reflectionWeight>0&&classifyInline()!=1){
         vec3 direction=reflect(normalize(worldPosition-cameraPosition),normalize(worldNormal));
         rgb=mix(rgb,rtReflection(worldPosition,direction,rayMaxDistance(),rgb),reflectionWeight);
     }
@@ -123,8 +172,7 @@ float pbrLightVisibility(int i){
     if(signalShadows)return mask.r;
     if(k22ShadowMaps)return cubeMapVisibility(i,normalize(worldNormal));
 #if K22_RAY_QUERY
-    vec4 a=lightData[i*5],d=lightData[i*5+2];vec3 delta=a.xyz-worldPosition;
-    if(lightData[i*5+1].a>=0)return d.w==3?directVisibility(-d.xyz,rayMaxDistance()):lightVisibility(delta,length(delta));
+    if(lightData[i*5+1].a>=0)return lightRay(i);
 #endif
     return 1.0;
 }
@@ -157,6 +205,7 @@ vec3 ordinaryOcclusion(vec3 p,vec3 n){
     return lost;
 }
 void main(){
+    depthSlope=vec2(dFdx(gl_FragCoord.z),dFdy(gl_FragCoord.z)); // Uniform control flow: before any discard.
     if(u.dataDoor[0].w!=0.0){
         // X: the view line's crossing of the doorway's wall plane (render.hpp DoorPortal clip rule).
         vec3 center=u.dataDoor[0].xyz,n=u.dataDoor[1].xyz;float sC=dot(cameraPosition-center,n),sP=dot(worldPosition-center,n);
@@ -199,7 +248,7 @@ void main(){
 #if K22_RAY_QUERY
             if(signalShadows)illumination+=vec3(max(dot(n,sunDirection),0))*mask.g;
             else if(k22ShadowMaps)illumination+=vec3(max(dot(n,sunDirection),0))*sunMapVisibility(n);
-            else illumination+=vec3(max(dot(n,sunDirection),0))*directVisibility(sunDirection,rayMaxDistance());
+            else{float facing=max(dot(n,sunDirection),0);illumination+=vec3(facing)*(facing>0?sunVisibilityRay():1.0);}
 #else
             if(k22ShadowMaps)illumination+=vec3(max(dot(n,sunDirection),0))*sunMapVisibility(n);
             else illumination+=vec3(max(dot(n,sunDirection),0));
@@ -219,7 +268,7 @@ void main(){
             vec3 d=a.xyz-worldPosition;float distance=length(d);float attenuation=max(1-distance/max(a.w,0.0001),0);
             vec3 contribution=b.rgb*abs(b.a)*attenuation*attenuation*max(dot(n,d/max(distance,0.0001)),0);
 #if K22_RAY_QUERY
-            if(b.a>=0&&attenuation>0)contribution*=signalShadows?mask.r:k22ShadowMaps?cubeMapVisibility(i,n):lightVisibility(d,distance);
+            if(b.a>=0&&attenuation>0)contribution*=signalShadows?mask.r:k22ShadowMaps?cubeMapVisibility(i,n):!any(greaterThan(contribution,vec3(0)))?1.0:lightData[i*5+2].w==3?lightVisibility(d,distance):lightRay(i);
             else if(signalShadows)contribution*=mask.a; // Baked lights on models: rt_signals.comp bakedVisibility.
 #else
             if(k22ShadowMaps&&b.a>=0&&attenuation>0)contribution*=cubeMapVisibility(i,n);
@@ -237,7 +286,7 @@ void main(){
     vec3 rgb=explicitMaterial?clamp(clamp(t.rgb*materialDiffuse*2,0,1)+vertexMaterialSpecular,0,1):t.rgb*illumination;
     if(k22PbrOn&&!unlit&&!explicitMaterial){
 #if K22_RAY_QUERY
-        float sunVisibility=hasLightmap?1.0:signalShadows?mask.g:k22ShadowMaps?sunMapVisibility(normalize(worldNormal)):directVisibility(sunDirection,rayMaxDistance());
+        float sunVisibility=hasLightmap?1.0:signalShadows?mask.g:k22ShadowMaps?sunMapVisibility(normalize(worldNormal)):sunVisibilityRay();
 #else
         float sunVisibility=k22ShadowMaps&&!hasLightmap?sunMapVisibility(normalize(worldNormal)):1.0;
 #endif

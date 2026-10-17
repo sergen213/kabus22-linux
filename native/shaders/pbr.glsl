@@ -43,7 +43,7 @@ vec3 k22Pbr(vec3 base,vec3 illumination,vec3 p,vec3 Ng,vec3 T,float orientation,
         vec3 L=d.w==3.0?-d.xyz:delta/max(distance,0.0001);
         float attenuation=d.w==3.0?1.0:(distance<=a.w?1.0/max(e.x+e.y*distance+e.z*distance*distance,0.0001):0.0);
         if(d.w==2.0){float rho=dot(-L,d.xyz);attenuation*=rho>=c.x?1.0:rho<=c.y?0.0:pow((rho-c.y)/max(c.x-c.y,0.0001),e.w);}
-        if(attenuation>0.0){vec3 radiance=k22Linear(clamp(b.rgb*b.a*attenuation,0.0,1.0));
+        if(attenuation>0.0&&dot(N,L)>0.0){vec3 radiance=k22Linear(clamp(b.rgb*b.a*attenuation,0.0,1.0)); // k22Direct is 0 for N.L <= 0: no visibility query.
 #ifdef K22_PBR_LIGHT_VISIBILITY
             radiance*=K22_PBR_LIGHT_VISIBILITY(i);
 #endif
