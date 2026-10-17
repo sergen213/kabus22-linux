@@ -26,7 +26,7 @@ Related: [Gameplay systems](GAMEPLAY_SYSTEMS.md) · [Camera system](CAMERA_SYSTE
 | `down KEY` / `up KEY` / `press KEY [HOLD=3]` | SDL scancode names, `_` for space (`Return`, `Escape`, `Up`, `Left_Ctrl`, `M`) |
 | `press-until KEY COND [timeout N]` | check COND; if false, hold 3 frames and release 3 frames; repeat |
 | `mouse X Y`, `mouse-down B`, `mouse-up B` | absolute pointer and buttons 1-7 |
-| `joy N button B down\|up`, `joy N axis A V` | joystick 0/1, buttons 0-31, axes 0-5 in -1..1 |
+| `joy N button B down\|up`, `joy N axis A V`, `joy N pad P` | joystick 0/1, buttons 0-31, axes 0-5 in -1..1; `pad P`: raw joystick N is the same device as game controller slot P (-1 none, the default), as `Renderer::poll` reports for a real pad (`Input::joystickPad`) |
 | `pad N down\|up BUTTON`, `pad N press BUTTON [HOLD=3]`, `pad N axis AXIS V` | game controller slot 0/1 (`Input::controllerButtons[N]`…), SDL names: `a b x y back guide start leftstick rightstick leftshoulder rightshoulder dpup dpdown dpleft dpright`, axes `leftx lefty rightx righty lefttrigger righttrigger` in -1..1. Slot `Engine::legacyPad` (the lowest connected slot; in coop P1's pad, [COOP.md](COOP.md)) feeds the original `JOY_*`/`joy_force` and the d-pad arrow keys; another slot reaches only native readers (menus, prompts, coop P2). A scenario that uses only `pad 1` therefore drives the player with it outside coop, and P2 in coop |
 | `pad N press-until BUTTON COND [timeout N]` | `press-until` on game controller slot N (hold 3 frames, release 3, until COND) |
 | `$pad(N)`, `$pad(N,BUTTON)`, `$pad(N,AXIS)` | game controller slot N connected (1/0), button held or pressed this frame (1/0), axis value; the input of the last engine tick, so it also reads live pads |

@@ -208,8 +208,9 @@ void Renderer::poll(Input&in){
         for(int button=0;button<SDL_CONTROLLER_BUTTON_MAX;++button){bool down=SDL_GameControllerGetButton(pad,static_cast<SDL_GameControllerButton>(button));if(down!=in.controllerButtons[p][button]){(down?in.controllerPressed[p]:in.controllerReleased[p]).set(button);in.controllerButtons[p].set(button,down);}}
     }
     for(int index=0;index<2;++index){
-        auto*joy=i.joysticks[index];in.joystickConnected[index]=joy!=nullptr;
+        auto*joy=i.joysticks[index];in.joystickConnected[index]=joy!=nullptr;in.joystickPad[index]=-1;
         if(!joy)continue;
+        for(int p=0;p<Input::Pads;++p)if(i.controllers[p]&&SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(i.controllers[p]))==SDL_JoystickInstanceID(joy))in.joystickPad[index]=p;
         for(int axis=0;axis<6;++axis){int value=axis<SDL_JoystickNumAxes(joy)?SDL_JoystickGetAxis(joy,axis):0;in.joystickAxes[index][axis]=value/(value<0?32768.0f:32767.0f);}
         for(int button=0;button<32;++button){bool down=button<SDL_JoystickNumButtons(joy)&&SDL_JoystickGetButton(joy,button);if(down!=in.joystickButtons[index][button]){(down?in.joystickPressed[index]:in.joystickReleased[index]).set(button);in.joystickButtons[index].set(button,down);}}
     }

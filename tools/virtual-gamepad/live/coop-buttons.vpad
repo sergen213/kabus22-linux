@@ -1,0 +1,20 @@
+# Pad side of live/coop-buttons.k22s: one pad (P2's in coop). Every action button and both triggers held, then released.
+wait store buttons_down
+down A
+down B
+down X
+down Y
+down LB
+down RB
+axis LT 255
+axis RT 255
+wait store buttons_up
+up A
+up B
+up X
+up Y
+up LB
+up RB
+axis LT 0
+axis RT 0
+wait scenario: coop-buttons.k22s

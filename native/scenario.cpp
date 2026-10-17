@@ -19,7 +19,7 @@ std::vector<std::string> words(std::string_view line){std::vector<std::string> o
 std::string join(const std::vector<std::string>& w,std::size_t from,std::size_t to){std::string out;for(auto i=from;i<to;++i){if(!out.empty())out+=' ';out+=w[i];}return out;}
 long number(const std::string& text,int line){long n=0;auto [end,error]=std::from_chars(text.data(),text.data()+text.size(),n);if(error!=std::errc{}||end!=text.data()+text.size())throw std::runtime_error("scenario line "+std::to_string(line)+": expected integer, got '"+text+"'");return n;}
 int scancode(const std::string& name,int line){std::string sdl=name;for(auto& c:sdl)if(c=='_')c=' ';auto code=SDL_GetScancodeFromName(sdl.c_str());if(code==SDL_SCANCODE_UNKNOWN)throw std::runtime_error("scenario line "+std::to_string(line)+": unknown SDL scancode name '"+name+"'");return code;}
-enum class Op {Frames,Key,Mouse,MouseButton,JoyButton,JoyAxis,PadButton,PadAxis,PressUntil,Wait,Assert,Store,Set,Find,List,Capture,Print,Realtime,WalkTo,TurnTo,ExpectExit,Type};
+enum class Op {Frames,Key,Mouse,MouseButton,JoyButton,JoyAxis,JoyPad,PadButton,PadAxis,PressUntil,Wait,Assert,Store,Set,Find,List,Capture,Print,Realtime,WalkTo,TurnTo,ExpectExit,Type};
 struct Step {Op op;int line=0;std::string source,name,condition;int key=0,index=0;long count=0;float x=0,y=0;bool down=false;float radius=0;std::vector<float> path;};
 struct Val {bool text=false;double number=0;std::string string;};
 // WMB placement and ent_create both store the action in ACTION1 (engine.cpp load_level/create_entity).
@@ -139,7 +139,7 @@ struct Scenario::Impl {
  double best=0;long lastImprove=0;int escape=0,escapes=0,replans=0;std::size_t leg=0; // walk-to/route progress
  int passed=0,failed=0,skipped=0;std::ostringstream log;std::map<std::string,Val> stored;
  std::bitset<SDL_NUM_SCANCODES> keys,priorKeys;std::bitset<8> mouse,priorMouse;float mouseX=0,mouseY=0,priorX=0,priorY=0;
- std::array<std::bitset<32>,2> joy,priorJoy;std::array<std::array<float,6>,2> axes{};std::array<bool,2> joyUsed{};
+ std::array<std::bitset<32>,2> joy,priorJoy;std::array<std::array<float,6>,2> axes{};std::array<bool,2> joyUsed{};std::array<int,2> joyPad{-1,-1};
  std::array<std::bitset<SDL_CONTROLLER_BUTTON_MAX>,Input::Pads> pad,priorPad;std::array<std::array<float,SDL_CONTROLLER_AXIS_MAX>,Input::Pads> padAxes{};std::array<bool,Input::Pads> padUsed{};
  // Trailing "timeout N" (frames) applies to wait/press-until.
  static long timeout(std::vector<std::string>& w,int line,long fallback){if(w.size()>=2&&w[w.size()-2]=="timeout"){auto n=number(w.back(),line);w.resize(w.size()-2);return n;}return fallback;}
@@ -153,6 +153,8 @@ struct Scenario::Impl {
   else if(c=="press"){need(2);press(scancode(w[1],line),line,s.source,w.size()>2?number(w[2],line):3);return;}
   else if(c=="mouse"){need(3);s.op=Op::Mouse;s.x=float(number(w[1],line));s.y=float(number(w[2],line));}
   else if(c=="mouse-down"||c=="mouse-up"){need(2);s.op=Op::MouseButton;s.key=int(number(w[1],line));s.down=c=="mouse-down";if(s.key<1||s.key>7)throw std::runtime_error("scenario line "+std::to_string(line)+": mouse button 1..7");}
+  // joy N pad P: raw joystick N is the same device as game controller slot P (-1 none), as Renderer::poll reports a real pad.
+  else if(c=="joy"&&w.size()==4&&w[2]=="pad"){s.op=Op::JoyPad;s.index=int(number(w[1],line));s.key=int(number(w[3],line));if(s.index<0||s.index>1||s.key<-1||s.key>=Input::Pads)throw std::runtime_error("scenario line "+std::to_string(line)+": joy 0|1 pad -1..1");}
   else if(c=="joy"){need(5);s.index=int(number(w[1],line));if(s.index<0||s.index>1)throw std::runtime_error("scenario line "+std::to_string(line)+": joystick 0 or 1");s.key=int(number(w[3],line));
    if(w[2]=="button"){s.op=Op::JoyButton;s.down=w[4]=="down";if(s.key<0||s.key>31||(w[4]!="down"&&w[4]!="up"))throw std::runtime_error("scenario line "+std::to_string(line)+": joy N button 0..31 down|up");}
    else if(w[2]=="axis"){s.op=Op::JoyAxis;s.x=std::stof(w[4]);if(s.key<0||s.key>5||std::fabs(s.x)>1)throw std::runtime_error("scenario line "+std::to_string(line)+": joy N axis 0..5 -1..1");}
@@ -217,7 +219,7 @@ struct Scenario::Impl {
   in.mouseX=mouseX;in.mouseY=mouseY;in.mouseDX=mouseX-priorX;in.mouseDY=mouseY-priorY;priorX=mouseX;priorY=mouseY;in.wheelX=in.wheelY=0;in.text=std::move(text);text.clear();
   if(livePad)return;
   for(int p=0;p<Input::Pads;++p){in.controllerConnected[p]=padUsed[p];in.controllerButtons[p]=pad[p];in.controllerPressed[p]=pad[p]&~priorPad[p];in.controllerReleased[p]=priorPad[p]&~pad[p];priorPad[p]=pad[p];in.controllerAxes[p]=padAxes[p];}
-  for(int j=0;j<2;++j){in.joystickConnected[j]=joyUsed[j];in.joystickButtons[j]=joy[j];in.joystickPressed[j]=joy[j]&~priorJoy[j];in.joystickReleased[j]=priorJoy[j]&~joy[j];priorJoy[j]=joy[j];in.joystickAxes[j]=axes[j];}
+  for(int j=0;j<2;++j){in.joystickConnected[j]=joyUsed[j];in.joystickButtons[j]=joy[j];in.joystickPressed[j]=joy[j]&~priorJoy[j];in.joystickReleased[j]=priorJoy[j]&~joy[j];priorJoy[j]=joy[j];in.joystickAxes[j]=axes[j];in.joystickPad[j]=joyPad[j];}
  }
 };
 Scenario::Scenario(const std::filesystem::path& file,std::filesystem::path output):impl_(std::make_unique<Impl>()){
@@ -244,6 +246,7 @@ bool Scenario::step(Engine& engine,Runtime& runtime,Renderer* renderer,Input& in
    case Op::Type:s.text+=step.name;s.next();break;
    case Op::JoyButton:s.joyUsed[step.index]=true;s.joy[step.index].set(std::size_t(step.key),step.down);s.next();break;
    case Op::JoyAxis:s.joyUsed[step.index]=true;s.axes[step.index][step.key]=step.x;s.next();break;
+   case Op::JoyPad:s.joyUsed[step.index]=true;s.joyPad[step.index]=step.key;s.next();break;
    case Op::PadButton:s.padUsed[step.index]=true;s.pad[step.index].set(std::size_t(step.key),step.down);s.next();break;
    case Op::PadAxis:s.padUsed[step.index]=true;s.padAxes[step.index][step.key]=step.x;s.next();break;
    case Op::Realtime:s.realtime=step.down;s.next();break;

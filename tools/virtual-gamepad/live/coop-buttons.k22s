@@ -1,0 +1,29 @@
+# requires: saves, one live pad (tools/virtual-gamepad/run-live.sh ... coop-buttons), original controller mode (no controller.ini)
+# Coop with one real pad (P2's; P1 on the keyboard): every action button and both triggers held on the pad reach P2 only. Before
+# 0.4.6 the pad's raw joystick fed the original JOY_* → Tuslari_Esitle → bank 0 Key_*, so P2's buttons aimed and fired P1.
+pad live
+load-save 14
+wait until LY_AktifLevelID == 41 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 && EnvaterAcilabilirmi == 1 && oyun_ilk_basladi == 0 timeout 7200
+assert $pad(0) == 1
+press F10
+type coop demir ebru
+press Return
+press F10
+wait until $p2 != 0 timeout 600
+frames 60
+assert silah_kaldir == 0 && Key_Ates == 0 && Key_SilahKaldir == 0
+store x1 player.x
+store y1 player.y
+store a0 S_Kursun_Sayisi[1]
+store buttons_down player.x
+wait until $pad(0,a) == 1 && $pad(0,lefttrigger) > 0.9 timeout 300
+frames 90
+print $bank1(silah_kaldir)
+print $bank1(Key_SilahKaldir)
+assert Key_Ates == 0 && Key_SilahKaldir == 0 && Key_Kosma == 0 && silah_kaldir == 0
+assert player.x == @x1 && player.y == @y1
+assert $bank1(Key_SilahKaldir) == 1 && $bank1(silah_kaldir) == 1
+capture coop-buttons-p2-aims
+store buttons_up player.x
+wait until $pad(0,a) == 0 timeout 300
+frames 30

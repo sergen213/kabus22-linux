@@ -1034,7 +1034,11 @@ void Engine::tick(Runtime& runtime,const Input& in){ensure_font_palette(runtime.
  {const auto now=std::time(nullptr);std::tm t{};localtime_r(&now,&t);for(auto [name,value]:{std::pair{"sys_seconds",t.tm_sec},{"sys_minutes",t.tm_min},{"sys_hours",t.tm_hour},{"sys_day",t.tm_mday},{"sys_month",t.tm_mon+1},{"sys_year",t.tm_year+1900},{"sys_dow",(t.tm_wday+6)%7+1},{"sys_doy",t.tm_yday+1}})set_global(name,Value::from_int(value));}
  // Single player: the lowest connected controller slot feeds the original joystick globals (a pad replugged into slot 1 takes over);
  // coop: P1's pad only (none when the only pad is P2's), docs/COOP.md "Controllers".
- legacyPad=coop.active?coop_pad(0):in.controllerConnected[0]?0:in.controllerConnected[1]?1:0;
+legacyPad=coop.active?coop_pad(0):in.controllerConnected[0]?0:in.controllerConnected[1]?1:0;
+ // coop: the original scripts read the raw joystick (JOY_1..12 → Joy_Takip/Tuslari_Esitle → Key_*), which also sees P2's pad, so
+ // P2's buttons fired P1 (original controller mode). Only P1's pad stays there, in slot 0; P2's keys come from coop_play.
+ if(coop.active){for(int j=0;j<2;++j)if(input.joystickPad[j]>=0&&input.joystickPad[j]!=legacyPad){input.joystickReleased[j]|=input.joystickButtons[j];input.joystickButtons[j].reset();input.joystickPressed[j].reset();input.joystickAxes[j].fill(0);}
+  if(legacyPad>=0&&input.joystickPad[1]==legacyPad&&input.joystickPad[0]!=legacyPad){std::swap(input.joystickButtons[0],input.joystickButtons[1]);std::swap(input.joystickPressed[0],input.joystickPressed[1]);std::swap(input.joystickReleased[0],input.joystickReleased[1]);std::swap(input.joystickAxes[0],input.joystickAxes[1]);}}
  coop_tick(runtime,in); // 2 PLAYER menu item and character select (native/coop_menu.cpp); hides the presses it consumes from `input`
  rumble.fill(0);if(controller.modern){modernForce_=apply_modern_controller(controller,input,legacyPad,controllerHeld_);if(controller.vibration)for(int pad=0;pad<Input::Pads;++pad){
   ObjectId id=rumbleEntity[pad];if(!id&&pad==legacyPad){auto p=global("player");if(p.kind==Value::Kind::Object)id=p.bits;}if(!(id&&entities.contains(id)&&state.get(id)&&state.get(id)->alive))id=0;

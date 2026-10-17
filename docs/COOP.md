@@ -30,6 +30,8 @@ Status: playable. The menu and character selection are `native/coop_menu.cpp`; t
 
 The select screen reads P1's and P2's pads through `coop_pad`. In play, `Engine::legacyPad` (the pad behind the original joystick globals `joy_force`/`joy_rot`/`JOY_*` and the d-pad-as-arrows aliases) is `coop_pad(0)`, so P2's pad never drives P1. Outside coop `legacyPad` is the lowest connected slot (single-player failover: a pad left alone in slot 1 drives the player). The original menus take the legacy pad's d-pad as the arrow keys in both controller modes and A/B as Enter/Escape in modern mode (`Engine::key_state`).
 
+SDL also opens every pad as a raw joystick (`Input::joystickButtons`, the original `JOY_1..12`/`joy_raw` that `GenelAyarlar.wdl` `Joy_Takip`/`Tuslari_Esitle` turn into `Key_*`). `Input::joystickPad[j]` names the game controller slot of raw slot j (`Renderer::poll` matches SDL instance IDs). In coop, `Engine::tick` clears every raw slot whose device is a pad other than P1's and moves P1's into raw slot 0, so P2's buttons never reach bank 0's `Key_*`. Before 0.4.6 they did in original controller mode (no `controller.ini`): P2's stick moved P2, but P2's buttons aimed and fired P1. A raw joystick that is not a game controller still belongs to P1. Regression: `tests/scenarios/coop_pad_buttons.k22s`.
+
 ## Gameplay
 
 ### Per-player global banks

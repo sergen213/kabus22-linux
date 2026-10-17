@@ -1,0 +1,80 @@
+# Coop: P2's pad is also a raw joystick (SDL reports a game controller as both). The original scripts read the raw joystick
+# (JOY_1..12 → Joy_Takip/Tuslari_Esitle → Key_*), so before the fix P2's buttons aimed/fired P1 while the stick moved P2.
+# P1 on the keyboard, P2 on pad 1 (the only pad). A raw joystick that is not a game controller still reaches P1 (control).
+realtime off
+wait until ParlaklikMenuAcik == 1 || AMP_YeniOyun.visible == 1 timeout 3600
+press-until Return ParlaklikMenuAcik == 0
+wait until AMP_YeniOyun.visible == 1 && AM_Cursor == 0 timeout 600
+frames 30
+press Up
+press Return
+wait until $coopmenu == 2 timeout 60
+# P1 stays on DEMIR and readies; P2 joins on pad 1 (A) on EBRU and readies.
+pad 1 press a
+assert $pick1 == 0 && $pick2 == 1
+pad 1 press a
+press Return
+wait until YMP_Normal.visible == 1 timeout 120
+press Return
+frames 300
+press Space
+wait until oyun_ilk_basladi == 1 timeout 600
+assert $coop == 1 && $coop1 == 0 && $coop2 == 1 && $character == 0
+wait until $level == "start4.wmb" && $movie == 1 timeout 7200
+frames 60
+press-until Return $movie == 0 && LY_AktifLevelID == 1 && level_yuklendi_ok == 1 && player != 0 timeout 1200
+wait until LY_AktifLevelID == 1 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 3600
+wait until $p2 != 0 timeout 600
+store p2 $p2
+store p1 player
+assert $count(Oyuncu_Demir) == 1 && $count(Oyuncu_Ebru) == 1 && @p1 != @p2 && $bank1(player) == @p2 && $dist(@p2) > 15 && $dist(@p2) < 120
+frames 30
+# Raw buttons from P2's pad device: P1's keys stay 0 and P1 neither aims nor moves.
+assert silah_kaldir == 0
+joy 0 pad 1
+store x1 player.x
+store y1 player.y
+joy 0 button 0 down
+joy 0 button 1 down
+joy 0 button 2 down
+joy 0 button 3 down
+joy 0 button 4 down
+joy 0 button 5 down
+joy 0 button 6 down
+joy 0 button 7 down
+frames 60
+assert Key_Ates == 0 && Key_SilahKaldir == 0 && Key_Kosma == 0 && silah_kaldir == 0
+assert player.x == @x1 && player.y == @y1
+joy 0 button 0 up
+joy 0 button 1 up
+joy 0 button 2 up
+joy 0 button 3 up
+joy 0 button 4 up
+joy 0 button 5 up
+joy 0 button 6 up
+joy 0 button 7 up
+frames 10
+frames 30
+# Control: a raw joystick with no game controller behind it is P1's, as in the original game.
+joy 0 pad -1
+joy 0 button 0 down
+joy 0 button 1 down
+joy 0 button 2 down
+joy 0 button 3 down
+joy 0 button 4 down
+joy 0 button 5 down
+joy 0 button 6 down
+joy 0 button 7 down
+frames 10
+assert Key_Ates != 0 || Key_SilahKaldir != 0 || Key_Kosma != 0
+wait until silah_kaldir == 1 timeout 120
+joy 0 button 0 up
+joy 0 button 1 up
+joy 0 button 2 up
+joy 0 button 3 up
+joy 0 button 4 up
+joy 0 button 5 up
+joy 0 button 6 up
+joy 0 button 7 up
+frames 60
+assert Key_Ates == 0 && Key_SilahKaldir == 0 && Key_Kosma == 0

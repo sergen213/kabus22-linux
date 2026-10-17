@@ -50,6 +50,7 @@ struct Input {
     std::array<std::bitset<32>,2> joystickButtons, joystickPressed, joystickReleased;
     std::array<std::array<float,6>,2> joystickAxes{};
     std::array<bool,2> joystickConnected{};
+    std::array<int,2> joystickPad{-1, -1}; // game controller slot of the same device as raw slot j; -1: not a game controller
     double dt{};
     bool quit{};
     std::string text;
