@@ -62,7 +62,8 @@ add_custom_command(OUTPUT "${K22_SHADER_HEADER}"
   DEPENDS ${K22_SHADER_OUTPUTS} "${CMAKE_CURRENT_SOURCE_DIR}/native/embed_spirv.py"
   VERBATIM)
 include(cmake/KabusODE.cmake)
-# AMD FidelityFX SDK v1.1.4 / FSR 3.1.4 upscaler + Vulkan backend (MIT; third_party/FidelityFX-SDK/KABUS-PROVENANCE.txt).
+# AMD FidelityFX SDK v1.1.4 / FSR 3.1.4 upscaler, frame interpolation, optical flow + Vulkan backend (MIT;
+# third_party/FidelityFX-SDK/KABUS-PROVENANCE.txt). Frame generation pacing/presentation is Kabus22's (render_vulkan.cpp).
 # tools/k22_fsr3_blobs.py replaces the SDK's Windows-only FidelityFX_SC: SPIR-V + descriptor reflection.
 set(K22_FFX "${CMAKE_CURRENT_SOURCE_DIR}/third_party/FidelityFX-SDK")
 set(K22_FFX_BLOBS "${CMAKE_CURRENT_BINARY_DIR}/k22_fsr3_blobs.h")
@@ -72,7 +73,9 @@ add_custom_command(OUTPUT "${K22_FFX_BLOBS}"
     --sdk "${K22_FFX}" --output "${K22_FFX_BLOBS}"
   DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/k22_fsr3_blobs.py" ${K22_FFX_GPU}
   VERBATIM)
-set(K22_FFX_SOURCES "${K22_FFX}/sdk/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp" "${K22_FFX}/sdk/src/backends/vk/ffx_vk.cpp"
+set(K22_FFX_SOURCES "${K22_FFX}/sdk/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp"
+  "${K22_FFX}/sdk/src/components/frameinterpolation/ffx_frameinterpolation.cpp"
+  "${K22_FFX}/sdk/src/components/opticalflow/ffx_opticalflow.cpp" "${K22_FFX}/sdk/src/backends/vk/ffx_vk.cpp"
   "${K22_FFX}/sdk/src/shared/ffx_assert.cpp" "${K22_FFX}/sdk/src/shared/ffx_message.cpp"
   "${K22_FFX}/sdk/src/shared/ffx_object_management.cpp" "${K22_FFX}/sdk/src/shared/ffx_breadcrumbs_list.cpp")
 add_library(kabus22_fsr3 STATIC ${K22_FFX_SOURCES} native/fsr_vk.cpp "${K22_FFX_BLOBS}")

@@ -32,6 +32,7 @@ Implemented `--graphics` keys:
 | `taa` | `0`, `1` | `0` | Vulkan raster and RT only. |
 | `texture_upscale`, `sharpen` | `0`, `1` | `0` | Vulkan raster and RT only; on in `enhanced`/`ultra`. |
 | `fsr` | `off`, `native`, `quality`, `balanced`, `performance`, `ultra_performance` | `off` | AMD FSR 3.1.4 upscaling, Vulkan raster and RT only; `quality` in `ultra`. Replaces TAA. |
+| `frame_generation` | `off`, `on` | `off` | AMD FSR 3.1.4 frame generation: one interpolated frame presented between every two rendered frames. Vulkan raster and RT with `fsr` on (any mode); without `fsr` (or on OpenGL) it is turned off with a notice. No preset enables it. See [FSR 3.1.4 frame generation](#fsr-314-frame-generation-frame_generationon-vulkan). |
 | `fps_limit` | `original`, `30 60 72 90 120 144 165 180 240`, `unlimited` | `original` | Frame pacing only, all backends, every preset leaves it `original`. `original` is the A6 `00414650` sleep on the script's `fps_max` (campaign 72, Bonus 60). A number replaces that period; the WDL `fps_max` global is not changed (no script reads it back). Vsync stays on, so the display refresh rate still caps values above it. `unlimited` also turns vsync off and paces at the A6 TIME floor (raw 51 = 3.11 ms, ~321 FPS): faster frames would be clamped to that floor and run the game faster than real time, so no value above it is offered. Scenarios use the period as their fixed step (`1/60` without the key). |
 | `seamless_doors` | `on`, `off` | `on` | Engine option, all backends, every preset leaves it `on`: LY_Kapi doors open as the player walks up, show the next zone through the open doorway and swap without the LYP_Fade fade when walked into; `off` is the original path. [SEAMLESS_DOORS.md](SEAMLESS_DOORS.md). |
 
@@ -168,6 +169,55 @@ world camera; depth-based effects apply only to it.
   compute subgroup quad operations is rejected like other missing features (explicit choices fail, preset backends
   degrade). `k22-render-check --vulkan[-rt]` runs the temporal-ghosting consumer with `fsr=quality`: 28 (raster) /
   34 (RT) visibly different pixels between the moving and the converged frame, against 790 / 819 with TAA.
+
+### FSR 3.1.4 frame generation (`frame_generation=on`, Vulkan)
+
+Opt-in (`--graphics frame_generation=on`, launcher Graphics → custom options; no preset sets it). Needs `fsr` on Vulkan raster
+or RT, any quality mode including `native`; otherwise `render_policy::admit_features` turns it off with a notice. A device
+without compute subgroup arithmetic, formatless storage-image reads or RGBA16F storage keeps FSR and drops frame generation
+with a notice. The SDK's optical-flow and frame-interpolation components (vendored with the upscaler,
+`third_party/FidelityFX-SDK/KABUS-PROVENANCE.txt`, patches 6 and 7) run in the frame's command buffer; the SDK's Win32-only
+frame-interpolation swapchain is not used. Ported from IKV (`src/fsr_vk.cpp`, `renderer_vk.cpp` present thread).
+
+- **Inputs:** interpolation reuses the upscaler's dilated depth, dilated motion and reconstructed previous depth of the
+  same frame and interpolates the HUD-less upscaled view (`fx.upscaled`, RGBA16F, display size, before the UI/foreground
+  layers and the post/gamma pass) halfway from the previous one (`render_vulkan_raster.cpp` `interpolate()`).
+- **HUD/UI:** never interpolated. The frame's foreground VIEW layers, panels, text, video and cursor are drawn a second
+  time over the interpolated view, with the carried depth restored, then the same post pass writes the generated frame
+  (`overlay()` run twice: generated, then the rendered frame exactly as with frame generation off). The generated frame
+  thus shows this frame's HUD; world-anchored UI can lead the interpolated scene by half a frame.
+- **Shading changes (local patch 7):** where the surface that the game motion follows has a clearly different colour in the
+  two rendered frames (a shadow or light moving over a static floor, a lit character's own body), upstream blends both
+  shadings into two half-strength shadows. Those pixels take the current frame's motion-placed sample instead (luma
+  difference smoothstep 0.05..0.15 on display values), so such shadows step at the rendered cadence; small differences
+  (ray-tracing noise) still blend. Geometry stays interpolated: the sample is still placed by the game motion.
+- **Resets:** after an FSR history reset (level load, scene release, resize, a frame without a primary 3D view) only the
+  rendered frame is presented; interpolation still runs to keep its previous-frame copy.
+- **Presentation and pacing:** a present thread owns the swapchain while frame generation is on (every queue submit,
+  present and wait goes through one mutex). Per rendered frame it waits for the frame's fence, acquires and blits the
+  generated frame and presents it, sleeps half the measured rendered-frame interval minus a 2 ms compositor lead
+  (`K22_FG_PACING_LEAD_MS`, 0-20, calibrates it), then presents the rendered frame. Presents never wait for display; the
+  present mode is unchanged (FIFO with vsync, so a full swapchain back-pressures the renderer; immediate with
+  `fps_limit=unlimited`). Before a frame reuses its slot's images the render thread waits until the present job two
+  frames back is done (`drain_presents(1)`): about half a rendered frame of extra latency.
+- **`fps_limit`:** a numeric limit caps the presented rate, so rendering is paced at half of it (240 → 120 rendered);
+  `original` keeps the script's `fps_max` pacing of the game ticks and presents twice that; `unlimited` is unchanged.
+- **Log:** `kabus22: frame generation presents=600 generated=… real=… presentedFps=… renderedFps=… presentIntervalMs
+  p50=… p99=… renderedFrameMs=…` every 600 presents (present-call times).
+- **Captures:** `Renderer::capture(F.ppm)` (scenario `capture`, `--capture`) also writes `F-fg-generated.ppm` (the frame
+  presented just before F, when this frame produced one) and `F-fg-previous.ppm` (the previous rendered frame).
+- **Checks:** `k22-render-check --vulkan[-rt]` (`frame_generation_checks`): a solid actor sliding at constant speed under a
+  HUD rectangle that jumps 108 px between frames must sit halfway in the generated frame (raster/RT: previous 97.0, generated
+  93.5, current 90.0 px), keep its area (no cross-fade) and carry exactly this frame's HUD; on RT a SHADOW caster moving
+  over a lamp-lit floor must not leave a cross-faded shadow (82 changed pixels on the shadow rows, 4 blended; upstream
+  interpolation: 72). `graphics_policy` checks the option and its admission.
+- **Validation:** Khronos layer with synchronization validation and no duplicate limit, level5 walk (raster and RT) and
+  `k22-render-check`: frame generation on adds no message kind over off, and off equals main (the remaining
+  depth-resolve WAW hazard, FSR autogen-reactive storage format mismatch, `vkDestroyImageView` in-use and raster
+  unconsumed fragment output predate it).
+- **Measured** (private virtual KWin 2560x1440 at 60 Hz, FIFO, RX 7900 XTX RADV, all `ultra`-like effects, `fsr=quality`,
+  level5 walk from `kayit0.sav`): RT `presents=600 generated=300 real=300 presentedFps=60.0 renderedFps=30.0`,
+  present interval p50 16.68 ms, p99 16.81 ms; rendered frames are bit-identical with frame generation on and off.
 
 ## Geometry upgrades (`smooth_normals`, `tessellation`; Vulkan only)
 

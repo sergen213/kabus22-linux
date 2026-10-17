@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Compile the vendored FidelityFX SDK v1.1.4 FSR 3.1.4 upscaler GLSL passes with glslangValidator and emit a C++ header
+"""Compile the vendored FidelityFX SDK v1.1.4 FSR 3.1.4 upscaler + frame-generation GLSL passes with glslangValidator and emit a C++ header
 holding the SPIR-V and the descriptor reflection the SDK Vulkan backend expects (replaces the Windows-only FidelityFX_SC).
 
 Only the permutations native/fsr_vk.cpp requests are built: LDR (tone-mapped) colour input x sharpening on/off;
 reference Lanczos, low-resolution unjittered motion vectors, non-inverted depth, wave32-or-native, no FP16 (fsr_vk.cpp
-clamps the reported device capabilities to match). Compile flags mirror the SDK's CMakeCompileFSR3UpscalerShaders.txt.
-Ported from IKV tools/ffx_fsr3_blobs.py (upscaler subset, glslangValidator instead of glslc).
+clamps the reported device capabilities to match). Frame generation: one frame-interpolation permutation (low-resolution
+unjittered motion vectors, non-inverted depth) and one optical-flow permutation (SDR input). Compile flags mirror the
+SDK's CMakeCompile{FSR3Upscaler,Frameinterpolation,Opticalflow}Shaders.txt.
+Ported from IKV tools/ffx_fsr3_blobs.py (glslangValidator instead of glslc).
 """
 import argparse, hashlib, os, struct, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -24,6 +26,24 @@ BASE = ["-DFFX_GPU=1", "-DFFX_GLSL=1",
         "-DFFX_FSR3UPSCALER_OPTION_JITTERED_MOTION_VECTORS=0",
         "-DFFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=0",
         "-DFFX_FSR3UPSCALER_OPTION_HDR_COLOR_INPUT=0"]
+# Frame generation. FfxFrameInterpolationPass order; sources sdk/src/backends/vk/shaders/frameinterpolation/ffx_frameinterpolation_<name>.glsl.
+FI_PASSES = ["reconstruct_and_dilate_pass", "setup_pass", "reconstruct_previous_depth_pass", "game_motion_vector_field_pass",
+             "optical_flow_vector_field_pass", "disocclusion_mask_pass", "pass", "compute_inpainting_pyramid_pass",
+             "inpainting_pass", "compute_game_vector_field_inpainting_pyramid_pass", "debug_view_pass"]
+FI_DEFINES = ["-DFFX_GPU=1", "-DFFX_GLSL=1",
+              "-DFFX_FRAMEINTERPOLATION_OPTION_UPSAMPLE_SAMPLERS_USE_DATA_HALF=0",
+              "-DFFX_FRAMEINTERPOLATION_OPTION_ACCUMULATE_SAMPLERS_USE_DATA_HALF=0",
+              "-DFFX_FRAMEINTERPOLATION_OPTION_REPROJECT_SAMPLERS_USE_DATA_HALF=1",
+              "-DFFX_FRAMEINTERPOLATION_OPTION_POSTPROCESSLOCKSTATUS_SAMPLERS_USE_DATA_HALF=0",
+              "-DFFX_FRAMEINTERPOLATION_OPTION_UPSAMPLE_USE_LANCZOS_TYPE=2",
+              "-DFFX_FRAMEINTERPOLATION_OPTION_LOW_RES_MOTION_VECTORS=1",
+              "-DFFX_FRAMEINTERPOLATION_OPTION_JITTER_MOTION_VECTORS=0",
+              "-DFFX_FRAMEINTERPOLATION_OPTION_INVERTED_DEPTH=0"]
+# FfxOpticalflowPass order; sources sdk/src/backends/vk/shaders/opticalflow/ffx_opticalflow_<name>.glsl.
+OF_PASSES = ["prepare_luma_pass", "compute_luminance_pyramid_pass", "generate_scd_histogram_pass",
+             "compute_scd_divergence_pass", "compute_optical_flow_advanced_pass_v5", "filter_optical_flow_pass_v5",
+             "scale_optical_flow_advanced_pass_v5"]
+OF_DEFINES = ["-DFFX_GPU=1", "-DFFX_GLSL=1", "-DFFX_OPTICALFLOW_OPTION_HDR_COLOR_INPUT=0"]
 KINDS = ["cbv", "srv_texture", "uav_texture", "srv_buffer", "uav_buffer", "sampler"]
 
 
@@ -89,11 +109,11 @@ def reflect(words):
     return out
 
 
-def compile_pass(validator, sdk, name, defines, out):
+def compile_pass(validator, sdk, effect, name, defines, out):
     gpu = os.path.join(sdk, "sdk/include/FidelityFX/gpu")
-    src = os.path.join(sdk, f"sdk/src/backends/vk/shaders/fsr3upscaler/ffx_fsr3upscaler_{name}.glsl")
+    src = os.path.join(sdk, f"sdk/src/backends/vk/shaders/{effect}/ffx_{effect}_{name}.glsl")
     result = subprocess.run([validator, "-V", "--target-env", "vulkan1.2", "-S", "comp", *defines,
-                             f"-I{gpu}", f"-I{os.path.join(gpu, 'fsr3upscaler')}", src, "-o", out],
+                             f"-I{gpu}", f"-I{os.path.join(gpu, effect)}", src, "-o", out],
                             capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError(f"glslangValidator failed for {src}:\n{result.stdout}{result.stderr}")
@@ -108,8 +128,10 @@ def main():
     p.add_argument("--sdk", required=True)
     p.add_argument("--output", required=True)
     args = p.parse_args()
-    jobs = [(f"{PASSES[i]}_pass", BASE + [f"-DFFX_FSR3UPSCALER_OPTION_APPLY_SHARPENING={s}"])
+    jobs = [("fsr3upscaler", f"{PASSES[i]}_pass", BASE + [f"-DFFX_FSR3UPSCALER_OPTION_APPLY_SHARPENING={s}"])
             for i in range(len(PASSES)) for s in (0, 1)]
+    jobs += [("frameinterpolation", name, FI_DEFINES) for name in FI_PASSES]
+    jobs += [("opticalflow", name, OF_DEFINES) for name in OF_PASSES]
     with tempfile.TemporaryDirectory() as tmp, ThreadPoolExecutor(min(os.cpu_count() or 4, 4)) as pool:
         spirv = list(pool.map(lambda n: compile_pass(args.glslang, args.sdk, *jobs[n], os.path.join(tmp, f"{n}.spv")),
                               range(len(jobs))))
@@ -140,7 +162,13 @@ def main():
     lines.append(f"inline const Blob blobs[{len(PASSES)}][2]={{")
     for i in range(len(PASSES)):
         lines.append("{" + ",".join(blob_of[i * 2:i * 2 + 2]) + "},")
-    lines += ["};", "}"]
+    lines.append("};")
+    upscaler = len(PASSES) * 2
+    lines.append("// [FfxFrameInterpolationPass]")
+    lines.append(f"inline const Blob fi_blobs[{len(FI_PASSES)}]={{" + ",".join(blob_of[upscaler:upscaler + len(FI_PASSES)]) + "};")
+    lines.append("// [FfxOpticalflowPass]")
+    lines.append(f"inline const Blob of_blobs[{len(OF_PASSES)}]={{" + ",".join(blob_of[upscaler + len(FI_PASSES):]) + "};")
+    lines += ["}"]
     tmp_out = args.output + ".tmp"
     with open(tmp_out, "w") as f:
         f.write("\n".join(lines) + "\n")

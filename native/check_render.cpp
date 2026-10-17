@@ -1976,6 +1976,82 @@ void temporal_ghosting_checks(bool rayTracing,std::uint8_t fsr=0) {
     // Camera-only reprojection left 6043 (RT) / 2278 (raster) visibly different pixels of 57600; motion vectors ~800.
     if(trail>1400||noise>200)throw std::runtime_error("Moving actor left a temporal trail");
 }
+// FSR 3.1.4 frame generation (frame_generation=on, FSR quality): a solid actor sliding sideways at constant speed under a
+// HUD rectangle. The generated frame (capture -fg-generated) must place the actor halfway between the previous and the
+// current rendered frame without a second, faded copy, and must carry this frame's HUD exactly as the rendered frame does.
+void frame_generation_checks(bool rayTracing) {
+    using namespace k22;
+    TempDirectory captures;
+    auto solid=[](std::array<std::uint8_t,3>c){auto image=std::make_shared<Image>();image->width=image->height=8;for(unsigned i=0;i<64;++i)image->rgba.insert(image->rgba.end(),{c[0],c[1],c[2],255});return image;};
+    auto plane=[](Model&m,float x,float half,std::shared_ptr<const Image>image){m.formatVersion=4;m.vertices={{{x,-half,-half},{-1,0,0},{0,0},{}},{{x,half,-half},{-1,0,0},{1,0},{}},{{x,half,half},{-1,0,0},{1,1},{}},{{x,-half,half},{-1,0,0},{0,1},{}}};m.triangles={{{0,1,2},0,0},{{0,2,3},0,0}};m.materials.resize(1);m.materials[0].texture=std::move(image);};
+    World backdrop;Model actor;
+    plane(backdrop.mesh,40,60,solid({40,60,160}));backdrop.mesh.formatVersion=6;backdrop.mesh.materials[0].flags=3;backdrop.mesh.materials[0].raw.resize(64);
+    plane(actor,9,1.5f,solid({230,30,20}));
+    std::array<DrawInstance,1> actors{};actors[0].model=&actor;actors[0].objectId=401;actors[0].doubleSided=actors[0].noFog=true;
+    Camera camera;camera.nativeAmbient=-127;camera.widescreen=false;camera.noShadow=true;camera.perDrawOpacity=true;
+    std::array<UICommand,1> hud{};hud[0].kind=UICommand::Kind::Solid;hud[0].rect={8,8,48,24};hud[0].color={.1f,.9f,.2f,1};
+    RenderFrame frame;frame.cameras=std::span(&camera,1);frame.world=&backdrop;frame.sunDirection={-1,0,1};frame.instances=actors;frame.ui=hud;
+    RenderOptions options;options.backend=RendererBackend::Vulkan;options.rayTracing=rayTracing;options.pbr=true;
+    options.width=320;options.height=180;options.samples=2;options.vsync=false;options.title="Kabus 22 frame generation consumer";
+    options.features.fsr=2;options.features.frameGeneration=true;if(rayTracing)options.features.shadows=ShadowMode::RayTraced;
+    Renderer renderer(options);
+    if(!renderer.presentation_state().frameGeneration)throw std::runtime_error("frame generation did not start");
+    // The HUD jumps 108 px between the last two frames: the generated frame must show only this frame's HUD.
+    auto pose=[&](int i){actors[0].position.y=-6+.3f*i;hud[0].rect.x=8+12.f*float(i%10);};
+    for(int i=0;i<30;++i){pose(i);renderer.draw(frame);}
+    pose(30);
+    const auto current=captured_pixels(renderer,frame,captures.path/"fg.ppm");
+    auto load=[&](const char*name){std::ifstream file(captures.path/name,std::ios::binary);std::string magic;int w{},h{},m{};file>>magic>>w>>h>>m;file.get();std::vector<std::uint8_t>p(current.size());file.read(reinterpret_cast<char*>(p.data()),std::streamsize(p.size()));if(!file||magic!="P6"||std::size_t(w)*h*3!=p.size())throw std::runtime_error(std::string("missing frame generation capture ")+name);return p;};
+    const auto generated=load("fg-fg-generated.ppm"),previous=load("fg-fg-previous.ppm");
+    if(auto*keep=std::getenv("K22_CAPTURE_DIR"))for(auto name:{"fg.ppm","fg-fg-generated.ppm","fg-fg-previous.ppm"})std::filesystem::copy_file(captures.path/name,std::filesystem::path(keep)/(std::string(rayTracing?"rt-":"raster-")+name),std::filesystem::copy_options::overwrite_existing);
+    const auto metrics=renderer.metrics();const int width=metrics.drawableWidth;
+    // Actor: strongly red pixels outside the HUD; their column centroid and count.
+    auto actor_stats=[&](const std::vector<std::uint8_t>&p){double sum=0;std::size_t n=0;for(std::size_t i=0;i<p.size()/3;++i){const int r=p[i*3],g=p[i*3+1],b=p[i*3+2];if(int(i/width)>40&&r>150&&g<100&&b<100){sum+=double(i%width);++n;}}return std::pair{n?sum/double(n):-1.,n};};
+    // Area tinted by the actor at any strength: a cross-faded or doubled actor covers both positions.
+    auto tinted=[&](const std::vector<std::uint8_t>&p){std::size_t n=0;for(std::size_t i=0;i<p.size()/3;++i)if(int(i/width)>40&&int(p[i*3])>int(p[i*3+2])+40)++n;return n;};
+    const auto [cx,cn]=actor_stats(current);const auto [px,pn]=actor_stats(previous);const auto [gx,gn]=actor_stats(generated);
+    const auto tintedGenerated=tinted(generated),tintedReal=std::max(tinted(current),tinted(previous));
+    std::size_t hudDiff=0,staleHud=0;for(int y=10;y<30;++y)for(int x=10;x<54;++x)for(int c=0;c<3;++c){const auto i=(std::size_t(y)*width+x)*3+c;hudDiff+=generated[i]!=current[i];}
+    for(int y=10;y<30;++y)for(int x=118;x<162;++x){const auto i=(std::size_t(y)*width+x)*3;staleHud+=generated[i+1]>150&&generated[i]<100;}
+    std::cout<<(rayTracing?"RT":"Raster")<<" frame generation: actor x previous "<<px<<" generated "<<gx<<" current "<<cx<<", red px "<<pn<<"/"<<gn<<"/"<<cn
+             <<", tinted px generated "<<tintedGenerated<<" real "<<tintedReal<<", HUD differing values "<<hudDiff<<", previous-HUD px "<<staleHud<<std::endl;
+    if(cn==0||pn==0||gn==0||std::abs(cx-px)<2)throw std::runtime_error("frame generation consumer: actor not visible or not moving");
+    if(std::abs(gx-(px+cx)/2)>std::max(1.5,std::abs(cx-px)*.2))throw std::runtime_error("generated frame does not place the actor halfway");
+    if(double(gn)<.8*double(std::min(pn,cn))||double(tintedGenerated)>1.1*double(tintedReal)+20)throw std::runtime_error("generated frame doubles or fades the moving actor");
+    if(hudDiff||staleHud)throw std::runtime_error("generated frame HUD is not exactly the rendered frame's HUD");
+    if(!rayTracing)return;
+    // A moving SHADOW caster over a static lamp-lit floor (camera looking down): the floor's game motion is zero, so a
+    // plain interpolation blends the previous and the current shadow into two half-strength copies. Along the floor
+    // column through the shadow, count changed pixels whose generated luma lies strictly between both rendered frames.
+    auto flat=[](std::array<std::uint8_t,4> c){auto image=std::make_shared<Image>();image->width=image->height=16;for(unsigned i=0;i<256;++i)image->rgba.insert(image->rgba.end(),c.begin(),c.end());return image;};
+    World floor;auto&mesh=floor.mesh;mesh.formatVersion=6;
+    mesh.vertices={{{-64,64,0},{0,0,1},{0,0},{0,0}},{{64,64,0},{0,0,1},{1,0},{1,0}},{{64,-64,0},{0,0,1},{1,1},{1,1}},{{-64,-64,0},{0,0,1},{0,1},{0,1}}};
+    mesh.triangles={{{0,1,2},0,0},{{0,2,3},0,0}};mesh.materials.resize(1);
+    auto&surface=mesh.materials[0];surface.texture=flat({255,255,255,255});surface.lightmap=flat({128,128,128,255});surface.raw.resize(64);surface.raw[43]=100;
+    Model blocker;blocker.formatVersion=4;
+    blocker.vertices={{{-6,6,20},{0,0,1},{0,0},{}},{{6,6,20},{0,0,1},{1,0},{}},{{6,-6,20},{0,0,1},{1,1},{}},{{-6,-6,20},{0,0,1},{0,1},{}}};
+    blocker.triangles={{{0,2,1},0,0},{{0,3,2},0,0}};blocker.materials.resize(1);blocker.materials[0].texture=flat({255,255,255,255});
+    DrawInstance caster;caster.model=&blocker;caster.objectId=402;caster.shadowRequested=caster.doubleSided=caster.noFog=true;
+    // The lamp off to -x throws the shadow ~16 units toward +x (about 13 rows off the caster's own rows).
+    RenderLight lamp;lamp.position={-80,0,120};lamp.range=600;lamp.baked=lamp.synthetic=true;
+    Camera top;top.position={0,0,150};top.angles={0,-90,0};top.farClip=600;top.widescreen=false;top.perDrawOpacity=top.noCull=true;
+    RenderFrame shadowFrame;shadowFrame.cameras=std::span(&top,1);shadowFrame.world=&floor;shadowFrame.instances=std::span(&caster,1);shadowFrame.lights=std::span(&lamp,1);
+    // The caster crosses the lamp's axis sideways (screen x); the camera-plane caster itself is masked out by its own rows.
+    for(int i=0;i<30;++i){caster.position.y=-45+3.f*float(i);renderer.draw(shadowFrame);}
+    caster.position.y=-45+3.f*30;
+    const auto shadowNow=captured_pixels(renderer,shadowFrame,captures.path/"fg.ppm");
+    const auto shadowGenerated=load("fg-fg-generated.ppm"),shadowPrevious=load("fg-fg-previous.ppm");
+    if(auto*keep=std::getenv("K22_CAPTURE_DIR"))for(auto name:{"fg.ppm","fg-fg-generated.ppm","fg-fg-previous.ppm"})std::filesystem::copy_file(captures.path/name,std::filesystem::path(keep)/(std::string("rt-shadow-")+name),std::filesystem::copy_options::overwrite_existing);
+    std::size_t changed=0,blended=0;const int height=metrics.drawableHeight;
+    auto luma=[&](const std::vector<std::uint8_t>&p,std::size_t i){return .299*p[i*3]+.587*p[i*3+1]+.114*p[i*3+2];};
+    for(int y=0;y<height;++y)if(std::abs(y-height/2)>=9&&std::abs(y-height/2)<=20)for(int x=0;x<width;++x){const auto i=std::size_t(y)*width+x;
+        const double a=luma(shadowPrevious,i),b=luma(shadowNow,i),g=luma(shadowGenerated,i),d=std::abs(a-b);
+        if(d>20){++changed;blended+=g>std::min(a,b)+.25*d&&g<std::max(a,b)-.25*d;}}
+    std::cout<<"RT frame generation moving shadow: changed "<<changed<<" px, blended "<<blended<<std::endl;
+    // Upstream interpolation blended 72 of 82; the shading-change patch (KABUS-PROVENANCE.txt patch 7) leaves 4.
+    if(changed<40)throw std::runtime_error("frame generation shadow consumer: the shadow did not move");
+    if(blended*5>changed)throw std::runtime_error("generated frame cross-fades the moving shadow (doubled shadow)");
+}
 // Seamless door (render.hpp DoorPortal): doorway hole + door-world preview with the exact clip rules, no-op paths, release_scene(keep).
 void door_portal_checks(k22::RendererBackend backend,bool rayTracing) {
     using namespace k22;
@@ -2060,6 +2136,13 @@ void graphics_policy_checks() {
      require(resolve_graphics("ultra",off).features.fsr==0&&resolve_graphics("custom",native).features.fsr==1&&resolve_graphics("custom",ultraPerformance).features.fsr==5,"fsr values map to quality modes");
      const std::vector<std::pair<std::string,std::string>>bad{{"fsr","1"}};rejects([&]{resolve_graphics("custom",bad);},"fsr=1 accepted");}
     {using Overrides=std::vector<std::pair<std::string,std::string>>;
+     require(!ultra.features.frameGeneration&&resolve_graphics("custom",Overrides{{"fsr","quality"},{"frame_generation","on"}}).features.frameGeneration&&!resolve_graphics("custom",Overrides{{"frame_generation","off"}}).features.frameGeneration,"frame_generation is opt-in on|off");
+     rejects([&]{resolve_graphics("custom",Overrides{{"frame_generation","1"}});},"frame_generation=1 accepted");
+     // Frame generation needs FSR on Vulkan: fsr=off, or OpenGL (which drops FSR), turns it off with a notice.
+     std::vector<std::string>notes;auto f=admit_features(resolve_graphics("custom",Overrides{{"frame_generation","on"}}).features,"vulkan-rt",notes);require(!f.frameGeneration&&notes.size()==1,"frame_generation without fsr is dropped with a notice");
+     notes.clear();f=admit_features(resolve_graphics("custom",Overrides{{"fsr","quality"},{"frame_generation","on"}}).features,"opengl",notes);require(!f.fsr&&!f.frameGeneration&&notes.size()==2,"OpenGL drops fsr and frame_generation");
+     notes.clear();f=admit_features(resolve_graphics("custom",Overrides{{"fsr","quality"},{"frame_generation","on"}}).features,"vulkan-raster",notes);require(f.fsr==2&&f.frameGeneration&&notes.empty(),"Vulkan raster keeps frame_generation with fsr");}
+    {using Overrides=std::vector<std::pair<std::string,std::string>>;
      require(enhanced.fpsLimit==0&&ultra.fpsLimit==0&&resolve_graphics("custom",Overrides{{"fps_limit","original"}}).fpsLimit==0,"presets keep the script fps_max");
      require(resolve_graphics("original",Overrides{{"fps_limit","144"}}).fpsLimit==144&&resolve_graphics("ultra",Overrides{{"fps_limit","unlimited"}}).fpsLimit==-1,"fps_limit values map to rates");
      for(auto bad:{"0","360","75","-1","max"})rejects([&]{resolve_graphics("custom",Overrides{{"fps_limit",bad}});},"unsupported fps_limit accepted");
@@ -2075,7 +2158,7 @@ void graphics_policy_checks() {
      notes.clear();f=admit_features(ultra.features,"vulkan-raster",notes);require(f.shadows==ShadowMode::ShadowMap&&f.taa&&!f.gi&&notes.size()==4,"raster admission keeps TAA");
      notes.clear();require(admit_features(ultra.features,"vulkan-rt",notes)==ultra.features&&notes.empty(),"RT admits everything silently");
      notes.clear();f=admit_features(enhanced.features,"opengl",notes);require(f.ssao&&f.fxaa&&f.shadows==ShadowMode::ShadowMap&&!f.smoothNormals&&notes.size()==4,"enhanced effects run on every backend; Vulkan upgrades drop on OpenGL");}
-    for(auto&option:graphicsOptions){const bool rtOnly=option.key=="gi"||option.key=="reflections"||option.key=="denoise";const bool vulkanOnly=option.key=="taa"||option.key=="smooth_normals"||option.key=="tessellation"||option.key=="texture_upscale"||option.key=="sharpen"||option.key=="fsr";require(option.backends==(rtOnly?backendRT:vulkanOnly?backendVulkan:backendAll),"capability backends match implementations");}
+    for(auto&option:graphicsOptions){const bool rtOnly=option.key=="gi"||option.key=="reflections"||option.key=="denoise";const bool vulkanOnly=option.key=="taa"||option.key=="smooth_normals"||option.key=="tessellation"||option.key=="texture_upscale"||option.key=="sharpen"||option.key=="fsr"||option.key=="frame_generation";require(option.backends==(rtOnly?backendRT:vulkanOnly?backendVulkan:backendAll),"capability backends match implementations");}
     require(!composite_enabled(false,{})&&composite_enabled(true,{})&&composite_enabled(false,{.bloom=true})&&composite_enabled(false,{.taa=true})&&composite_enabled(false,{.sharpen=true})&&!composite_enabled(false,{.ssao=true})&&!composite_enabled(false,{.upscale=true})&&composite_enabled(false,{.fsr=1}),"composite only when an effect needs it");
     require(!shadow_maps_enabled({})&&shadow_maps_enabled({.shadows=ShadowMode::ShadowMap})&&!shadow_maps_enabled({.shadows=ShadowMode::RayTraced})&&!shadow_maps_enabled({.shadows=ShadowMode::RayTraced,.fog=true}),"shadow maps only for shadows=shadowmap (RT fog does not render them)");
     {Camera c;c.position={100,-50,30};c.angles={30,-10,0};c.nearClip=1;c.farClip=8000;const float aspect=16/9.f;auto vp=camera_matrix(c,aspect);auto iv=inverse(vp);auto id=product(vp,iv);
@@ -2195,12 +2278,12 @@ int main(int argc,char** argv) {
     if(argc==3) {
         if(mode!="--gl"){vulkan_door_portal_checks(mode=="--vulkan-rt");std::cout<<"Actual Vulkan seamless door portal checks passed\n";}
         if(mode=="--vulkan-rt"){
-            temporal_ghosting_checks(true);temporal_ghosting_checks(true,2);gl_checks(bytes(mix),bytes(sunMix),k22::RendererBackend::Vulkan,true);
+            temporal_ghosting_checks(true);temporal_ghosting_checks(true,2);frame_generation_checks(true);gl_checks(bytes(mix),bytes(sunMix),k22::RendererBackend::Vulkan,true);
             rt_checks();rt_actor_shadow_checks();rt_reflection_checks(bytes(mix),bytes(sunMix));overlay_key_checks(k22::RendererBackend::Vulkan,true);ui_atlas_edge_checks(k22::RendererBackend::Vulkan,true);
             std::cout<<"Actual Vulkan hardware ray-query visibility/animation/alpha/reflection/turbulence consumer checks passed\n";
         }else{
             const auto backend=mode=="--vulkan"?k22::RendererBackend::Vulkan:k22::RendererBackend::OpenGL;
-            if(backend==k22::RendererBackend::Vulkan){temporal_ghosting_checks(false);temporal_ghosting_checks(false,2);}gl_checks(bytes(mix),bytes(sunMix),backend);turbulence_checks(backend);overlay_key_checks(backend,false);ui_atlas_edge_checks(backend,false);
+            if(backend==k22::RendererBackend::Vulkan){temporal_ghosting_checks(false);temporal_ghosting_checks(false,2);frame_generation_checks(false);}gl_checks(bytes(mix),bytes(sunMix),backend);turbulence_checks(backend);overlay_key_checks(backend,false);ui_atlas_edge_checks(backend,false);
             if(backend==k22::RendererBackend::OpenGL)door_portal_checks(backend,false);
             std::cout<<"Actual "<<(mode=="--vulkan"?"Vulkan raster":"GL")<<" material/effect/opacity/particle/turbulence consumer checks passed\n";
         }

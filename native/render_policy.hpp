@@ -285,7 +285,7 @@ inline unsigned backend_bit(std::string_view backend){return backend=="opengl"?b
 // `restricted` names one value that only works on `restrictedBackends` (shadows=rt).
 struct GraphicsOption { std::string_view key,label,fallback; std::array<std::string_view,11> values; std::size_t count; unsigned backends{backendAll}; std::string_view restricted{}; unsigned restrictedBackends{}; };
 // Every implemented --graphics key. Backend availability is probed separately.
-inline constexpr std::array<GraphicsOption,21> graphicsOptions{{
+inline constexpr std::array<GraphicsOption,22> graphicsOptions{{
     {"backend","Rendering backend","opengl",{"opengl","vulkan-raster","vulkan-rt"},3},
     {"pbr","PBR materials (HDR + tone mapping)","0",{"0","1"},2},
     {"anisotropy","Anisotropic filtering","8",{"1","2","4","8","16"},5},
@@ -305,6 +305,7 @@ inline constexpr std::array<GraphicsOption,21> graphicsOptions{{
     {"texture_upscale","Edge-aware 2x texture upscaling","0",{"0","1"},2,backendVulkan},
     {"sharpen","Contrast-adaptive sharpening","0",{"0","1"},2,backendVulkan},
     {"fsr","AMD FSR 3.1 upscaling (replaces TAA)","off",{"off","native","quality","balanced","performance","ultra_performance"},6,backendVulkan},
+    {"frame_generation","AMD FSR 3.1.4 frame generation (needs fsr; one generated frame per rendered frame)","off",{"off","on"},2,backendVulkan},
     {"fps_limit","Frame rate limit (original = script fps_max: campaign 72, Bonus 60)","original",{"original","30","60","72","90","120","144","165","180","240","unlimited"},11},
     // Engine (not renderer) option like fps_limit: every preset keeps it on; off = the original LevelYukle fade (docs/SEAMLESS_DOORS.md).
     {"seamless_doors","Seamless doors (next zone visible through the open door, no fade)","on",{"on","off"},2}}};
@@ -333,6 +334,7 @@ inline GraphicsSettings resolve_graphics(std::string_view preset,std::span<const
         else if(key=="bloom")f.bloom=on;else if(key=="ssao")f.ssao=on;else if(key=="fxaa")f.fxaa=on;else if(key=="taa")f.taa=on;
         else if(key=="smooth_normals")f.smoothNormals=on;else if(key=="tessellation")f.tessellation=on;else if(key=="texture_upscale")f.upscale=on;else if(key=="sharpen")f.sharpen=on;
         else if(key=="fsr")f.fsr=std::uint8_t(std::find(option->values.begin(),option->values.end(),value)-option->values.begin());
+        else if(key=="frame_generation")f.frameGeneration=value=="on";
         else if(key=="fps_limit")g.fpsLimit=value=="original"?0:value=="unlimited"?-1:std::stoi(value);
         else if(key=="seamless_doors")g.seamlessDoors=value=="on";else f.fog=on;
     }
@@ -354,6 +356,7 @@ inline GraphicsFeatures admit_features(GraphicsFeatures f,std::string_view backe
     drop(f.gi,"gi",backendRT);drop(f.roughReflections,"reflections=rough",backendRT);drop(f.denoise,"denoise",backendRT);drop(f.taa,"taa",backendVulkan);
     drop(f.smoothNormals,"smooth_normals",backendVulkan);drop(f.tessellation,"tessellation",backendVulkan);drop(f.upscale,"texture_upscale",backendVulkan);drop(f.sharpen,"sharpen",backendVulkan);
     if(f.fsr&&!(bit&backendVulkan)){f.fsr=0;notices.push_back("fsr requires Vulkan; disabling it on "+std::string(backend));}
+    if(f.frameGeneration&&!f.fsr){f.frameGeneration=false;notices.push_back("frame_generation requires fsr on Vulkan; disabling it on "+std::string(backend));}
     return f;
 }
 // Preset-selected backends degrade along this chain with a stderr notice; explicit choices never do.

@@ -4,6 +4,7 @@
 #include "fsr_vk.hpp"
 #include <array>
 #include <memory>
+#include <mutex>
 #include <functional>
 #include <vector>
 namespace k22 {
@@ -63,6 +64,7 @@ struct VulkanBackend::State {
     VkInstance instance{}; VkSurfaceKHR surface{}; VkPhysicalDevice physical{}; VkDevice device{};
     VkPhysicalDeviceProperties properties{}; VkPhysicalDeviceMemoryProperties memoryProperties{};
     VkQueue queue{}; std::uint32_t queueFamily{}; bool rayEnabled{};
+    std::mutex queueMutex; // every queue submit/present/wait: the frame-generation present thread shares the queue.
     bool bufferAddressEnabled{},swapDirty{};
     VkSwapchainKHR swapchain{}; VkFormat swapFormat{}; VkPresentModeKHR presentMode{VK_PRESENT_MODE_FIFO_KHR};
     // extent: display (swapchain, UI); render: background views, their effects and RT signals (FSR input size, else extent).
@@ -71,6 +73,13 @@ struct VulkanBackend::State {
     VkFormat depthFormat{VK_FORMAT_D24_UNORM_S8_UINT}; VkSampleCountFlagBits samples{VK_SAMPLE_COUNT_1_BIT};
     vk22::Target scene,alpha,portal,hdr; vk22::Image finalImage; // hdr: PBR background views (RGBA16F, scene samples, render size).
     std::unique_ptr<vk22::Fsr3> fsr; // fsr feature: upscales the composited render-size view to extent.
+    // FSR 3.1.4 frame generation (fsr->generates(); docs/GRAPHICS_ROADMAP.md): per frame slot, generated is the frame
+    // interpolated between the previous and this rendered frame with this frame's UI drawn over it (valid when
+    // generatedValid), real a copy of this frame's finalImage. The present thread (Presenter) then owns the swapchain: it
+    // acquires, blits and presents generated, then real half a rendered-frame interval later.
+    bool generating{},generatedValid{}; std::array<vk22::Image,2> generated,real;
+    struct Presenter; std::unique_ptr<Presenter> presenter;
+    void drain_presents(std::uint64_t outstanding=0);
     bool retainedColorValid{},portalColorValid{},finalValid{};
     struct Slot { VkCommandPool pool{}; VkCommandBuffer command{}; VkFence fence{}; VkSemaphore acquired{},rendered{}; bool pending{}; std::vector<vk22::Buffer> garbageBuffers; std::vector<vk22::Image> garbageImages; VkQueryPool queries{}; std::vector<const char*> marks; };
     std::array<Slot,2> slots{}; unsigned slotIndex{},front{},pending{},limit{1}; std::uint64_t submissions{},waits{};
