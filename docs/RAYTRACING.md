@@ -316,6 +316,45 @@ Root causes found and fixed:
   count is unchanged; 0.21 ms), there are no per-frame queue/device waits, readbacks or descriptor-set rebuilds
   outside the per-slot arenas.
 
+### Second pass (2026-10-17)
+
+Same RX 7900 XTX/RADV, headless gamescope with immediate flips, the user's settings (`vulkan-rt`, MSAA 2, PBR,
+`shadows=rt`, `gi=1`, `reflections=rough`, `denoise=1`, bloom, SSAO, FXAA, TAA, volumetric fog, smooth normals,
+tessellation, texture upscale, sharpen, `fsr=quality`, anisotropy 16, `fps_limit=240`), frame generation off,
+1500 steady frames after a save load (`realtime off`). GPU ms from `K22_GPU_TIMING=1`; fps uncapped.
+
+| View (save) | Output | GPU ms before -> after | scene pass ms | fps before -> after |
+| --- | --- | ---: | ---: | ---: |
+| kriz infirmary (8) | 2560x1440 | 8.85 -> 5.73 | 3.90 -> 0.64 | 110 -> 169 |
+| kriz infirmary (8) | 3840x2160 | 17.84 -> 12.10 | 6.92 -> 1.14 | 52 -> 75 |
+| kriz, frame generation on | 2560x1440 | 10.05 -> 6.76 | 4.04 -> 0.63 | 96 -> 134 |
+| level5 (0) | 2560x1440 | 5.64 -> 5.68 | 0.77 -> 0.80 | 166 -> 172 |
+| house (5), tunnel 24 (14) | 2560x1440 | 7.12 -> 7.11, 4.80 -> 4.81 | unchanged | 136 -> 137, 201 -> 199 |
+
+Other views move within the +-2% run-to-run noise. The cost was inline ray queries in `scene.frag` (fragment shaders
+run them slowly), not the compute passes:
+- **Overdraw rays.** Fragments that fail the G-buffer prepass depth comparison traced their own `shadows=rt` rays
+  before the depth test discarded them. A fragment behind the prepass at all 3x3 neighbour pixels now traces nothing.
+- **Repeated rays.** The legacy, dynamic-light and PBR loops traced the same light ray up to three times per
+  fragment; each light/sun ray is now traced once (8-bit cached visibility), and lights with N.L <= 0 trace nothing.
+- **Edges and decals.** MSAA edge fragments that continue a neighbour's prepass plane, and decals (blood sprites)
+  within 2 units of the prepass surface, reuse that pixel's denoised RT signal. Captures (static and walking) differ
+  from before by at most 11/255 on single edge pixels.
+- TAA no longer runs under FSR (its output was never read).
+
+Bound: GPU. CPU recording is 0.9-2.5 ms (5 ms in the house, save 5) and the frame waits on the previous fence for the
+rest. One frame is submitted while the next records (`limit` 1 windowed, 2 for `TRIPLEBUFFER` exclusive fullscreen).
+`fps_limit=240` sleeps only below its 4.17 ms period, and a numeric limit keeps vsync (FIFO), so the display refresh
+(or VRR) caps it. `display=native` on a 3840x2160 desktop renders at 2560x1440 under `fsr=quality`. The remaining
+cost at 4K output is `rt_signals` (4-5 ms) and the denoiser (2.8 ms) at that render size.
+
+Validation (Khronos layer, sync validation; kriz bench with and without frame generation, `k22-render-check
+--vulkan/--vulkan-rt`): 0 messages, down from three kinds on main (about one each per frame):
+`SYNC-HAZARD-WRITE-AFTER-WRITE` on the MSAA depth resolve (its barrier lacked the resolve's color-output stage),
+`Undefined-Value-StorageImage-FormatMismatch` on the FSR reactive mask (now R32_SFLOAT, the shader's `r32f`), and
+`VUID-vkDestroyImageView-imageView-01026` (FidelityFX local patch 8: the backend recycles dynamic views per dispatch,
+and reactive mask + upscale per frame freed the previous frame's views while it ran).
+
 ## Limits
 
 - Sun shadows (`shadows=rt` and `shadows=shadowmap` alike) make non-lightmapped models indoors much darker
