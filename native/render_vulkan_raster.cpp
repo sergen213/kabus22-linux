@@ -89,6 +89,9 @@ struct Raster {
         Image sharp; // sharpen with FXAA: FXAA output, read by the final CAS pass.
         Image fsrDepth,fsrMotion,upscaled; // FSR inputs (render size: R32F device depth, RG16F full motion) and its display-size output.
         Image opaque,reactive; // FSR: primary view colour before translucent/particle/view-space draws, and the derived reactive mask.
+        // Frame generation: upscaled interpolated halfway from the previous frame's (display size, upscaled's format).
+        // upscaledNow: FSR ran this frame; fsrReset/fsrMs: its history reset and frame time.
+        Image interpolated;bool upscaledNow{},fsrReset{};float fsrMs{16.7f};std::uint64_t generationFrame{};
         Image sun,cube;std::array<VkImageView,6>faces{};
         std::array<Image,2>gdata,gdepth,length;std::array<Image,3>raw,tmp;std::array<std::array<Image,3>,2>history;
         Image motion,motionDepth; // Motion vectors of moving/animated entities (scene pass 3) for TAA and the denoiser.
@@ -153,7 +156,7 @@ struct Raster {
     void free_effects(bool all){
         auto drop=[&](Image&i){if(all)s.destroy(i);else s.retire(i);};auto dropView=[&](VkImageView&v){if(!v)return;if(all)vkDestroyImageView(s.device,v,nullptr);else arenas[s.slotIndex].views.push_back(v);v=VK_NULL_HANDLE;};
         dropView(fx.depthView);fx.depthSampled={};drop(fx.depth);drop(fx.linear);drop(fx.ao);drop(fx.fog);drop(fx.ldr);drop(fx.motion);drop(fx.motionDepth);for(auto*set:{&fx.taa,&fx.gdata,&fx.gdepth,&fx.length})for(auto&i:*set)drop(i);for(auto&i:fx.bloom)drop(i);for(auto&i:fx.raw)drop(i);for(auto&i:fx.tmp)drop(i);for(auto&h:fx.history)for(auto&i:h)drop(i);
-        drop(fx.sharp);drop(fx.fsrDepth);drop(fx.fsrMotion);drop(fx.upscaled);drop(fx.opaque);drop(fx.reactive);
+        drop(fx.sharp);drop(fx.fsrDepth);drop(fx.fsrMotion);drop(fx.upscaled);drop(fx.opaque);drop(fx.reactive);drop(fx.interpolated);
         fx.taaValid=fx.historyValid=fx.linearValid=fx.fsrValid=false;fx.extent={};
         if(all){for(auto&v:fx.faces)dropView(v);drop(fx.sun);drop(fx.cube);}
     }
@@ -496,7 +499,7 @@ struct Raster {
     }
     void ensure_effects(){
         const auto&f=s.options.features;const bool depthEffects=f.ssao||f.fog||f.taa||f.fsr,rt=rtSignals();
-        if((!depthEffects&&!f.bloom&&!f.fxaa&&!rt)||(fx.extent.width==s.render.width&&fx.extent.height==s.render.height&&(!f.fsr||(fx.upscaled.width==s.extent.width&&fx.upscaled.height==s.extent.height))))return;
+        if((!depthEffects&&!f.bloom&&!f.fxaa&&!rt)||(fx.extent.width==s.render.width&&fx.extent.height==s.render.height&&(!f.fsr||(fx.upscaled.width==s.extent.width&&fx.upscaled.height==s.extent.height))&&(!s.generating||fx.interpolated.width==s.extent.width&&fx.interpolated.height==s.extent.height)))return;
         free_effects(false);fx.extent=s.render;const auto w=s.render.width,h=s.render.height;
         constexpr VkImageUsageFlags color=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,storage=VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
         auto readable=[&](Image&i){s.transition(i,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);};
@@ -505,7 +508,9 @@ struct Raster {
         if(f.ssao)fx.ao=s.image(w,h,VK_FORMAT_R16_SFLOAT,color);
         if(f.fog)fx.fog=s.image(std::max(1u,w/2),std::max(1u,h/2),VK_FORMAT_R16G16B16A16_SFLOAT,color);
         if(f.taa||f.fxaa||f.sharpen||f.fsr)fx.ldr=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);
-        if(f.fsr){fx.fsrDepth=s.image(w,h,VK_FORMAT_R32_SFLOAT,color);fx.fsrMotion=s.image(w,h,VK_FORMAT_R16G16_SFLOAT,color);fx.upscaled=s.image(s.extent.width,s.extent.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);readable(fx.upscaled);
+        if(f.fsr){fx.fsrDepth=s.image(w,h,VK_FORMAT_R32_SFLOAT,color);fx.fsrMotion=s.image(w,h,VK_FORMAT_R16G16_SFLOAT,color);fx.upscaled=s.image(s.extent.width,s.extent.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|(s.generating?VK_IMAGE_USAGE_TRANSFER_SRC_BIT:0u));readable(fx.upscaled);
+            // Frame interpolation copies its source (upscaled) for the next frame and may clear its output.
+            if(s.generating){fx.interpolated=s.image(s.extent.width,s.extent.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);readable(fx.interpolated);}
             fx.opaque=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);fx.reactive=s.image(w,h,VK_FORMAT_R8_UNORM,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);readable(fx.reactive);}
         if(f.fxaa&&f.sharpen)fx.sharp=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);
         if(f.taa)for(auto&i:fx.taa){i=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);readable(i);}
@@ -707,6 +712,24 @@ struct Raster {
         s.fsr->dispatch({s.command,in(fx.ldr,color),in(fx.fsrDepth,color),in(fx.fsrMotion,color),reactive,in(fx.upscaled,storage),
             fx.fsrJitter,std::clamp(ms,.1f,1000.f),s.options.features.sharpen?.4f:0.f,fx.nearPlane,fx.farPlane,fx.fovY,reset});
         s.transition(fx.upscaled,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);s.mark("fsr");
+        fx.upscaledNow=true;fx.fsrReset=reset;fx.fsrMs=std::clamp(ms,.1f,1000.f);
+    }
+    // FSR 3.1.4 frame generation: optical flow + frame interpolation of this frame's HUD-less upscaled view halfway from
+    // the previous one into fx.interpolated, reusing the upscaler's dilated depth/motion (docs/GRAPHICS_ROADMAP.md).
+    void interpolate(){
+        end();
+        constexpr VkImageUsageFlags usage=VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        s.transition(fx.interpolated,VK_IMAGE_LAYOUT_GENERAL,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);
+        s.fsr->interpolate({s.command,{fx.upscaled.handle,fx.upscaled.format,{fx.upscaled.width,fx.upscaled.height},usage},
+            {fx.interpolated.handle,fx.interpolated.format,{fx.interpolated.width,fx.interpolated.height},usage|VK_IMAGE_USAGE_TRANSFER_DST_BIT},
+            fx.fsrMs,fx.nearPlane,fx.farPlane,fx.fovY,fx.fsrReset,++fx.generationFrame});
+        s.transition(fx.interpolated,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);s.mark("interpolate");
+    }
+    // The display-size view image into the LDR scene target exactly like composite()'s last pass (mode 11), with the
+    // carried depth restored, so foreground views and UI can be drawn over it once more.
+    void scene_from(Image&view){
+        end();carry_depth();begin(s.scene);set_region(full());Uniform u;u.pbr={s.options.pbr?1.f:0.f,0,0,0};u.pass={11.f,0,1.f/view.width,1.f/view.height};
+        bind({EffectProgram},u,{&view},{sampler(true,true)});vkCmdDraw(s.command,3,1,0,0);
     }
     // Background-view composite: resolve, bloom, tone map (PBR) or identity, TAA or FSR, FXAA, written into the LDR scene target.
     void composite(){
@@ -805,7 +828,7 @@ struct Raster {
         if(f.world&&!f.hardwareLighting)throw std::runtime_error("Legacy software world-light topology is not implemented by the native Vulkan hardware path");
         if(!s.command)throw std::runtime_error("Vulkan raster requires an admitted platform frame");
         frame=&f;metrics=m;viewExtent=s.extent;centroid=centroid_lighting(f);reset_arena();prepared.clear();actorLights.clear();
-        ++frameIndex;ensure_dummies();fx.shadowsValid=fx.linearValid=fx.motionValid=fx.opaqueValid=fx.captureOpaque=false;reset_globals();ensure_effects();
+        ++frameIndex;ensure_dummies();fx.shadowsValid=fx.linearValid=fx.motionValid=fx.opaqueValid=fx.captureOpaque=fx.upscaledNow=false;reset_globals();ensure_effects();
         // scene.vert reads the caster push constant statically (selected only by shadow passes): define it for every draw.
         {const Matrix identity{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};vkCmdPushConstants(s.command,pipelineLayout,casterStages,0,sizeof(Matrix),identity.data());}
         // The primary view (effects owner): first full-window background world view that is not alpha-blended.
@@ -835,12 +858,23 @@ struct Raster {
         s.mark("prepare");if(primary&&shadow_maps_enabled(s.options.features)){shadow_maps(*primary);s.mark("shadow_maps");}reset_globals();
         const bool composited=composite_enabled(s.options.pbr,s.options.features);
         begin(composited?s.hdr:s.scene);set_region(full());auto seed=[&](Color c){return s.options.pbr?inverse_tone_map(c):c;};bool native=std::any_of(f.cameras.begin(),f.cameras.end(),[](auto&c){return c.perDrawOpacity;});if(!native||!s.retainedColorValid){clear(seed(f.clearColor),true,true,true,full());s.retainedColorValid=true;}if(native&&f.clearScreen){const Camera*first=nullptr;for(auto&c:f.cameras)if(!c.foreground&&!c.portalTarget){first=&c;break;}if(!first)for(auto&c:f.cameras)if(c.foreground&&!c.portalTarget){first=&c;break;}Rect v=first?first->viewport:Rect{};bool fullScreen=first&&(v.width<=0||v.height<=0||(v.x<=0&&v.y<=0&&v.x+v.width>=m.width&&v.y+v.height>=m.height));if(!fullScreen)clear(seed(f.screenColor),true,false,false,full());}
-        for(auto&c:f.cameras)if(!c.foreground&&!c.portalTarget)camera(c);s.mark("views");composite();s.mark("composite");std::size_t ci=0,ui=0,cursor=f.ui.size();while(ci<f.cameras.size()||ui<f.ui.size()){while(ci<f.cameras.size()&&(!f.cameras[ci].foreground||f.cameras[ci].portalTarget))++ci;if(ci<f.cameras.size()&&(ui==f.ui.size()||f.cameras[ci].layer<=f.ui[ui].layer))camera(f.cameras[ci++]);else if(ui<f.ui.size()){auto&c=f.ui[ui++];if(c.cursorOverlay){if(cursor==f.ui.size())cursor=ui-1;}else draw_ui(c);}}
+        for(auto&c:f.cameras)if(!c.foreground&&!c.portalTarget)camera(c);s.mark("views");composite();s.mark("composite");
+        // Foreground views and UI interleaved by layer, video and cursor over the composited scene, then resolve and post into out.
+        auto overlay=[&](Image&out){
+        std::size_t ci=0,ui=0,cursor=f.ui.size();while(ci<f.cameras.size()||ui<f.ui.size()){while(ci<f.cameras.size()&&(!f.cameras[ci].foreground||f.cameras[ci].portalTarget))++ci;if(ci<f.cameras.size()&&(ui==f.ui.size()||f.cameras[ci].layer<=f.ui[ui].layer))camera(f.cameras[ci++]);else if(ui<f.ui.size()){auto&c=f.ui[ui++];if(c.cursorOverlay){if(cursor==f.ui.size())cursor=ui-1;}else draw_ui(c);}}
         if(f.video){begin(s.scene);set_region(full());Rect r=f.videoRect;if(r.width<=0||r.height<=0){float scale=std::min(float(m.width)/f.video->width,float(m.height)/f.video->height);r={(m.width-f.video->width*scale)/2,(m.height-f.video->height*scale)/2,f.video->width*scale,f.video->height*scale};}Uniform u;u.viewport={float(m.width),float(m.height),0,0};uiVertices.clear();quad(r,{0,0,1,1},{1,1,1,1});flush_ui(video,u,false,true);}for(;cursor<f.ui.size();++cursor)if(f.ui[cursor].cursorOverlay)draw_ui(f.ui[cursor]);end();s.mark("ui");
         Image*resolved=&s.scene.color;
         if(s.samples!=VK_SAMPLE_COUNT_1_BIT){s.transition(s.scene.color,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);s.transition(s.scene.resolve,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);VkImageResolve resolve{};resolve.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};resolve.dstSubresource=resolve.srcSubresource;resolve.extent={s.extent.width,s.extent.height,1};vkCmdResolveImage(s.command,s.scene.color.handle,s.scene.color.layout,s.scene.resolve.handle,s.scene.resolve.layout,1,&resolve);resolved=&s.scene.resolve;}
         s.transition(*resolved,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
-        begin_image(s.finalImage);set_region(full());Uniform post;post.parameters[1][3]=adjustment.enabled;bind({Post},post,{resolved,&gamma},{sampler(true,true),sampler(false,true)});vkCmdDraw(s.command,3,1,0,0);end();s.mark("post");
+        begin_image(out);set_region(full());Uniform post;post.parameters[1][3]=adjustment.enabled;bind({Post},post,{resolved,&gamma},{sampler(true,true),sampler(false,true)});vkCmdDraw(s.command,3,1,0,0);end();s.mark("post");
+        };
+        // FSR 3.1.4 frame generation (docs/GRAPHICS_ROADMAP.md): the HUD-less upscaled view is interpolated and this frame's
+        // foreground views and UI are drawn over it exactly as over the rendered frame (the HUD is never interpolated) into
+        // s.generated; the scene target then gets the rendered view back. After an FSR history reset only the rendered frame
+        // is presented (the interpolation still runs to keep its previous-frame copy).
+        s.generatedValid=false;
+        if(s.generating&&fx.upscaledNow){interpolate();if(!fx.fsrReset){scene_from(fx.interpolated);overlay(s.generated[s.slotIndex]);scene_from(fx.upscaled);s.generatedValid=true;}}
+        overlay(s.finalImage);
         transparent.clear();shadowOrder.clear();particlePose=nullptr;if(primary)fx.previousVP=fx.unjittered;
     }
 };

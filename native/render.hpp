@@ -28,6 +28,8 @@ struct GraphicsFeatures {
     // AMD FSR 3.1.4 upscaling (Vulkan): 0 off, 1 native AA, 2 quality, 3 balanced, 4 performance, 5 ultra performance.
     // Replaces TAA; scene/RT/denoise run at the render resolution, UI stays at the display resolution.
     std::uint8_t fsr{};
+    // FSR 3.1.4 frame generation (Vulkan, needs fsr): one interpolated frame presented between every two rendered frames.
+    bool frameGeneration{};
     bool operator==(const GraphicsFeatures&) const = default;
 };
 struct RenderOptions { int width{1280}, height{720}, samples{4}; float anisotropy{8}; bool vsync{true}; WindowMode mode{WindowMode::Windowed}; std::string title{"Kabus 22"}; RendererBackend backend{RendererBackend::OpenGL}; bool rayTracing{true};
@@ -230,6 +232,7 @@ struct PresentationState {
     unsigned limit{1}, pending{};
     std::uint64_t submissions{}, waits{};
     int swapInterval{}, samples{};
+    bool frameGeneration{}; // Vulkan FSR 3.1.4 frame generation active: two presents per rendered frame.
 };
 class Renderer {
 public:

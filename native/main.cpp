@@ -130,7 +130,9 @@ int main(int argc,char** argv){try{
   // Scenarios use a fixed step (1/60 s, or the --graphics fps_limit period); "realtime on" paces it to the wall clock so movies/sounds keep their timing.
   if(scenario?scenario->realtime():renderer!=nullptr){
    // A6 00414650: floor(1000*1024*1024 / max(FPS_MAX raw,1024)) raw milliseconds, unless fps_limit overrides it.
-   const auto periodRaw=scenario&&!graphics.fpsLimit?1000LL*1024*1024/(60*1024):k22::render_policy::frame_period_raw(graphics.fpsLimit,engine.global("fps_max").raw());
+   // Frame generation presents two frames per rendered frame: a numeric fps_limit caps the presented rate (renders at half
+   // of it); the script's own fps_max (original) keeps pacing the rendered game ticks.
+   const auto periodRaw=(scenario&&!graphics.fpsLimit?1000LL*1024*1024/(60*1024):k22::render_policy::frame_period_raw(graphics.fpsLimit,engine.global("fps_max").raw()))*(graphics.fpsLimit>0&&renderer&&renderer->presentation_state().frameGeneration?2:1);
    const auto deadline=frameStart+std::chrono::nanoseconds(periodRaw*1'000'000/1024);
    if(std::chrono::steady_clock::now()<deadline)std::this_thread::sleep_until(deadline);
    // Anchor to the actual start, not completion or an overdue scheduled start.
