@@ -12,7 +12,7 @@
 namespace k22 {
 namespace {
 constexpr std::array<std::string_view,3> models{"demir_2007.mdl","ebru_2006.mdl","koruyucu_2006.mdl"};
-constexpr std::array<std::string_view,3> idles{"tBekle","bekle","bekle"}; // oyuncu2.wdl Oynat(Bekle) with the pistol prefix t, Ebru and Inzar "bekle"
+constexpr std::array<std::string_view,3> idles{"byBekle","bekle","bekle"}; // oyuncu2.wdl Oynat(Bekle): Demir's grenade stance (arms down; the grenade is a separate entity), Ebru and Inzar "bekle"
 constexpr std::array<std::string_view,3> names{"DEMIR","EBRU","INZAR"};
 constexpr std::array<std::string_view,5> panels{"AMP_YeniOyun","AMP_OyunYukle","AMP_Ayarlar","AMP_Kabus22","AMP_Cikis"}; // AML_Paneller
 // Pad reads of the select screen. ponytail: pad 1 always reads false until the two-pad Input lands (docs/COOP.md "Controllers").
@@ -38,11 +38,13 @@ void Engine::coop_tick(Runtime& runtime,const Input& in){
   else if(coopItem_&&(up||down)){coopItem_=false;const int to=up?4:0;set_global("AM_Cursor",Value::from_int(to));bitmap(to,true);eat();sound("DMS_Yontus");}
   else if(coopItem_&&key({SDL_SCANCODE_ESCAPE}))coopItem_=false; // AM_Kernel moves its cursor to EXIT
   if(coopItem_)bitmap(cursor,false);
-  // DisMenuCerceve.wdl frame: AnaMenuAc's CER_Hedef spans the five buttons from NEW GAME; one button more on top.
-  const float sy=float(field(first.bits,"scale_y"));set_global("Cer_hY1",Value::from_double(field(first.bits,"pos_y")-(number("Cer_Kenar")+32)*sy));
+  // DisMenuCerceve.wdl frame: AnaMenuAc's CER_Hedef spans the five buttons (Cer_hY2-Cer_hY1 = (5*DM_ButtonH+2*Cer_Kenar)*scale); one more on top.
+  set_global("Cer_hY1",Value::from_double(number("Cer_hY2")-(6*32+2*number("Cer_Kenar"))*field(first.bits,"scale_y")));
   if(coopItem_&&(click||key({SDL_SCANCODE_RETURN,SDL_SCANCODE_KP_ENTER})||pad_pressed(in,0,SDL_CONTROLLER_BUTTON_A)||pad_pressed(in,0,SDL_CONTROLLER_BUTTON_START))){
    eat();sound("DMS_Enter");runtime.start("AnaMenuKapat");remove_entity(runtime,global("AM_KernelTimer").bits); // AM_Kernel's own exit: AnaMenuKapat(); Remove(me)
    coopScreen_=CoopScreen::Select;coopItem_=false;coopJoined_={true,false};coopReady_={};coopTime_=0;
+   // The menu frame moves to the select screen as it does to every original submenu (CER_Hedef).
+   const float w=float(currentWidth_),h=float(currentHeight_);std::array<Argument,4> frame{{{Value::from_double(0.08*w),{}},{Value::from_double(0.04*h),{}},{Value::from_double(0.92*w),{}},{Value::from_double(0.97*h),{}}}};runtime.start("CER_Hedef",frame);
   }
  }else if(screen==CoopScreen::Select){
   // P1: keyboard, mouse and pad 0. P2: pad 1, or on the keyboard A/D, Space (join, READY) and Backspace (back).
@@ -79,13 +81,13 @@ void Engine::coop_models(Runtime& runtime){
   auto& id=coopModels_[p];const bool show=coopScreen_!=CoopScreen::Off&&coopJoined_[p];
   if(id&&(!show||!state.get(id)||!state.get(id)->alive||state.require(id).text!=models[coopPick_[p]])){remove_entity(runtime,id);id=0;}
   if(!show)continue;
-  if(!id){id=create_entity(runtime,models[coopPick_[p]],{},0);auto& o=state.require(id);o.field("view").value=Value::object(0);o.field("layer").value=Value::from_int(2);o.field("visible").value=Value::from_int(1);}
+  if(!id){id=create_entity(runtime,models[coopPick_[p]],{},0);auto& o=state.require(id);o.field("view").value=Value::object(0);o.field("layer").value=Value::from_int(2);set_field(id,"visible",1);}
   const Model& m=assets.model(models[coopPick_[p]]);
-  // In front of the camera: column centre at 28% / 72% of the width, the tallest model filling about 55% of the height.
+  // In front of the camera: column centre at 28% / 72% of the width, feet at 76% of the height, the tallest model filling about 55%.
   const float w=float(std::max(1,currentWidth_)),h=float(std::max(1,currentHeight_)),arc=float(field(global("camera").bits,"arc")),tx=std::tan((arc>0?arc:60)*float(M_PI)/360),ty=tx*h/w;
   float tallest=1;for(auto name:models){const auto& t=assets.model(name);tallest=std::max(tallest,t.resourceMax.z-t.resourceMin.z);}
-  const float x=tallest/(0.55f*2*ty),cx=p?0.72f:0.28f,cy=0.47f;
-  set_position(id,{x,(1-2*cx)*x*tx,(1-2*cy)*x*ty-(m.resourceMin.z+m.resourceMax.z)/2});
+  const float x=tallest/(0.55f*2*ty),cx=p?0.72f:0.28f,feet=0.76f;
+  set_position(id,{x,(1-2*cx)*x*tx,(1-2*feet)*x*ty-m.resourceMin.z});
   set_field(id,"pan",std::fmod(180+24*coopTime_+(p?40:-40),360.f));
   std::size_t begin=m.frames.size(),count=0;const auto scene=idles[coopPick_[p]];
   for(std::size_t i=0;i<m.frames.size();++i){std::string_view f=m.frames[i].name;if(f.size()>=scene.size()&&case_equal(f.substr(0,scene.size()),scene)&&(f.size()==scene.size()||std::isdigit(static_cast<unsigned char>(f[scene.size()])))){if(!count)begin=i;++count;}else if(count)break;}
@@ -101,8 +103,9 @@ void Engine::coop_overlay(){
   if(first.kind!=Value::Kind::Object||!state.get(first.bits)||!field(first.bits,"visible"))return;
   // One button height above NEW GAME, centred on the 170-wide button like its own art.
   const float sx=std::max(0.1f,float(field(first.bits,"scale_x"))),sy=std::max(0.1f,float(field(first.bits,"scale_y")));
-  const float x=float(field(first.bits,"pos_x")),y=float(field(first.bits,"pos_y"))-32*sy,width=draw_menu_word("2 PLAYER",0,0,sy,1,true);
-  draw_menu_word("2 PLAYER",x+85*sx-width/2,y,sy,1,false,coopItem_);coopItemRect_={x,y,170*sx,32*sy};
+  // The atlas capitals are smaller than the buttons' lettering: 1.15x, centred in the row.
+  const float x=float(field(first.bits,"pos_x")),y=float(field(first.bits,"pos_y"))-32*sy,scale=1.15f*sy,width=draw_menu_word("2 PLAYER",0,0,scale,1,true);
+  draw_menu_word("2 PLAYER",x+85*sx-width/2,y-16*(scale-sy),scale,1,false,coopItem_);coopItemRect_={x,y,170*sx,32*sy};
   return;
  }
  const float w=float(currentWidth_),h=float(currentHeight_),s=h/720;

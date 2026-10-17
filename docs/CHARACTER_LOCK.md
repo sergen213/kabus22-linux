@@ -2,13 +2,14 @@
 
 Purpose: play the whole campaign as one chosen character (Demir, Ebru or Inzar) without breaking the original story logic. This is a native addition (`native/character.cpp`); the original scripts are not modified.
 
-Related: [Gameplay systems §1](GAMEPLAY_SYSTEMS.md#1-playable-characters) · [Console](CONSOLE.md) · [Gameplay testing](GAMEPLAY_TESTING.md)
+Related: [Gameplay systems §1](GAMEPLAY_SYSTEMS.md#1-playable-characters) · [Console](CONSOLE.md) · [Gameplay testing](GAMEPLAY_TESTING.md) · [Coop](COOP.md)
 
 ## Using it
 
 - **New Game:** the difficulty menu (NORMAL/HARD) shows a selector one button above it: `< ORIGINAL >`. Left/Right, the d-pad or a click on the arrows cycles ORIGINAL, DEMIR, EBRU and INZAR. Enter starts the game as before. The labels are glyphs cut from the original menu atlas (`menu_dildenbagimsiz.tga`), in the same font, colour and scale as the menu buttons.
   - **ORIGINAL** (the default) changes nothing. The playable character follows the story, exactly as in the original game.
   - **DEMIR, EBRU, INZAR** lock the playable character.
+  - Started from the main menu's 2 PLAYER select ([COOP.md](COOP.md)), the selector is hidden and P1's character becomes the lock.
 - **Story switches:** when a locked game reaches a point where the story changes the character (for example Demir to Ebru at the Kriz dock, or to Inzar in the tunnels), the game pauses and asks *"The story switches to EBRU. Continue as:"*. The two choices are the locked character (keep playing as them) and the story's new character (switch, like the original). The answer becomes the new lock. Up/Down, the d-pad or the mouse select; Enter, a click, pad A or Start confirm. If the story returns to the locked character, there is no question.
 - **Saves:** every slot written while locked (save points, autosaves, quicksave) records the lock in its sidecar, `kayitN.sav.meta` (`character=demir|ebru|inzar`). Loading such a slot restores the lock. Original saves and saves written unlocked have no `character=` line and load unlocked.
 - **Console:** `character [original|demir|ebru|inzar]` prints or sets the lock. It applies from the next level entry (a door, `level ID`, or a load).
