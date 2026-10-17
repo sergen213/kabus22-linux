@@ -21,9 +21,10 @@ wait until Aktif_Silah == 3 && EM_Bolge == 2 timeout 300
 press M
 wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
 route 30 1600 700 1486 450 1486 250 1486 110 timeout 2400
-walk-to 1486 72 10 timeout 600
 turn-to 1486 0 6
-press-until D LY_AktifLevelID == 43 timeout 600
+down Up
+wait until LY_AktifLevelID == 43 timeout 600
+up Up
 wait until $level == "tnel10.wmb" && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
 find n duma_yaratik
 assert $count(duma_yaratik) == 1

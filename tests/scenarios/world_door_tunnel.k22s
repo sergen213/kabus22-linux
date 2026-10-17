@@ -1,15 +1,21 @@
 # requires: saves
-# Seamless doors, tunnel pair Tnel24 (39) -> Tnel12 (40), Inzar, original kayit15.sav. The return door to 39 carries FLAG1:
-# LY_Tarama refuses it while tunnel enemies remain (LV_HataGoster 11), so no doorway opens and nothing loads.
+# Seamless doors, tunnel pair Tnel24 (39) -> Tnel12 (40), Inzar, original kayit15.sav. The Tnel24 trigger stands behind its wall,
+# which has a floor on both sides: LV_Tnel24_Giris's arrival from 40 tells the room side, so the doorway opens toward Inzar.
+# The return door to 39 carries FLAG1: LY_Tarama refuses it while tunnel enemies remain (LV_HataGoster 11), so walking up to it
+# opens nothing; with cadde_yara_adet cleared the same door opens by itself and takes her back.
 realtime off
 load-save 15
 wait until LY_AktifLevelID == 39 && level_yuklendi_ok == 1 && player != 0 && koruyucu_pasif == 0 && LYP_Fade.visible == 0 timeout 7200
 store fade $fadeframes
 walk-to 98 -238 10 path timeout 1500
-walk-to 106 -270 8 timeout 600
+wait until $door == 1 timeout 300
+assert LY_HedefLevel == 0
+frames 30
+capture tnel24_doorway_open
 turn-to 106 -300 6
-press-until D $door == 1 timeout 300
+down Up
 wait until LY_AktifLevelID == 40 timeout 600
+up Up
 wait until $door == 0 timeout 600
 assert $level == "tnel12.wmb"
 assert harita_anagrup == 3
@@ -18,10 +24,21 @@ assert koruyucu_pasif == 0
 assert $doorswaps == 1
 assert $fadeframes == @fade
 capture tnel12_arrival
+# Tnel12's FLAG1 door back to 39: LY_Kapi (17..42,1324). Away from it (rearms), back up to it facing it: refused, stays closed.
+walk-to 30 1150 10 timeout 900
+walk-to 30 1290 8 timeout 600
 turn-to 30 1325 6
+frames 30
+assert $door == 0 && cadde_yara_adet[aktif_level] > 0
 press-until D LYT_AltYazi.visible == 1 timeout 600
 frames 30
-assert $door == 0
-assert LY_HedefLevel == 0
-assert LY_AktifLevelID == 40
-assert $doorswaps == 1
+assert $door == 0 && LY_HedefLevel == 0 && LY_AktifLevelID == 40
+set cadde_yara_adet[17] 0
+wait until $door == 1 timeout 60
+assert LY_HedefLevel == 0 && LY_AktifLevelID == 40
+# Inzar stands at the door face, facing it: the open doorway takes her back to Tnel24.
+wait until LY_AktifLevelID == 39 timeout 600
+wait until $door == 0 timeout 600
+assert $level == "tnel24.wmb" && koruyucu_pasif == 0
+assert $doorswaps == 2
+assert $fadeframes == @fade

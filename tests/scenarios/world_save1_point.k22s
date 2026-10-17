@@ -15,13 +15,16 @@ print oyn_yaralanma
 print Aktif_Silah
 print S_Kursun_Sayisi[1]
 wait until oyun_ilk_basladi == 0 timeout 600
-# kizic2 -> Kizic: LY_Kapi (-477,-51) skill1 36; the scan (oyuncu2.wdl:556 PL_KapiTara) reaches 50 quants in front.
+# kizic2 -> Kizic: LY_Kapi (-477,-51) skill1 36.
 # Around the polygon tables/chairs (M1.mdl, san11de.mdl) north of the direct line.
 walk-to -260 25 12 timeout 900
 walk-to -420 25 12 timeout 1200
-walk-to -455 -48 12 timeout 1200
-turn-to -500 -48 6
-press-until D LY_AktifLevelID == 36 timeout 600
+# The doorway opens as Demir walks up (seamless doors, docs/SEAMLESS_DOORS.md); walking into it crosses.
+wait until $door == 1 timeout 300
+turn-to -477 -51 6
+down Up
+wait until LY_AktifLevelID == 36 timeout 600
+up Up
 wait until $level == "kizic.wmb" && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
 capture kizic_arrival
 # Kizic -> kizic2: LY_Kapi (-42,-378,-195) skill1 37, 49 quants east of the LV_Kizic_G37 arrival: turn and use it in place.

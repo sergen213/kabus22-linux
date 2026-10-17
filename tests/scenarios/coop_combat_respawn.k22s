@@ -18,9 +18,10 @@ assert $dist(@p2a) > 15 && $dist(@p2a) < 120 && $bank1(player) == @p2a && player
 # P1 walks off; P2 (no input) is left behind and returns beside P1 (leash: 350 units for 2 s).
 route 30 1600 700 1486 450 1486 250 1486 110 timeout 2400
 wait until $dist(@p2a) < 350 timeout 300
-walk-to 1486 72 10 timeout 600
 turn-to 1486 0 6
-press-until D LY_AktifLevelID == 43 timeout 600
+down Up
+wait until LY_AktifLevelID == 43 timeout 600
+up Up
 wait until $level == "tnel10.wmb" && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
 # The next level: P2 is a new body beside P1.
 wait until $p2 != 0 && $p2 != @p2a timeout 600
@@ -31,9 +32,11 @@ press F10
 type god
 press Return
 press F10
+# P2 spawns in the narrow tunnel in front of P1: walk straight down it first (pushing P2), then plan the way to the duma.
+walk-to 3181 560 20 timeout 600
 walk-to @n 300 path timeout 2400
-# P1 backs off: the duma (nearest player: P2) hurts P2.
-press Down 60
+# P1 backs off behind P2 (left in the tunnel): the duma, chasing the nearest player, hurts P2.
+walk-to 3181 660 20 timeout 1200
 store h0 $p2health
 wait until $p2health < @h0 timeout 1200
 assert player.skill1 == 100

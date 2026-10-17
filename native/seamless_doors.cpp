@@ -38,7 +38,7 @@ std::optional<float> ray(const CollisionMesh& m,Vec3 o,Vec3 d,float limit){
 }
 std::optional<float> floor_below(const CollisionMesh& m,Vec3 p){auto t=ray(m,p,{0,0,-1},200);return t?std::optional<float>(p.z-*t):std::nullopt;}
 }
-std::optional<DoorSide> door_side(const World& w,std::span<const Vec3> triggers){
+std::optional<DoorSide> door_side(const World& w,std::span<const Vec3> triggers,const Vec3* room){
     if(triggers.empty())return {};
     Vec3 c{};for(Vec3 t:triggers)c=add(c,t);c=mul(c,1.f/float(triggers.size()));
     const auto& m=w.collision;float best=40;Vec3 q{},n{};
@@ -46,9 +46,10 @@ std::optional<DoorSide> door_side(const World& w,std::span<const Vec3> triggers)
         Vec3 p=closest_on_triangle(c,a,b,cc),d=sub(c,p);float dist=std::sqrt(dot(d,d));if(dist<best){best=dist;q=p;n=fn;}}
     if(best>=40)return {};
     n.z=0;n=unit(n);if(dot(sub(c,q),n)<0)n=mul(n,-1);
-    // The room is the side with a floor (a trigger may stand outside the wall it is scanned through, e.g. Ev3).
+    // The room is the side with a floor (a trigger may stand outside the wall it is scanned through, e.g. Ev3); with a floor on
+    // both sides, the side of `room` (a spot known to be in it: the Giris arrival at this door), else the trigger's (e.g. Tnel24 -> 40).
     Vec3 probe{q.x,q.y,c.z};auto front=floor_below(m,add(probe,mul(n,24))),back=floor_below(m,add(probe,mul(n,-24)));
-    if(!front&&back){n=mul(n,-1);front=back;}
+    if((!front&&back)||(front&&back&&room&&dot(sub(*room,q),n)<0)){n=mul(n,-1);std::swap(front,back);}
     if(!front)return {};
     // Measure from the room-facing surface: a trigger behind the wall found its far face.
     if(auto hit=ray(m,add(probe,mul(n,24)),mul(n,-1),48))q=add(add(probe,mul(n,24)),mul(n,-*hit));
@@ -79,12 +80,13 @@ std::vector<std::vector<Vec3>> door_clusters(const World& w,int target){
         auto found=std::find_if(clusters.begin(),clusters.end(),near);if(found==clusters.end())clusters.push_back({e.position});else found->push_back(e.position);}
     return clusters;
 }
-std::optional<DoorLink> door_link(const World& a,std::span<const Vec3> triggers,const World& b,int from,const std::array<float,4>* arrival){
-    auto sa=door_side(a,triggers);if(!sa)return {};
+std::optional<DoorLink> door_link(const World& a,std::span<const Vec3> triggers,const World& b,int from,const std::array<float,4>* arrival,const Vec3* room){
+    auto sa=door_side(a,triggers,room);if(!sa)return {};
     // B's doorway: its LY_Kapi back to A (the one nearest the Giris arrival when known), else the wall behind the arrival.
     auto clusters=door_clusters(b,from);std::vector<Vec3> anchor;
+    const Vec3 at=arrival?Vec3{(*arrival)[0],(*arrival)[1],(*arrival)[2]}:Vec3{};
     if(arrival){
-        const Vec3 at{(*arrival)[0],(*arrival)[1],(*arrival)[2]};float best=160;
+        float best=160;
         for(auto& c:clusters){Vec3 m{};for(Vec3 p:c)m=add(m,p);m=mul(m,1.f/float(c.size()));float d=std::hypot(m.x-at.x,m.y-at.y);if(d<best){best=d;anchor=c;}}
         if(anchor.empty()){
             const float pan=render_policy::rad((*arrival)[3]);const Vec3 back{-std::cos(pan),-std::sin(pan),0};float hit=160;const auto& m=b.collision;
@@ -96,7 +98,7 @@ std::optional<DoorLink> door_link(const World& a,std::span<const Vec3> triggers,
     }
     else if(clusters.size()==1)anchor=clusters[0];
     else return {}; // no or ambiguous return door
-    auto sb=door_side(b,anchor);if(!sb)return {};
+    auto sb=door_side(b,anchor,arrival?&at:nullptr);if(!sb)return {};
     // Walking through A's door (-nA) continues away from B's door into B's room (+nB): R*nB=-nA; door floor points coincide.
     const float pan=float(std::remainder((std::atan2(-sa->normal.y,-sa->normal.x)-std::atan2(sb->normal.y,sb->normal.x))*180/render_policy::pi,360.0));
     const float cp=std::cos(render_policy::rad(pan)),sp=std::sin(render_policy::rad(pan));
@@ -144,7 +146,20 @@ std::string Engine::level_wmb(int id)const{
     if(!table||id<=0||std::size_t(id)>=table->array.size())return {};
     auto* s=state.get(table->array[std::size_t(id)].value.bits);return s&&s->kind==Object::Kind::String?s->text:std::string{};
 }
-void Engine::door_reset(){door_.phase=DoorPhase::Idle;door_.open=0;door_.openTime=0;door_.ticks=0;door_.group=~std::size_t{};fadeHidden_=false;}
+// LevelYonetim.wdl LY_Tarama's refusals (on use it shows LV_HataGoster 11/38/39), from the live values it tests, for the group's
+// live LY_Kapi triggers: a FLAG1 door in Inzar's story while cadde_yara_adet[aktif_level]>0, else Demir to 102 and Inzar to 38.
+bool Engine::door_refused(Runtime& runtime,const DoorGroup& g)const{
+    const FunctionId kapi=runtime.function("LY_Kapi");const int who=int(number("Aktif_Player"));
+    auto counts=global("cadde_yara_adet");auto* list=counts.kind==Value::Kind::Object?state.get(counts.bits):nullptr;const auto level=std::size_t(std::max(0.0,number("aktif_level")));
+    const bool enemies=list&&level<list->array.size()&&list->array[level].value.real()>0;
+    for(const auto& entry:entities){const ObjectId id=entry.first;auto* o=state.get(id);if(!o||!o->alive||callback(id,"action1")!=kapi)continue;
+        const Vec3 p=position(id);const int to=int(field(id,"skill1"));if(to!=g.target||std::hypot(p.x-g.centroid.x,p.y-g.centroid.y)>64)continue;
+        if(field(id,"FLAG1")!=0&&who==2){if(enemies)return true;}
+        else if((who==0&&to==102)||(who==2&&to==38))return true;
+    }
+    return false;
+}
+void Engine::door_reset(){door_.phase=DoorPhase::Idle;door_.open=0;door_.openTime=0;door_.ticks=0;door_.group=~std::size_t{};door_.used=false;door_.ahead={INFINITY,INFINITY};fadeHidden_=false;}
 void Engine::door_level(){
     // Door groups of the level just loaded (static WMB data). A prefetched destination that became this level is not dropped.
     door_.groups.clear();door_.groupsWorld=world;if(!world)return;
@@ -163,7 +178,10 @@ const World* Engine::door_world(Runtime& runtime,DoorGroup& g,bool wait){
         door_.world=nullptr;door_.wmb=wmb;
     }
     if(!door_.world){if(!wait&&!assets.prefetch_world(wmb))return nullptr;door_.world=&assets.world(wmb);}
-    if(!g.linked){const int from=int(number("LY_AktifLevelID"));auto arrival=door_arrival(runtime,g.target,from);g.link=door_link(*world,g.triggers,*door_.world,from,arrival?&*arrival:nullptr);g.linked=true;}
+    if(!g.linked){const int from=int(number("LY_AktifLevelID"));auto arrival=door_arrival(runtime,g.target,from);
+        // This level's own Giris arrival from the destination stands in front of this door: it tells the room side.
+        auto back=door_arrival(runtime,from,g.target);std::optional<Vec3> room;if(back&&std::hypot((*back)[0]-g.centroid.x,(*back)[1]-g.centroid.y)<160)room=Vec3{(*back)[0],(*back)[1],(*back)[2]};
+        g.link=door_link(*world,g.triggers,*door_.world,from,arrival?&*arrival:nullptr,room?&*room:nullptr);g.linked=true;}
     return door_.world;
 }
 void Engine::door_scan(Runtime& runtime,ObjectId trigger){
@@ -175,41 +193,69 @@ void Engine::door_scan(Runtime& runtime,ObjectId trigger){
     const Vec3 p=position(trigger);std::size_t index=~std::size_t{};float best=64;
     for(std::size_t i=0;i<door_.groups.size();++i){const auto& g=door_.groups[i];float d=std::hypot(g.centroid.x-p.x,g.centroid.y-p.y);if(g.target==target&&d<best){best=d;index=i;}}
     if(index==~std::size_t{})return;
-    if(door_.phase==DoorPhase::Opening&&door_.group==index){set_global("LY_HedefLevel",Value{});return;} // repeated scans of the open door
+    if(door_.phase==DoorPhase::Opening&&door_.group==index){set_global("LY_HedefLevel",Value{});door_.used=true;return;} // repeated scans of the open door
     if(door_.phase!=DoorPhase::Idle&&door_.phase!=DoorPhase::Opening)return;
     if(door_scripted(from,target))return;
     auto& g=door_.groups[index];if(!door_world(runtime,g,true)||!g.link)return; // no sane transform: the original fade
-    set_global("LY_HedefLevel",Value{});door_reset();door_.phase=DoorPhase::Opening;door_.group=index;door_.from=from;
+    set_global("LY_HedefLevel",Value{});door_reset();door_.phase=DoorPhase::Opening;door_.group=index;door_.from=from;door_.used=true;
 }
 void Engine::door_tick(Runtime& runtime){
     if(!seamlessDoors||state.profile!=SemanticProfile::CampaignA6)return;
     const double dt=std::clamp(input.dt,0.0,.1);
     auto fade=global("LYP_Fade");const ObjectId fadeId=fade.kind==Value::Kind::Object?fade.bits:0;
     const ObjectId player=live_player();
+    // Coop (docs/COOP.md): either body opens and crosses a door; the load acts on P1 like the original use by P2.
+    const std::array<ObjectId,2> bodies{player,coop_body(1)};
+    auto facing=[&](ObjectId b){const float pan=render_policy::rad(float(field(b,"pan")));return Vec3{std::cos(pan),std::sin(pan),0};};
     switch(door_.phase){
     case DoorPhase::Idle:{
         if(!world||!player)break;if(door_.groupsWorld!=world)door_level();
+        const int from=int(number("LY_AktifLevelID"));
+        // Proactive opening (not in the original; the use key keeps working, door_scan): a body within 96 quants of an armed
+        // eligible doorway, in front of it and facing it (60 degrees) opens it when LY_Tarama would let the use key. A door is armed
+        // once every body was more than 128 quants away while the level is in play, so the arrival's return door stays closed.
+        if(gameplay_blocked(runtime).empty()){
+            auto reach=[&](const DoorGroup& g,ObjectId b){const Vec3 at=position(b);Vec3 c=g.centroid;float d=std::hypot(at.x-c.x,at.y-c.y);
+                if(g.linked&&g.link){const auto& s=g.link->a;const Vec3 r=sub(at,s.center);const float ahead=dot(r,s.normal);if(ahead< -8)return INFINITY;
+                    d=std::hypot(ahead,std::max(0.f,std::abs(dot(r,s.right))-s.halfWidth));c=s.center;}
+                const Vec3 to{c.x-at.x,c.y-at.y,0};const float l=std::hypot(to.x,to.y);return l<1||dot(facing(b),to)>=.5f*l?d:INFINITY;};
+            DoorGroup* best=nullptr;float bestReach=96;
+            for(auto& g:door_.groups){const bool eligible=g.armed&&!door_scripted(from,g.target);bool far=true;
+                for(ObjectId b:bodies){if(!b)continue;const Vec3 at=position(b);if(std::hypot(at.x-g.centroid.x,at.y-g.centroid.y)<=128)far=false;
+                    if(eligible)if(float r=reach(g,b);r<bestReach){bestReach=r;best=&g;}}
+                if(far)g.armed=true;}
+            if(best){const auto index=std::size_t(best-door_.groups.data());door_.warm=index;
+                if(door_world(runtime,*best,false)&&best->link&&!door_refused(runtime,*best)){door_reset();door_.phase=DoorPhase::Opening;door_.group=index;door_.from=from;}
+                break;} // still decoding, an ineligible (fade) door or refused: closed, the use key does what it did
+        }
         if(++door_.ticks%15)break; // prefetch the nearest door's destination in the background
         const Vec3 at=position(player);DoorGroup* nearest=nullptr;float best=320;
-        for(auto& g:door_.groups){float d=std::hypot(g.centroid.x-at.x,g.centroid.y-at.y);if(d<best&&!door_scripted(int(number("LY_AktifLevelID")),g.target)){best=d;nearest=&g;}}
+        for(auto& g:door_.groups){float d=std::hypot(g.centroid.x-at.x,g.centroid.y-at.y);if(d<best&&!door_scripted(from,g.target)){best=d;nearest=&g;}}
         door_.warm=nearest?nearest-door_.groups.data():~std::size_t{};
         if(nearest)door_world(runtime,*nearest,false);
         break;}
     case DoorPhase::Opening:{
-        const auto& g=door_.groups[door_.group];
+        auto& g=door_.groups[door_.group];
         if(!player||!g.link||number("LY_HedefLevel")>0||world!=door_.groupsWorld||number("LY_AktifLevelID")!=door_.from){door_reset();break;}
-        const auto& side=g.link->a;const Vec3 at=sub(position(player),side.center);
-        const float ahead=dot(at,side.normal),across=std::abs(dot(at,side.right));
-        if(std::hypot(at.x,at.y)>140){door_reset();break;} // walked away: the door closes, nothing else happened
+        const auto& side=g.link->a;bool near=false,walkIn=false;
+        for(std::size_t i=0;i<bodies.size();++i){if(!bodies[i])continue;const Vec3 at=sub(position(bodies[i]),side.center);if(std::hypot(at.x,at.y)<=140)near=true;
+            const float ahead=dot(at,side.normal),last=std::exchange(door_.ahead[i],ahead);if(std::abs(dot(at,side.right))>=side.halfWidth+8)continue;
+            // Walking into the doorway. Opened by approach: facing into it (not brushing past a jamb) and moving in (5+ quants/s), or at the door
+            // face (a body stops 16 quants from a wall), so standing in front of it and turning around does not cross.
+            if(door_.used?ahead<28:dot(facing(bodies[i]),side.normal)< -.3f&&(ahead<20||(ahead<28&&ahead<last-5*float(dt))))walkIn=true;}
+        if(!near){door_reset();break;} // every body walked away: the door closes, nothing else happened
         door_.open=float(std::min(1.0,door_.open+dt/.4));if(door_.open>=1)door_.openTime+=float(dt);
-        // Walking into the doorway crosses; standing in front of it goes through after a moment, like the original use.
-        if(door_.open>=1&&((ahead<28&&across<side.halfWidth+8)||door_.openTime>=.6f)){
+        // Walking into the doorway crosses; after the use key, standing in front of it goes through after a moment, like the original use.
+        if(door_.open>=1&&(walkIn||(door_.used&&door_.openTime>=.6f))){
+            if(!door_.used){if(!gameplay_blocked(runtime).empty())break; // a scene took control: no crossing
+                if(door_refused(runtime,g)){g.armed=false;door_reset();break;}} // e.g. enemies came back while it was open
             set_global("LY_HedefLevel",Value::from_int(g.target));door_.phase=DoorPhase::Crossing;door_.ticks=0;fadeHidden_=true;}
         break;}
     case DoorPhase::Crossing:
         // LevelYukle's fade-out loop (LYP_Fade.Alpha+=13*time until 100) ends on its next test.
         if(fadeId&&field(fadeId,"visible")&&field(fadeId,"alpha")<100)set_field(fadeId,"alpha",100);
-        if(++door_.ticks>240)door_reset(); // Acikmi refused (LV_HataGoster) or the scripts never loaded
+        // Acikmi refused (LV_HataGoster) or the scripts never loaded: the door closes and waits for the bodies to leave.
+        if(++door_.ticks>240){if(world==door_.groupsWorld&&door_.group<door_.groups.size())door_.groups[door_.group].armed=false;door_reset();}
         break;
     case DoorPhase::Holding:
         // LV_*_Giris placed the player and LevelYukle set LY_AktifLevelID; the fade-in loop (Alpha-=12.5*time) ends at once.

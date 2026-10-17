@@ -1,6 +1,8 @@
 # requires: saves
 # Seamless doors, Ev3 (99) -> Ev2 (28), Demir: ev2.wmb has no LY_Kapi back to 99, so the doorway on the far side is the wall behind
-# the original LV_Ev2_Giris arrival LY_Ev2_G99. Ev3 is reached like the level sweep (from 28, original fade), then the door is used.
+# the original LV_Ev2_Giris arrival LY_Ev2_G99. Ev3 is reached like the level sweep (from 28, original fade), then the door is used
+# (the arrival's door stays closed until used). In Ev2 the door to Ev (27) is LevelYukle's dark entry while v_ebru_ev_ok is 0:
+# walking up to it opens nothing (the original fade path); with the flag set it opens by itself.
 realtime off
 load-save 8
 wait until LY_HedefLevel == 0 && level_yuklendi_ok == 1 && LYP_Fade.visible == 0 timeout 6000
@@ -22,5 +24,14 @@ assert oyuncu_pasif == 0
 assert $doorswaps == 1
 assert $fadeframes == @fade
 capture ev2_arrival
-frames 120
-assert player != 0
+# Ev2 -> Ev: LY_Kapi (10,-64..-80) skill1 27.
+set v_ebru_ev_ok 0
+walk-to 40 -140 10 timeout 900
+turn-to 10 -72 6
+frames 30
+assert $door == 0 && LY_AktifLevelID == 28
+set v_ebru_ev_ok 1
+wait until $door == 1 timeout 300
+assert LY_HedefLevel == 0 && LY_AktifLevelID == 28
+frames 30
+capture ev2_doorway_open

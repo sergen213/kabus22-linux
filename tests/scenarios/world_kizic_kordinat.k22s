@@ -8,9 +8,11 @@ wait until oyun_ilk_basladi == 0 timeout 600
 assert BULKordinatOK == 0 && v_kapikriz_ok == 0 && v_kapikriz_basla == 0
 walk-to -260 25 12 timeout 900
 walk-to -420 25 12 timeout 1200
-walk-to -455 -48 12 timeout 1200
-turn-to -500 -48 6
-press-until D LY_AktifLevelID == 36 timeout 600
+wait until $door == 1 timeout 300
+turn-to -477 -51 6
+down Up
+wait until LY_AktifLevelID == 36 timeout 600
+up Up
 wait until $level == "kizic.wmb" && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
 # The spiral stairs end at the kapi_kriz_ctrl door (three scan points at z 328, k_kizkapi_Tarama, Ornek_Yasin.wdl:2519);
 # the nearest hull cell is 45 quants from them, inside the 60-quant scan of NS_Kullan (Nesneler.wdl temp.z 60).
