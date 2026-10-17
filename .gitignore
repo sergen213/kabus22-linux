@@ -266,6 +266,7 @@
 !/native/check_assets.cpp
 !/native/character.cpp
 !/native/coop_menu.cpp
+!/native/coop.cpp
 !/native/check_engine.cpp
 !/native/check_modern_box.hpp
 !/native/check_physics.cpp

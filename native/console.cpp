@@ -10,7 +10,7 @@
 namespace k22 {
 namespace {
 struct Command {std::string_view name,usage,help;};
-constexpr std::array<Command,19> commands{{
+constexpr std::array<Command,20> commands{{
  {"help","help [COMMAND]","list the commands, or show one command's usage"},
  {"save","save","quicksave (F5): writes the next slot of the game's own save list, plus the player position"},
  {"load","load [SLOT]","quickload (F9): loads the newest slot, or kayitSLOT.sav (0-98)"},
@@ -24,11 +24,12 @@ constexpr std::array<Command,19> commands{{
  {"map","map ID|WMB","same as level"},
  {"pos","pos","print the player position and PAN"},
  {"tp","tp X Y Z [PAN]","teleport the player"},
- {"kill","kill","kill the player (original death and game over)"},
+ {"kill","kill [2]","kill the player (original death and game over); 2: coop player 2"},
  {"fps","fps","toggle the frame-rate counter"},
  {"timescale","timescale [FACTOR]","print or set TIME_FACTOR (0.1-10, 1 = normal)"},
  {"clear","clear","clear the console"},
  {"character","character [original|demir|ebru|inzar]","print or set the character lock (docs/CHARACTER_LOCK.md); applies from the next level entry"},
+ {"coop","coop [off | P1 P2]","print, end or start local two-player coop (demir|ebru|inzar each, docs/COOP.md); P2 joins beside P1"},
  {"quit","quit","exit the game immediately"},
 }};
 // Per Aktif_Player (0 Demir, 1 Ebru, 2 Inzar): health VAR and its new-game value (Yeni_Oyun_Deger.wdl Yeni_Oyun_Kolay:12-16).
@@ -62,7 +63,8 @@ std::string Engine::saved_position()const{
 // A slot read is a load: its sidecar restores the quicksave position and the character lock (none: original, the body follows the
 // story); the loaded Aktif_Player is adopted without a switch prompt.
 void Engine::read_saved_position(const std::filesystem::path& slot){
- positionRestore.reset();coop={};auto meta=saves::read_meta(slot);characterLock=meta&&meta->character>=0?meta->character:characterDefault;switchPrompt_=-1;adoptStory_=true;if(!meta||meta->position.empty())return;
+ positionRestore.reset();auto meta=saves::read_meta(slot);coop=meta&&meta->coop[0]>=0?Coop{true,meta->coop}:Coop{}; // coop slots restore both characters (native/coop.cpp)
+ characterLock=meta&&meta->character>=0?meta->character:characterDefault;switchPrompt_=-1;adoptStory_=true;if(!meta||meta->position.empty())return;
  std::istringstream in(meta->position);PositionRestore r;if(in>>r.level>>r.position.x>>r.position.y>>r.position.z>>r.pan&&r.level>0)positionRestore=r;
 }
 // YukleMenu.wdl LV_LevelKaydeta: SLG_LevelKaydet(Aktif_SaveNo,label) -> YD_OyunuKaydet -> SLG_Kaydet, the original slot writer and
@@ -209,6 +211,15 @@ std::string Engine::console_command(Runtime& runtime,std::string_view line){
    if(w.size()>1){auto it=std::find(choices.begin(),choices.end(),lower(w[1]));if(it==choices.end())return "character [original|demir|ebru|inzar]";if(state.profile!=SemanticProfile::CampaignA6)return "character applies to the campaign only";set_character_lock(int(it-choices.begin())-1);}
    return "character "+std::string(choices[characterLock+1])+" (story: "+std::string(choices[story_character()+1])+")";
   }
+  if(c=="coop"){
+   static constexpr std::array<std::string_view,3> choices{"demir","ebru","inzar"};
+   auto pick=[&](const std::string& s){return int(std::find(choices.begin(),choices.end(),lower(s))-choices.begin());};
+   if(w.size()==2&&lower(w[1])=="off"){coop={};return "coop off";}
+   if(w.size()==3){const int a=pick(w[1]),b=pick(w[2]);if(a>2||b>2)return "coop [off | P1 P2]: demir, ebru or inzar";if(state.profile!=SemanticProfile::CampaignA6)return "coop applies to the campaign only";
+    coop={true,{a,b}};set_character_lock(a);}
+   else if(w.size()!=1)return "coop [off | P1 P2]";
+   return coop.active?"coop "+std::string(choices[coop.characters[0]])+' '+std::string(choices[coop.characters[1]]):std::string("coop off");
+  }
   // Player commands below need the player entity.
   const auto p=live_player();const int character=body_character();
   if(c!="god"&&c!="noclip"&&c!="give"&&c!="pos"&&c!="tp"&&c!="kill")return "unknown command '"+w[0]+"' (try help)";
@@ -227,7 +238,7 @@ std::string Engine::console_command(Runtime& runtime,std::string_view line){
    for(std::size_t i=0;i+1<w.size()&&i<4;++i){auto n=parse_number(w[i+1]);if(!n)return "tp X Y Z [PAN]: numbers expected";v[i]=*n;}
    set_position(p,{float(v[0]),float(v[1]),float(v[2])});if(w.size()>4)set_field(p,"pan",v[3]);return "Teleported";
   }
-  if(c=="kill"){god_=false;set_field(p,"skill1",0);return "Killed the player";}
+  if(c=="kill"){if(w.size()>1&&w[1]=="2"){const auto p2=coop_body(1);if(!p2)return "no player 2";set_field(p2,"skill1",0);return "Killed player 2";}god_=false;set_field(p,"skill1",0);return "Killed the player";}
   // give: original inventory paths only (silah.wdl Silah_Al / oyunici_kursun_al), never invented items.
   if(c=="give"){
    if(w.size()<2)return "give health|mana|ammo|weapons|all";

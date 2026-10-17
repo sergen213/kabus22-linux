@@ -16,15 +16,15 @@ constexpr std::array<std::string_view,3> models{"demir_2007.mdl","ebru_2006.mdl"
 constexpr std::array<std::string_view,3> idles{"byBekle","bekle","bekle"}; // oyuncu2.wdl Oynat(Bekle): Demir's grenade stance (arms down; the grenade is a separate entity), Ebru and Inzar "bekle"
 constexpr std::array<std::string_view,3> names{"DEMIR","EBRU","INZAR"};
 constexpr std::array<std::string_view,5> panels{"AMP_YeniOyun","AMP_OyunYukle","AMP_Ayarlar","AMP_Kabus22","AMP_Cikis"}; // AML_Paneller
-// Pad reads of the select screen. ponytail: pad 1 always reads false until the two-pad Input lands (docs/COOP.md "Controllers").
-bool pad_pressed(const Input& in,int pad,SDL_GameControllerButton b){return pad==0&&in.controllerPressed[b];}
+// Pad reads of the menu: PAD is a controller slot (-1 none, Engine::coop_pad / legacyPad).
+bool pad_pressed(const Input& in,int pad,SDL_GameControllerButton b){return pad>=0&&pad<Input::Pads&&in.controllerPressed[pad][b];}
 bool inside(const Rect& r,const Input& in){return r.width>0&&in.mouseX>=r.x&&in.mouseX<r.x+r.width&&in.mouseY>=r.y&&in.mouseY<r.y+r.height;}
 }
 void Engine::coop_tick(Runtime& runtime,const Input& in){
  if(state.profile!=SemanticProfile::CampaignA6)return;
  // Consumed presses stay hidden from the scripts until released.
- coopKeys_&=in.keys|in.pressed;coopPad_&=in.controllerButtons|in.controllerPressed;
- auto eat=[&]{coopKeys_|=in.keys|in.pressed;coopPad_|=in.controllerButtons|in.controllerPressed;};
+ coopKeys_&=in.keys|in.pressed;for(int p=0;p<Input::Pads;++p)coopPad_[p]&=in.controllerButtons[p]|in.controllerPressed[p];
+ auto eat=[&]{coopKeys_|=in.keys|in.pressed;for(int p=0;p<Input::Pads;++p)coopPad_[p]|=in.controllerButtons[p]|in.controllerPressed[p];};
  auto sound=[&](std::string_view name){const auto s=global(name);if(!s.bits)return;ProcessContext context;std::array<Argument,3> args{{{s,{}},{Value::from_double(number("GA_Efekt")),{}},{Value{},{}}}};builtin(runtime,context,"snd_play",args);}; // Kabusdismenu.wdl DM_TusKontrol
  auto key=[&](std::initializer_list<SDL_Scancode> keys){return std::any_of(keys.begin(),keys.end(),[&](auto k){return bool(in.pressed[k]);});};
  auto bitmap=[&](int item,bool selected){auto list=global("DMIL_AnaMenu");auto* o=list.kind==Value::Kind::Object?state.get(list.bits):nullptr;const auto i=std::size_t(int(number("GA_Dil"))*10+item*2+(selected?0:1));
@@ -33,7 +33,7 @@ void Engine::coop_tick(Runtime& runtime,const Input& in){
  if(screen==CoopScreen::Off&&first.kind==Value::Kind::Object&&state.get(first.bits)&&field(first.bits,"visible")!=0&&runtime.running(runtime.function("AM_Kernel"))){
   coopPending_=false; // backed out of the New Game menu
   const int cursor=std::clamp(int(number("AM_Cursor")),0,4);
-  const bool up=key({SDL_SCANCODE_UP,SDL_SCANCODE_KP_8})||pad_pressed(in,0,SDL_CONTROLLER_BUTTON_DPAD_UP),down=key({SDL_SCANCODE_DOWN,SDL_SCANCODE_KP_2})||pad_pressed(in,0,SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+  const bool up=key({SDL_SCANCODE_UP,SDL_SCANCODE_KP_8})||pad_pressed(in,legacyPad,SDL_CONTROLLER_BUTTON_DPAD_UP),down=key({SDL_SCANCODE_DOWN,SDL_SCANCODE_KP_2})||pad_pressed(in,legacyPad,SDL_CONTROLLER_BUTTON_DPAD_DOWN);
   const bool hover=inside(coopItemRect_,in),click=hover&&in.mousePressed[SDL_BUTTON_LEFT];
   if(!coopItem_&&((up&&cursor==0)||(down&&cursor==4)||(hover&&(in.mouseDX||in.mouseDY))||click)){coopItem_=true;if(up||down)eat();sound("DMS_Yontus");}
   else if(coopItem_&&(up||down)){coopItem_=false;const int to=up?4:0;set_global("AM_Cursor",Value::from_int(to));bitmap(to,true);eat();sound("DMS_Yontus");}
@@ -41,21 +41,21 @@ void Engine::coop_tick(Runtime& runtime,const Input& in){
   if(coopItem_)bitmap(cursor,false);
   // DisMenuCerceve.wdl frame: AnaMenuAc's CER_Hedef spans the five buttons (Cer_hY2-Cer_hY1 = (5*DM_ButtonH+2*Cer_Kenar)*scale); one more on top.
   set_global("Cer_hY1",Value::from_double(number("Cer_hY2")-(6*32+2*number("Cer_Kenar"))*field(first.bits,"scale_y")));
-  if(coopItem_&&(click||key({SDL_SCANCODE_RETURN,SDL_SCANCODE_KP_ENTER})||pad_pressed(in,0,SDL_CONTROLLER_BUTTON_A)||pad_pressed(in,0,SDL_CONTROLLER_BUTTON_START))){
+  if(coopItem_&&(click||key({SDL_SCANCODE_RETURN,SDL_SCANCODE_KP_ENTER})||pad_pressed(in,legacyPad,SDL_CONTROLLER_BUTTON_A)||pad_pressed(in,legacyPad,SDL_CONTROLLER_BUTTON_START))){
    eat();sound("DMS_Enter");runtime.start("AnaMenuKapat");remove_entity(runtime,global("AM_KernelTimer").bits); // AM_Kernel's own exit: AnaMenuKapat(); Remove(me)
    coopScreen_=CoopScreen::Select;coopItem_=false;coopJoined_={true,false};coopReady_={};coopTime_=0;
    // The menu frame moves to the select screen as it does to every original submenu (CER_Hedef).
    const float w=float(currentWidth_),h=float(currentHeight_);std::array<Argument,4> frame{{{Value::from_double(0.08*w),{}},{Value::from_double(0.04*h),{}},{Value::from_double(0.92*w),{}},{Value::from_double(0.97*h),{}}}};runtime.start("CER_Hedef",frame);
   }
  }else if(screen==CoopScreen::Select){
-  // P1: keyboard, mouse and pad 0. P2: pad 1, or on the keyboard A/D, Space (join, READY) and Backspace (back).
-  const bool click=in.mousePressed[SDL_BUTTON_LEFT];
+  // P1: keyboard, mouse and coop_pad(0). P2: coop_pad(1), or on the keyboard A/D, Space (join, READY) and Backspace (back).
+  const bool click=in.mousePressed[SDL_BUTTON_LEFT];const int pad1=coop_pad(0),pad2=coop_pad(1);
   for(int p=0;p<2;++p){
-   const bool left=p?pad_pressed(in,1,SDL_CONTROLLER_BUTTON_DPAD_LEFT)||key({SDL_SCANCODE_A}):key({SDL_SCANCODE_LEFT,SDL_SCANCODE_KP_4})||pad_pressed(in,0,SDL_CONTROLLER_BUTTON_DPAD_LEFT)||(click&&inside(coopRects_[0],in));
-   const bool right=p?pad_pressed(in,1,SDL_CONTROLLER_BUTTON_DPAD_RIGHT)||key({SDL_SCANCODE_D}):key({SDL_SCANCODE_RIGHT,SDL_SCANCODE_KP_6})||pad_pressed(in,0,SDL_CONTROLLER_BUTTON_DPAD_RIGHT)||(click&&inside(coopRects_[1],in));
+   const bool left=p?pad_pressed(in,pad2,SDL_CONTROLLER_BUTTON_DPAD_LEFT)||key({SDL_SCANCODE_A}):key({SDL_SCANCODE_LEFT,SDL_SCANCODE_KP_4})||pad_pressed(in,pad1,SDL_CONTROLLER_BUTTON_DPAD_LEFT)||(click&&inside(coopRects_[0],in));
+   const bool right=p?pad_pressed(in,pad2,SDL_CONTROLLER_BUTTON_DPAD_RIGHT)||key({SDL_SCANCODE_D}):key({SDL_SCANCODE_RIGHT,SDL_SCANCODE_KP_6})||pad_pressed(in,pad1,SDL_CONTROLLER_BUTTON_DPAD_RIGHT)||(click&&inside(coopRects_[1],in));
    const bool readyClick=!p&&click&&inside(coopRects_[2],in);
-   const bool confirm=p?pad_pressed(in,1,SDL_CONTROLLER_BUTTON_A)||pad_pressed(in,1,SDL_CONTROLLER_BUTTON_START)||key({SDL_SCANCODE_SPACE}):key({SDL_SCANCODE_RETURN,SDL_SCANCODE_KP_ENTER})||pad_pressed(in,0,SDL_CONTROLLER_BUTTON_A)||pad_pressed(in,0,SDL_CONTROLLER_BUTTON_START)||(readyClick&&!coopReady_[0]);
-   const bool back=p?pad_pressed(in,1,SDL_CONTROLLER_BUTTON_B)||key({SDL_SCANCODE_BACKSPACE}):key({SDL_SCANCODE_ESCAPE})||pad_pressed(in,0,SDL_CONTROLLER_BUTTON_B)||(readyClick&&coopReady_[0]);
+   const bool confirm=p?pad_pressed(in,pad2,SDL_CONTROLLER_BUTTON_A)||pad_pressed(in,pad2,SDL_CONTROLLER_BUTTON_START)||key({SDL_SCANCODE_SPACE}):key({SDL_SCANCODE_RETURN,SDL_SCANCODE_KP_ENTER})||pad_pressed(in,pad1,SDL_CONTROLLER_BUTTON_A)||pad_pressed(in,pad1,SDL_CONTROLLER_BUTTON_START)||(readyClick&&!coopReady_[0]);
+   const bool back=p?pad_pressed(in,pad2,SDL_CONTROLLER_BUTTON_B)||key({SDL_SCANCODE_BACKSPACE}):key({SDL_SCANCODE_ESCAPE})||pad_pressed(in,pad1,SDL_CONTROLLER_BUTTON_B)||(readyClick&&coopReady_[0]);
    if(!coopJoined_[p]){if(confirm){coopJoined_[p]=true;sound("DMS_Enter");}continue;}
    if(coopReady_[p]){if(back){coopReady_[p]=false;sound("DMS_Esc");}continue;}
    if(left!=right){coopPick_[p]=(coopPick_[p]+(right?1:2))%3;sound("DMS_Yontus");} // any combination, duplicates too
@@ -67,14 +67,14 @@ void Engine::coop_tick(Runtime& runtime,const Input& in){
  }else if(screen!=CoopScreen::Off){
   // Leaving/Starting: the original menu opens once everything is released, so the press never reaches its kernel.
   eat();
-  if(!in.keys.any()&&!in.controllerButtons.any()&&!in.mouseButtons.any()){
+  if(!in.keys.any()&&!in.pad_any()&&!in.mouseButtons.any()){
    coopScreen_=CoopScreen::Off;set_global("DM_Tus",Value{});
    if(screen==CoopScreen::Starting){coopPending_=true;runtime.start("YeniMenuAc");}
    else{runtime.start("AnaMenuAc");coopItem_=true;bitmap(0,false);}
   }
  }
  coop_models(runtime);
- input.keys&=~coopKeys_;input.pressed&=~coopKeys_;input.controllerButtons&=~coopPad_;input.controllerPressed&=~coopPad_;
+ input.keys&=~coopKeys_;input.pressed&=~coopKeys_;for(int p=0;p<Input::Pads;++p){input.controllerButtons[p]&=~coopPad_[p];input.controllerPressed[p]&=~coopPad_[p];}
 }
 // The select screen's VIEW entities: each joined player's character, idle cycle, turning slowly. Removed when the screen closes.
 void Engine::coop_models(Runtime& runtime){

@@ -1032,6 +1032,9 @@ void Engine::update_input(Runtime& runtime){auto edge=[&](Value fn,int code){if(
 void Engine::tick(Runtime& runtime,const Input& in){ensure_font_palette(runtime.compiler_settings().entry);input=in;if(!std::isfinite(in.dt))throw std::runtime_error("nonfinite native frame duration");auto seconds=std::clamp(in.dt,0.0,1.0);time_+=std::max(0.0,in.dt);auto frameRaw=std::max<std::int32_t>(1,Value::from_double(seconds*16).raw());set_global("time_frame",Value::from_raw(frameRaw));set_global("total_ticks",Value::from_raw(std::bit_cast<std::int32_t>(global("total_ticks").bits+std::uint32_t(frameRaw))));set_global("total_secs",Value::from_double(time_));set_global("total_frames",Value::from_int(global("total_frames").integer()+1));set_global("fps",Value::from_double(seconds?1/seconds:0));
  // A6 00414650 (004146e0-004147fb): every main-loop pass copies localtime into SYS_*; DOW is Monday=1..Sunday=7, DOY 1-based.
  {const auto now=std::time(nullptr);std::tm t{};localtime_r(&now,&t);for(auto [name,value]:{std::pair{"sys_seconds",t.tm_sec},{"sys_minutes",t.tm_min},{"sys_hours",t.tm_hour},{"sys_day",t.tm_mday},{"sys_month",t.tm_mon+1},{"sys_year",t.tm_year+1900},{"sys_dow",(t.tm_wday+6)%7+1},{"sys_doy",t.tm_yday+1}})set_global(name,Value::from_int(value));}
+ // Single player: the lowest connected controller slot feeds the original joystick globals (a pad replugged into slot 1 takes over);
+ // coop: P1's pad only (none when the only pad is P2's), docs/COOP.md "Controllers".
+ legacyPad=coop.active?coop_pad(0):in.controllerConnected[0]?0:in.controllerConnected[1]?1:0;
  coop_tick(runtime,in); // 2 PLAYER menu item and character select (native/coop_menu.cpp); hides the presses it consumes from `input`
  rumble.fill(0);if(controller.modern){modernForce_=apply_modern_controller(controller,input,legacyPad,controllerHeld_);if(controller.vibration)for(int pad=0;pad<Input::Pads;++pad){
   ObjectId id=rumbleEntity[pad];if(!id&&pad==legacyPad){auto p=global("player");if(p.kind==Value::Kind::Object)id=p.bits;}if(!(id&&entities.contains(id)&&state.get(id)&&state.get(id)->alive))id=0;
@@ -1041,7 +1044,7 @@ void Engine::tick(Runtime& runtime,const Input& in){ensure_font_palette(runtime.
  if(nativeDisplay_&&(displayWidth_!=currentWidth_||displayHeight_!=currentHeight_))prepare_display();
  if(state.profile==SemanticProfile::CampaignA6&&character_tick(runtime,in)){media.update();make_frame();character_overlay();console_overlay();return;}
  update_input(runtime);make_frame(state.profile!=SemanticProfile::BonusA7);if(renderer)for(auto& c:frame_.cameras)if(c.portalId&&!c.portalTarget)if(auto surface=Renderer::portal_surface(frame_,c,renderer->metrics())){set_field(c.sourceId,"portal_x",surface->position.x);set_field(c.sourceId,"portal_y",surface->position.y);set_field(c.sourceId,"portal_z",surface->position.z);set_field(c.sourceId,"pnormal_x",surface->normal.x);set_field(c.sourceId,"pnormal_y",surface->normal.y);set_field(c.sourceId,"pnormal_z",surface->normal.z);}
- if(state.profile==SemanticProfile::CampaignA6)update_ui(runtime);runtime.tick(timeRaw,global("freeze_mode").raw());if(!viewsPrepared_){prepare(runtime);viewsPrepared_=true;}
+ if(state.profile==SemanticProfile::CampaignA6){update_ui(runtime);coop_play(runtime);}runtime.tick(timeRaw,global("freeze_mode").raw());if(!viewsPrepared_){prepare(runtime);viewsPrepared_=true;}
  console_tick(runtime); // native console cheats/quickload position; no-op unless used (native/console.cpp)
  door_tick(runtime); // native seamless doors; inert when off (native/seamless_doors.cpp)
  if(global("freeze_mode").raw()<1&&global("debug_mode").raw()<1){const std::uint32_t moveMask=core_mask(Object::Kind::Particle,"move",state.profile)->mask;const std::size_t particleCount=activeParticles.size();for(std::size_t i=0;i<particleCount&&i<activeParticles.size();++i){auto pd=activeParticles[i];auto* o=state.get(pd.object);if(!o||!o->alive)continue;
@@ -1086,7 +1089,8 @@ const Input& Engine::skip_intro(Runtime& runtime,const Input& in){
 Value Engine::builtin(Runtime& runtime,ProcessContext& ctx,std::string_view name,std::span<const Argument> args){
  ensure_font_palette(runtime.compiler_settings().entry);
  display_admitted();
- if(name=="k22_body_player")return Value::from_int(body_character());
+ if(name=="k22_body_player")return Value::from_int(coop.active?coop.characters[runtime.active_bank()]:body_character()); // coop: the running bank's player
+ if(name=="k22_coop_game_over"||name=="k22_coop_enter")return coop_read(runtime,name); // native/coop.cpp
  if(name=="k22_menu_player")return Value::from_int(menu_character());
  if(name=="k22_weapon_player")return Value::from_int(weapon_character());
  if(name=="k22_body_oyuncu_pasif"||name=="k22_body_koruyucu_pasif"){ // a locked body obeys the story character's control gate
@@ -1402,7 +1406,7 @@ std::optional<Value> Engine::service_builtin(Runtime& runtime,ProcessContext&,st
   // GA_AyarlariKaydet writes the in-memory native tier; persist the user's authored GA_Cozunurluk instead.
   if(data.writable&&!data.bytes.empty()&&core_equal(data.output.filename().string(),"options.k22")&&display_admitted())data.bytes[0]=authoredResolution_;
   svc_flush(data);
-  if(data.writable&&saves::slot_number(data.output.filename().string())>=0){const auto& entry=runtime.compiler_settings().entry;if(!saveScriptKnown_){if(assets.contains(entry))saveScript_=saves::fnv1a64(assets.read(entry));saveScriptKnown_=true;}saves::write_meta(data.output,{saves::MetaFormat,K22_VERSION,saves::now_utc(),entry,saveScript_,"native",quickSaving?saved_position():"",characterLock});}
+  if(data.writable&&saves::slot_number(data.output.filename().string())>=0){const auto& entry=runtime.compiler_settings().entry;if(!saveScriptKnown_){if(assets.contains(entry))saveScript_=saves::fnv1a64(assets.read(entry));saveScriptKnown_=true;}saves::write_meta(data.output,{saves::MetaFormat,K22_VERSION,saves::now_utc(),entry,saveScript_,"native",quickSaving?saved_position():"",characterLock,coop.active?coop.characters:std::array<int,2>{-1,-1}});}
   files.erase(std::uint32_t(integer(0)));return Value{};}
  if(name=="file_asc_read"){count(1);auto& data=file();if(data.writable)throw std::runtime_error("file handle is write-only");if(data.cursor==data.bytes.size())return Value::from_int(-1);return Value::from_int(data.bytes[data.cursor++]);}
  if(name=="file_asc_write"){count(2);auto& data=file();auto byte=std::uint8_t(raw(1)>>10);svc_append(data,std::string_view(reinterpret_cast<const char*>(&byte),1));return Value::from_int(byte);}

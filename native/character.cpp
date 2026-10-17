@@ -68,6 +68,10 @@ void Engine::configure_characters(Runtime& runtime,int defaultLock){
  // strings; Action_Zaman[Aktif_Silah*20+n], 160), called from cinematic.wdl, BUL_Saat.wdl and kotu_koruyucu.wdl buyukes_koruses.
  // An Ebru body there may still hold her magnum (8): those reads see the pistol (1).
  runtime.reroute_reads("Aktif_Silah","k22_pose_weapon",posingFunctions);
+ // Coop (native/coop.cpp, docs/COOP.md): the game over starts only when both players are down; P2's reload key is its pad's A.
+ static constexpr std::array<std::string_view,1> gameOver{"game_over_strtr"};
+ runtime.reroute_reads("game_over_start","k22_coop_game_over",gameOver);
+ runtime.reroute_reads("key_enter","k22_coop_enter",{},{},demirEbruFiles);
 }
 void Engine::set_character_lock(int character){characterLock=std::clamp(character,-1,2);storyAtLevel_=story_character();adoptStory_=false;switchPrompt_=-1;}
 // load_level, before the placed actions start. The entity that would become the player for the story character runs the locked
@@ -172,7 +176,7 @@ bool Engine::character_tick(Runtime& runtime,const Input& in){
   // or mine, whose blast hurts the boss by distance (hedef.wdl Dusman_Tarama:59-77). Ebru's body throws neither (rule 3): for her
   // the guard keeps her place beside the boss (pan 180, K22.wdl:262), and shots from off that line reach it.
   if(characterLock==1&&number("boss_ebruhedefpan")!=180)set_global("boss_ebruhedefpan",Value::from_int(180));
-  if(characterLock<0||adoptStory_||storyAtLevel_<0)return false;
+  if(characterLock<0||adoptStory_||storyAtLevel_<0||coop.active)return false; // coop: both characters are fixed, no prompt
   const int s=story_character();if(s==storyAtLevel_)return false;
   storyAtLevel_=s;if(s==characterLock)return false;
   switchPrompt_=s;promptCursor_=0;promptRelease_=false;promptArmed_=false;notify(std::string("Story switches to ")+std::string(names[s]));
@@ -207,7 +211,7 @@ float Engine::draw_menu_word(std::string_view word,float x,float y,float scale,f
 void Engine::character_overlay(){
  menuArrows_={};promptRows_={};
  if(!renderer||currentWidth_<=0)return;
- coop_overlay();
+ coop_overlay();coop_hud();
  if(newGameMenu_&&switchPrompt_<0&&!coopPending_){
   // One button height above NORMAL (YeniMenu.wdl YeniMenuAc), at the menu's own scale: "< ORIGINAL >".
   const auto panel=global("YMP_Normal").bits;const float sx=std::max(0.1f,float(field(panel,"scale_x"))),sy=std::max(0.1f,float(field(panel,"scale_y")));

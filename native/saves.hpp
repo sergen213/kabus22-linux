@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <iosfwd>
@@ -22,7 +23,8 @@ constexpr int MetaFormat=1;
 // Sidecar kayitN.sav.meta; the 2030-byte original payload is never extended. Format 0 = no sidecar (original save).
 // position: native quicksave only (docs/CONSOLE.md), "LEVELID X Y Z PAN"; empty for script save points (original G00 spawn).
 // character: the character lock at save time (docs/CHARACTER_LOCK.md); -1/absent = original (the body follows Aktif_Player).
-struct Meta {int format=MetaFormat;std::string engine,written,entry,script,origin,position;int character=-1;};
+// coop: a local two-player game's characters P1,P2 ("coop=demir,ebru", docs/COOP.md); -1,-1/absent = one player.
+struct Meta {int format=MetaFormat;std::string engine,written,entry,script,origin,position;int character=-1;std::array<int,2> coop{-1,-1};};
 std::optional<Meta> parse_meta(std::string_view);
 std::string format_meta(const Meta&);
 std::string now_utc();

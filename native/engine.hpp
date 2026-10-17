@@ -149,6 +149,10 @@ public:
  struct Coop {bool active=false;std::array<int,2> characters{-1,-1};} coop;
  int coop_menu()const{return coopScreen_!=CoopScreen::Off?2:coopItem_?1:0;} // 0 off, 1 the 2 PLAYER item is highlighted, 2 select screen
  int coop_pick(int player)const{return coopJoined_[player]?coopPick_[player]:-1;} // select screen highlight, -1 not joined
+ // Game controller slot of coop player 0/1 (-1: keyboard and mouse): two pads → P1 slot 0, P2 slot 1; one pad → P2 has it, P1 the
+ // keyboard; none → both -1. Off coop the original single-player legacyPad applies (lowest connected slot).
+ int coop_pad(int player)const;
+ ObjectId coop_body(int player)const; // coop player 0/1's live entity (P1: the bank-0 player), 0 when none (native/coop.cpp)
 private:
  enum class DoorPhase {Idle,Opening,Crossing,Holding,Revealing};
  struct DoorGroup {int target=0;std::vector<Vec3> triggers;Vec3 centroid{};std::optional<DoorLink> link;bool linked=false;};
@@ -171,7 +175,12 @@ private:
  void coop_tick(Runtime&,const Input&);void coop_models(Runtime&);void coop_overlay(); // native/coop_menu.cpp
  enum class CoopScreen {Off,Select,Leaving,Starting};CoopScreen coopScreen_=CoopScreen::Off;bool coopItem_=false,coopPending_=false;float coopTime_=0;
  std::array<int,2> coopPick_{0,1};std::array<bool,2> coopJoined_{},coopReady_{};std::array<ObjectId,2> coopModels_{};Rect coopItemRect_{};std::array<Rect,3> coopRects_{};
- std::bitset<SDL_NUM_SCANCODES> coopKeys_;std::bitset<SDL_CONTROLLER_BUTTON_MAX> coopPad_;
+ std::bitset<SDL_NUM_SCANCODES> coopKeys_;std::array<std::bitset<SDL_CONTROLLER_BUTTON_MAX>,Input::Pads> coopPad_;
+ // Coop gameplay (native/coop.cpp): banks, P2 body, input, leash, respawn, HUD.
+ void coop_play(Runtime&);void coop_hud();void coop_banks(Runtime&,bool on);int coop_resolve(Runtime&,FunctionId,ObjectId my,int inherited);
+ ObjectId coop_spawn(Runtime&,int bank,ObjectId anchor,bool helper);Vec3 coop_spot(ObjectId anchor);void coop_weapon(Runtime&);Value coop_read(Runtime&,std::string_view call);
+ Runtime* coopRuntime_=nullptr;bool coopBanks_=false,coopOver_=false,coopHidden_=false,coopLevelOk_=false;ObjectId coopP2_=0;int coopSpawn_=-1,coopSettle_=0;
+ std::array<double,2> coopDown_{};double coopLeash_=0;float coopHeart_=0;std::bitset<32> coopHeld_;Vec3 coopLast_{};std::vector<std::int8_t> coopKinds_;
  int storyAtLevel_=-1,switchPrompt_=-1,promptCursor_=0,newGameChoice_=0,menuLatch_=-1;bool adoptStory_=false,promptRelease_=false,promptArmed_=false,newGameMenu_=false,menuInventory_=false;
  static constexpr double bossDamageScale=20;ObjectId bossId_=0;double bossHealth_=0; // character_tick: Inzar against the final boss
  std::shared_ptr<const Image> menuAtlas_,menuAtlasLit_;std::array<Rect,256> menuGlyphs_{};std::array<Rect,2> menuArrows_{},promptRows_{};std::string promptTitle_,language_;
