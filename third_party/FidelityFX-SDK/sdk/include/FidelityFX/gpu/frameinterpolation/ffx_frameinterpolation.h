@@ -106,6 +106,7 @@ void computeInterpolatedColor(FfxUInt32x2 iPxPos, out FfxFloat32x3 fInterpolated
     InterpolationSourceColor fCurrColorOF = SampleTextureBilinear(true, fUvInScreenSpace, -ofMv.fMotionVector * fUvLetterBoxScale, DisplaySize());
 
     FfxFloat32 fDisoccludedFactor = 0.0f;
+    FfxFloat32 fShadingChangeWeight = 0.0f; // Kabus22 local patch 7 (below)
 
     // Disocclusion logic
     {
@@ -134,6 +135,16 @@ void computeInterpolatedColor(FfxUInt32x2 iPxPos, out FfxFloat32x3 fInterpolated
         {
             fInPaintingWeight = 1.0f;
         }
+
+        // Kabus22 local patch 7: where the surface the game vector follows changed its shading between the two rendered
+        // frames (a shadow or light moving over a static floor, a lit character's own body), blending its two shadings
+        // leaves two half-strength copies of the shadow and the optical-flow fallback tears small moving objects. Such
+        // points take the current frame's game-vector sample (still placed by the game motion), so those shading
+        // changes step at the rendered cadence instead. Only where both samples are valid and not disoccluded; small
+        // differences (ray-tracing noise, FSR jitter residue) still blend. Thresholds on display-encoded luma.
+        if (fPrevColorGame.fBilinearWeightSum > 0.0f && fCurrColorGame.fBilinearWeightSum > 0.0f && fDisocclusionFactor.x == 1.0f && fDisocclusionFactor.y == 1.0f)
+            fShadingChangeWeight = smoothstep(0.05f, 0.15f, abs(RGBToLuma(fPrevColorGame.fRaw) - RGBToLuma(fCurrColorGame.fRaw)));
+        fInterpolatedColor = ffxLerp(fInterpolatedColor, fCurrColorGame.fRaw, fShadingChangeWeight);
     }
 
     {
@@ -161,6 +172,7 @@ void computeInterpolatedColor(FfxUInt32x2 iPxPos, out FfxFloat32x3 fInterpolated
 
         const FfxFloat32 fFrameIndexFactor = FfxFloat32(FrameIndexSinceLastReset() < 10);
         fGameMvBias = ffxLerp(fGameMvBias, 1.0f, fFrameIndexFactor);
+        fGameMvBias = ffxLerp(fGameMvBias, 1.0f, fShadingChangeWeight); // Kabus22 local patch 7
 
         fInterpolatedColor = ffxLerp(ofColor, fInterpolatedColor, ffxSaturate(fGameMvBias));
     }

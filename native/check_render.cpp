@@ -2019,6 +2019,38 @@ void frame_generation_checks(bool rayTracing) {
     if(std::abs(gx-(px+cx)/2)>std::max(1.5,std::abs(cx-px)*.2))throw std::runtime_error("generated frame does not place the actor halfway");
     if(double(gn)<.8*double(std::min(pn,cn))||double(tintedGenerated)>1.1*double(tintedReal)+20)throw std::runtime_error("generated frame doubles or fades the moving actor");
     if(hudDiff||staleHud)throw std::runtime_error("generated frame HUD is not exactly the rendered frame's HUD");
+    if(!rayTracing)return;
+    // A moving SHADOW caster over a static lamp-lit floor (camera looking down): the floor's game motion is zero, so a
+    // plain interpolation blends the previous and the current shadow into two half-strength copies. Along the floor
+    // column through the shadow, count changed pixels whose generated luma lies strictly between both rendered frames.
+    auto flat=[](std::array<std::uint8_t,4> c){auto image=std::make_shared<Image>();image->width=image->height=16;for(unsigned i=0;i<256;++i)image->rgba.insert(image->rgba.end(),c.begin(),c.end());return image;};
+    World floor;auto&mesh=floor.mesh;mesh.formatVersion=6;
+    mesh.vertices={{{-64,64,0},{0,0,1},{0,0},{0,0}},{{64,64,0},{0,0,1},{1,0},{1,0}},{{64,-64,0},{0,0,1},{1,1},{1,1}},{{-64,-64,0},{0,0,1},{0,1},{0,1}}};
+    mesh.triangles={{{0,1,2},0,0},{{0,2,3},0,0}};mesh.materials.resize(1);
+    auto&surface=mesh.materials[0];surface.texture=flat({255,255,255,255});surface.lightmap=flat({128,128,128,255});surface.raw.resize(64);surface.raw[43]=100;
+    Model blocker;blocker.formatVersion=4;
+    blocker.vertices={{{-6,6,20},{0,0,1},{0,0},{}},{{6,6,20},{0,0,1},{1,0},{}},{{6,-6,20},{0,0,1},{1,1},{}},{{-6,-6,20},{0,0,1},{0,1},{}}};
+    blocker.triangles={{{0,2,1},0,0},{{0,3,2},0,0}};blocker.materials.resize(1);blocker.materials[0].texture=flat({255,255,255,255});
+    DrawInstance caster;caster.model=&blocker;caster.objectId=402;caster.shadowRequested=caster.doubleSided=caster.noFog=true;
+    // The lamp off to -x throws the shadow ~16 units toward +x (about 13 rows off the caster's own rows).
+    RenderLight lamp;lamp.position={-80,0,120};lamp.range=600;lamp.baked=lamp.synthetic=true;
+    Camera top;top.position={0,0,150};top.angles={0,-90,0};top.farClip=600;top.widescreen=false;top.perDrawOpacity=top.noCull=true;
+    RenderFrame shadowFrame;shadowFrame.cameras=std::span(&top,1);shadowFrame.world=&floor;shadowFrame.instances=std::span(&caster,1);shadowFrame.lights=std::span(&lamp,1);
+    // The caster crosses the lamp's axis sideways (screen x); the camera-plane caster itself is masked out by its own rows.
+    for(int i=0;i<30;++i){caster.position.y=-45+3.f*float(i);renderer.draw(shadowFrame);}
+    caster.position.y=-45+3.f*30;
+    const auto shadowNow=captured_pixels(renderer,shadowFrame,captures.path/"fg.ppm");
+    const auto shadowGenerated=load("fg-fg-generated.ppm"),shadowPrevious=load("fg-fg-previous.ppm");
+    if(auto*keep=std::getenv("K22_CAPTURE_DIR"))for(auto name:{"fg.ppm","fg-fg-generated.ppm","fg-fg-previous.ppm"})std::filesystem::copy_file(captures.path/name,std::filesystem::path(keep)/(std::string("rt-shadow-")+name),std::filesystem::copy_options::overwrite_existing);
+    std::size_t changed=0,blended=0;const int height=metrics.drawableHeight;
+    auto luma=[&](const std::vector<std::uint8_t>&p,std::size_t i){return .299*p[i*3]+.587*p[i*3+1]+.114*p[i*3+2];};
+    for(int y=0;y<height;++y)if(std::abs(y-height/2)>=9&&std::abs(y-height/2)<=20)for(int x=0;x<width;++x){const auto i=std::size_t(y)*width+x;
+        const double a=luma(shadowPrevious,i),b=luma(shadowNow,i),g=luma(shadowGenerated,i),d=std::abs(a-b);
+        if(d>20){++changed;blended+=g>std::min(a,b)+.25*d&&g<std::max(a,b)-.25*d;}}
+    std::cout<<"RT frame generation moving shadow: changed "<<changed<<" px, blended "<<blended<<std::endl;
+    // Upstream interpolation blended 72 of 82; the shading-change patch (KABUS-PROVENANCE.txt patch 7) leaves 4.
+    if(changed<40)throw std::runtime_error("frame generation shadow consumer: the shadow did not move");
+    if(blended*5>changed)throw std::runtime_error("generated frame cross-fades the moving shadow (doubled shadow)");
 }
 // Seamless door (render.hpp DoorPortal): doorway hole + door-world preview with the exact clip rules, no-op paths, release_scene(keep).
 void door_portal_checks(k22::RendererBackend backend,bool rayTracing) {
