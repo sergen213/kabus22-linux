@@ -1,0 +1,87 @@
+# Coop menu (docs/COOP.md): the native 2 PLAYER item above NEW GAME in the original main menu (AnaMenu.wdl), the character select
+# and the original New Game menu with the coop choice pending. P2 uses the select screen's keyboard fallback (A/D, Space, Backspace).
+realtime off
+wait until ParlaklikMenuAcik == 1 || AMP_YeniOyun.visible == 1 timeout 3600
+press-until Return ParlaklikMenuAcik == 0
+wait until AMP_YeniOyun.visible == 1 && AM_Cursor == 0 timeout 600
+frames 30
+assert $coopmenu == 0 && $coop == 0
+# Up from NEW GAME reaches 2 PLAYER (the original cursor stays on 0); Down returns; Up, Up wraps to EXIT; Down from EXIT reaches 2 PLAYER.
+press Up
+assert $coopmenu == 1 && AM_Cursor == 0
+press Down
+assert $coopmenu == 0 && AM_Cursor == 0
+press Up
+press Up
+assert $coopmenu == 0 && AM_Cursor == 4
+press Down
+assert $coopmenu == 1 && AM_Cursor == 4
+press Down
+assert $coopmenu == 0 && AM_Cursor == 0
+# The original Down sequence is unchanged: NEW GAME -> LOAD GAME.
+press Down
+assert AM_Cursor == 1
+press Up
+press Up
+assert $coopmenu == 1
+capture main_menu_2player
+# Return opens the select screen (the main menu closes as AM_Kernel would); Escape returns with 2 PLAYER highlighted.
+press Return
+wait until $coopmenu == 2 timeout 60
+assert AMP_YeniOyun.visible == 0 && $pick1 == 0 && $pick2 == -1
+press Escape
+wait until $coopmenu == 1 && AMP_YeniOyun.visible == 1 timeout 120
+frames 10
+assert AM_Cursor == 0 && YMP_Normal.visible == 0
+press Return
+wait until $coopmenu == 2 timeout 60
+# P1 Right -> EBRU; P2 joins (Space) on EBRU, D -> INZAR, D -> DEMIR, A -> INZAR.
+press Right
+assert $pick1 == 1
+press Space
+assert $pick2 == 1
+press D
+press D
+press A
+assert $pick2 == 2
+frames 40
+capture select_ebru_inzar
+# READY: P2 Space, Backspace unreadies (A does not change a ready pick), then P2 Space and P1 Return.
+press Space
+press Backspace
+press Space
+press A
+assert $pick2 == 2 && $coopmenu == 2
+press Backspace
+press A
+assert $pick2 == 1
+press D
+press Space
+press Return
+wait until YMP_Normal.visible == 1 timeout 120
+assert $coopmenu == 0 && YM_Cursor == 0 && $coop == 0
+capture new_game_coop_pending
+# Escape out of the New Game menu drops the pending choice; the second pass starts the game.
+press Escape
+wait until AMP_YeniOyun.visible == 1 timeout 120
+press Up
+press Return
+wait until $coopmenu == 2 timeout 60
+# The highlights stay from the first pass; P2 joins again on INZAR.
+assert $pick1 == 1 && $pick2 == -1
+press Space
+assert $pick2 == 2
+press Return
+press Space
+wait until YMP_Normal.visible == 1 timeout 120
+press Return
+frames 300
+press Space
+wait until oyun_ilk_basladi == 1 timeout 600
+assert $coop == 1 && $coop1 == 1 && $coop2 == 2 && $character == 1 && OyunZorluk == 0
+wait until $level == "start4.wmb" && $movie == 1 timeout 7200
+frames 60
+press-until Return $movie == 0 && LY_AktifLevelID == 1 && level_yuklendi_ok == 1 && player != 0 timeout 1200
+wait until LY_AktifLevelID == 1 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 3600
+assert $count(Oyuncu_Ebru) == 1 && $count(Oyuncu_Demir) == 0
+assert $coop == 1 && $coop1 == 1 && $coop2 == 2
