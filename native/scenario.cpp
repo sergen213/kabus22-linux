@@ -192,6 +192,9 @@ struct Scenario::Impl {
   else if(c=="seed"){need(2);auto n=number(w[1],line);if(n<0||n>0xffffffffL)throw std::runtime_error("scenario line "+std::to_string(line)+": seed 0..4294967295");seed=std::uint32_t(n);return;}
   // pad live: the renderer's real game controller/joystick input passes through (live pad tests, tools/virtual-gamepad); whole file.
   // pad N down|up|press BUTTON [FRAMES], pad N axis AXIS V: game controller slot N (0/1), SDL names (a, start, dpup, leftx, righttrigger…).
+  // pad N press-until BUTTON CONDITION [timeout N]: press-until on game controller slot N.
+  else if(c=="pad"&&w.size()>4&&w[2]=="press-until"){s.count=timeout(w,line,600);s.op=Op::PressUntil;s.down=true;s.index=int(number(w[1],line));s.key=SDL_GameControllerGetButtonFromString(w[3].c_str());
+   if(s.index<0||s.index>=Input::Pads||s.key==SDL_CONTROLLER_BUTTON_INVALID)throw std::runtime_error("scenario line "+std::to_string(line)+": pad N press-until BUTTON CONDITION");s.condition=join(w,4,w.size());}
   else if(c=="pad"){need(2);if(w[1]=="live"){livePad=true;return;}
    auto bad=[&]{return std::runtime_error("scenario line "+std::to_string(line)+": pad live | pad N down|up|press BUTTON [FRAMES] | pad N axis AXIS -1..1");};
    need(4);s.index=int(number(w[1],line));if(s.index<0||s.index>=Input::Pads)throw std::runtime_error("scenario line "+std::to_string(line)+": pad 0 or 1");
@@ -250,8 +253,8 @@ bool Scenario::step(Engine& engine,Runtime& runtime,Renderer* renderer,Input& in
     if(phase==0){bool ok=false;if(!check(step,ok)){s.aborted=true;break;}
      if(ok){++s.passed;s.report(step,"PASS",frame,"after "+std::to_string(s.progress)+" frames");s.next();break;}
      if(s.progress>=step.count){++s.failed;s.report(step,"FAIL",frame,"timeout after "+std::to_string(s.progress)+" frames");s.aborted=true;break;}
-     if(press)s.keys.set(std::size_t(step.key));}
-    if(press&&phase==3)s.keys.reset(std::size_t(step.key));
+     if(press&&step.down){s.padUsed[step.index]=true;s.pad[step.index].set(std::size_t(step.key));}else if(press)s.keys.set(std::size_t(step.key));}
+    if(press&&phase==3){if(step.down)s.pad[step.index].reset(std::size_t(step.key));else s.keys.reset(std::size_t(step.key));}
     ++s.progress;s.apply(in);return true;}
    case Op::Assert:{bool ok=false;if(check(step,ok)){if(ok)++s.passed;else ++s.failed;s.report(step,ok?"PASS":"FAIL",frame);}s.next();break;}
    case Op::Store:case Op::Print:try{auto v=eval(step.condition).value();if(step.op==Op::Store)s.stored[step.name]=v;s.report(step,"INFO",frame,show(v));}catch(const std::exception& e){++s.failed;s.report(step,"FAIL",frame,e.what());}s.next();break;

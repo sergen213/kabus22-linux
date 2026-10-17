@@ -1794,8 +1794,10 @@ void input_saves_contracts(){
          close_vector(engine.vector(engine.global_vector("joy_force")),{-1433.0/1024,2,0},1e-6);close_vector(engine.vector(engine.global_vector("joy_raw")),{-128,255,25},1e-6);
          engine.set_global("JOY_SENSE",Value::from_double(0.5));engine.tick(runtime,stick);engine.finish_frame(runtime);
          close_vector(engine.vector(engine.global_vector("joy_force")),{-716.0/1024,1,0},1e-6);engine.set_global("JOY_SENSE",Value::from_int(1));
-         engine.legacyPad=1;engine.tick(runtime,stick);engine.finish_frame(runtime);close_vector(engine.vector(engine.global_vector("joy_force")),{-2,2,0},1e-6); // Pad 1 as the legacy pad.
-         engine.legacyPad=-1;engine.tick(runtime,stick);engine.finish_frame(runtime);close_vector(engine.vector(engine.global_vector("joy_force")),{0,0,0},1e-6);engine.legacyPad=0;}
+         stick.controllerConnected={false,true};engine.tick(runtime,stick);engine.finish_frame(runtime);assert(engine.legacyPad==1);close_vector(engine.vector(engine.global_vector("joy_force")),{-2,2,0},1e-6); // Only pad 1 connected: it is the legacy pad (failover).
+         stick.controllerConnected={true,true};engine.tick(runtime,stick);engine.finish_frame(runtime);assert(engine.legacyPad==0); // Both: the lowest slot.
+         stick.controllerConnected={false,true};engine.coop.active=true;engine.tick(runtime,stick);engine.finish_frame(runtime);assert(engine.legacyPad==-1&&engine.coop_pad(1)==1); // Coop, one pad: it is P2's, P1 has none.
+         close_vector(engine.vector(engine.global_vector("joy_force")),{0,0,0},1e-6);engine.coop={};}
         engine.controller=modern;engine.tick(runtime,frame);engine.finish_frame(runtime);
         assert(engine.number("JOY_1")==0&&engine.number("JOY_7")==1);close_vector(engine.vector(engine.global_vector("joy_force")),{2,0,0},0.01); // Standing turn 0.82 ≥ half: full in-place turn.
         const auto player=engine.create_entity(runtime,"",{0,0,0},0);engine.set_global("player",Value::object(player));engine.set_field(player,"skill1",100);

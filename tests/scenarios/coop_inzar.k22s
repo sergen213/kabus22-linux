@@ -1,0 +1,40 @@
+# requires: saves
+# bodies: demir
+# Coop Demir+Inzar (docs/COOP.md), Tnel9 (kayit14.sav): P2 Inzar is created with her koru_efekt_bas helper in bank 1, swings her
+# sword (LT = Key_SilahKaldir, koruyucu.wdl:3434) and, after choosing spell 4 with the d-pad (buyu_no), casts it with Y (Key_Buyu):
+# her own mana falls by buyu_gereksinimi[4]. P1's original HUD (PEM_Ac) stays: P2's KVM_Ac/PEM_Kapat calls are skipped (her HUD
+# is native, top-right); P1's mana and pose do not change.
+realtime off
+load-save 14
+wait until LY_AktifLevelID == 41 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 && EnvaterAcilabilirmi == 1 && oyun_ilk_basladi == 0 timeout 7200
+press F10
+type coop demir inzar
+press Return
+press F10
+wait until $p2 != 0 timeout 600
+store p2 $p2
+frames 60
+assert $count(oyuncu_koruyucu) == 1 && $count(Oyuncu_Demir) == 1 && $bank1(player) == @p2 && $p2health == 200 && $bank1(koruyucu_mana) == 230
+assert PEM_Acik == 1 && PEMP_Enerji.visible == 1 && KVM_Acik == 0 && KVMP_Enerji.visible == 0
+capture coop_inzar_hud
+store x1 player.x
+store y1 player.y
+store m1 koruyucu_mana
+# Sword.
+pad 1 axis lefttrigger 1
+frames 4
+pad 1 axis lefttrigger 0
+wait until @p2.skill41 > 40 timeout 120
+assert player.x == @x1 && player.y == @y1
+frames 120
+# Spell 4 (aduket): d-pad to buyu_no 4, Y casts.
+pad 1 press-until dpright $bank1(buyu_no) == 4 timeout 120
+store m0 $bank1(koruyucu_mana)
+pad 1 press y
+wait until $bank1(koruyucu_mana) < @m0 timeout 300
+assert $bank1(koruyucu_mana) == @m0 - buyu_gereksinimi[4]
+assert koruyucu_mana == @m1
+assert PEM_Acik == 1 && KVM_Acik == 0 && player.x == @x1 && player.y == @y1
+frames 20
+capture coop_inzar_spell
+frames 150

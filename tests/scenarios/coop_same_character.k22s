@@ -1,0 +1,66 @@
+# requires: saves
+# bodies: demir
+# Coop Demir+Demir (docs/COOP.md): the same character twice, Tnel9 (kayit14.sav: pistol, machine gun, mines). Each Demir has his own
+# bank of the player globals (player, Aktif_Silah, a_Silah, silah_kaldir, Key_*…): P2's aim, fire and weapon choice never reach
+# P1, P1's aim, fire and walk never reach P2; the ammo pool is shared.
+realtime off
+load-save 14
+wait until LY_AktifLevelID == 41 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 && EnvaterAcilabilirmi == 1 && oyun_ilk_basladi == 0 timeout 7200
+press F10
+type coop demir demir
+press Return
+press F10
+wait until $p2 != 0 timeout 600
+store p2 $p2
+frames 30
+assert $count(Oyuncu_Demir) == 2 && player != @p2 && $bank1(player) == @p2 && $bank1(a_silah) != a_silah && $bank1(a_silah) != 0
+# P1 takes the machine gun (3) through the original inventory (as combat_demir_duma_gun).
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+press Return
+wait until EM_Bolge == 2 timeout 300
+press Up
+press-until Right EM_CursorNesne+EM_NesneKafa >= 2 timeout 600
+press-until Left EM_CursorNesne+EM_NesneKafa <= 2 timeout 600
+press Return
+wait until EM_Bolge == 6 timeout 300
+press Return
+wait until Aktif_Silah == 3 && EM_Bolge == 2 timeout 300
+press M
+wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
+# P2 chooses the pistol with the d-pad: his own Aktif_Silah and gun model; P1 keeps the machine gun.
+pad 1 press-until dpright $bank1(Aktif_Silah) == 1 timeout 120
+assert Aktif_Silah == 3
+frames 30
+# P2 aims (LT) and fires (RT): P1 neither aims, fires nor moves.
+store x1 player.x
+store y1 player.y
+store a1 S_Kursun_Sayisi[1]
+store a3 S_Kursun_Sayisi[3]
+pad 1 axis lefttrigger 1
+wait until $bank1(silah_kaldir) == 1 && @p2.skill32 >= 100 timeout 300
+assert silah_kaldir == 0 && player.skill32 < 100
+pad 1 axis righttrigger 1
+wait until S_Kursun_Sayisi[1] < @a1 timeout 120
+pad 1 axis righttrigger 0
+frames 10
+assert silah_kaldir == 0 && player.x == @x1 && player.y == @y1 && Aktif_Silah == 3 && S_Kursun_Sayisi[3] == @a3
+pad 1 axis lefttrigger 0
+wait until $bank1(silah_kaldir) == 0 timeout 300
+frames 60
+# P1 aims (S) and fires (D): P2 neither aims nor fires nor moves.
+store px $p2x
+store py $p2y
+store a1 S_Kursun_Sayisi[1]
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 300
+assert $bank1(silah_kaldir) == 0 && @p2.skill32 < 100
+press-until D S_Kursun_Sayisi[3] < @a3 timeout 300
+up S
+wait until silah_kaldir == 0 timeout 300
+assert S_Kursun_Sayisi[1] == @a1 && $bank1(Aktif_Silah) == 1 && $p2x == @px && $p2y == @py
+# P1 walks: P2 stays.
+press Up 40
+frames 60
+assert player.x != @x1 || player.y != @y1
+assert $p2x == @px && $p2y == @py && $bank1(Aktif_Silah) == 1 && Aktif_Silah == 3

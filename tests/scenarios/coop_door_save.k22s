@@ -1,0 +1,50 @@
+# requires: saves
+# bodies: demir
+# Coop across a door and a save (docs/COOP.md): Demir+Ebru from Tnel9 (kayit14.sav) through the door to Tnel10 (P2 recreated
+# beside P1), a quicksave (its kayitN.sav.meta records coop=demir,ebru), coop off, then the quickload restores coop: banks, P1's
+# lock and P2 beside P1. A non-coop load ends coop.
+realtime off
+load-save 14
+wait until LY_AktifLevelID == 41 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 && EnvaterAcilabilirmi == 1 && oyun_ilk_basladi == 0 timeout 7200
+press F10
+type coop demir ebru
+press Return
+press F10
+wait until $p2 != 0 timeout 600
+store p2a $p2
+route 30 1600 700 1486 450 1486 250 1486 110 timeout 2400
+walk-to 1486 72 10 timeout 600
+turn-to 1486 0 6
+press-until D LY_AktifLevelID == 43 timeout 600
+wait until $level == "tnel10.wmb" && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
+wait until $p2 != 0 && $p2 != @p2a timeout 600
+store p2b $p2
+assert $dist(@p2b) < 120 && $bank1(player) == @p2b && $coop == 1
+wait until LY_HedefLevel == 0 timeout 1200
+# Quicksave, coop off (P2 removed, globals shared again), quickload.
+press F10
+type save
+press Return
+type coop off
+press Return
+press F10
+wait until Aktif_SaveNo > 0 timeout 60
+wait until $coop == 0 && $p2 == 0 timeout 60
+assert $count(Oyuncu_Ebru) == 0
+press F10
+type load
+press Return
+press F10
+wait until $coop == 1 && $coop1 == 0 && $coop2 == 1 && $character == 0 timeout 600
+wait until LY_AktifLevelID == 43 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 3600
+wait until $p2 != 0 timeout 900
+store p2c $p2
+assert $p2 != @p2b && $dist(@p2c) < 120 && $bank1(player) == @p2c && $count(Oyuncu_Ebru) == 1 && $count(Oyuncu_Demir) == 1
+# The original slot 14 has no coop: loading it ends coop.
+press F10
+type load 14
+press Return
+press F10
+wait until LY_AktifLevelID == 41 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 3600
+frames 60
+assert $coop == 0 && $p2 == 0 && $count(Oyuncu_Ebru) == 0

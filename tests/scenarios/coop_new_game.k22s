@@ -1,0 +1,75 @@
+# Coop new game (docs/COOP.md): 2 PLAYER → P1 Demir (keyboard), P2 Ebru (pad 1, the only pad: P2's) → NORMAL → Start4. Both bodies
+# exist (two player entities, each claiming its own bank's `player`); P2 walks on pad 1 while P1 stands, P1 walks on the keyboard
+# while P2 stands; P2 chooses the pistol with the d-pad and fires it (aim LT, fire RT: shared ammo pool); the camera stays on P1.
+realtime off
+wait until ParlaklikMenuAcik == 1 || AMP_YeniOyun.visible == 1 timeout 3600
+press-until Return ParlaklikMenuAcik == 0
+wait until AMP_YeniOyun.visible == 1 && AM_Cursor == 0 timeout 600
+frames 30
+press Up
+press Return
+wait until $coopmenu == 2 timeout 60
+# P1 stays on DEMIR and readies; P2 joins on pad 1 (A) on EBRU and readies.
+pad 1 press a
+assert $pick1 == 0 && $pick2 == 1
+pad 1 press a
+press Return
+wait until YMP_Normal.visible == 1 timeout 120
+press Return
+frames 300
+press Space
+wait until oyun_ilk_basladi == 1 timeout 600
+assert $coop == 1 && $coop1 == 0 && $coop2 == 1 && $character == 0
+wait until $level == "start4.wmb" && $movie == 1 timeout 7200
+frames 60
+press-until Return $movie == 0 && LY_AktifLevelID == 1 && level_yuklendi_ok == 1 && player != 0 timeout 1200
+wait until LY_AktifLevelID == 1 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 3600
+wait until $p2 != 0 timeout 600
+store p2 $p2
+store p1 player
+assert $count(Oyuncu_Demir) == 1 && $count(Oyuncu_Ebru) == 1 && @p1 != @p2 && $bank1(player) == @p2 && $dist(@p2) > 15 && $dist(@p2) < 120
+frames 30
+capture coop_start4_both
+# P2 walks forward on pad 1; P1 and the camera stay.
+store x1 player.x
+store y1 player.y
+store cx camera.x
+store cy camera.y
+store x2 $p2x
+store y2 $p2y
+pad 1 axis lefty -1
+frames 45
+pad 1 axis lefty 0
+# Ebru finishes her step after the stick is released.
+frames 40
+assert player.x == @x1 && player.y == @y1 && camera.x == @cx && camera.y == @cy
+assert $p2x != @x2 || $p2y != @y2
+# P1 walks forward on the keyboard; P2 stays.
+store x2 $p2x
+store y2 $p2y
+press Up 30
+frames 40
+assert player.x != @x1 || player.y != @y1
+assert $p2x == @x2 && $p2y == @y2
+# P2's weapon: the d-pad cycles the inventory's firearms Ebru can hold; the pistol (1), then aim and fire.
+pad 1 press dpright
+wait until $bank1(Aktif_Silah) == 1 timeout 30
+assert Aktif_Silah == 1
+frames 60
+store a0 S_Kursun_Sayisi[1]
+store x1 player.x
+store y1 player.y
+pad 1 axis lefttrigger 1
+wait until $bank1(silah_kaldir) == 1 timeout 300
+assert silah_kaldir == 0
+frames 30
+pad 1 axis righttrigger 1
+frames 4
+pad 1 axis righttrigger 0
+wait until S_Kursun_Sayisi[1] < @a0 timeout 120
+# P1 neither aimed, fired nor moved.
+assert silah_kaldir == 0
+assert player.x == @x1 && player.y == @y1
+capture coop_p2_fires
+pad 1 axis lefttrigger 0
+frames 30

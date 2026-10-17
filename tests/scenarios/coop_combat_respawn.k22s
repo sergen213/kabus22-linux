@@ -1,0 +1,72 @@
+# requires: saves
+# bodies: demir
+# Coop (docs/COOP.md) in the duma fight of combat_demir_duma_gun (Tnel9 → Tnel10, kayit14.sav): the console starts coop Demir+Ebru
+# mid-game; P2 joins beside P1, is leashed back when left behind, is recreated beside P1 in the next level, is hurt by the duma
+# when nearest (enemies resolve to the nearest player's bank), respawns beside P1 ~5 s after dying with full health and no game
+# over; P1 respawns beside P2 the same way; both down is the original game over back to the menu, and coop ends.
+realtime off
+load-save 14
+wait until LY_AktifLevelID == 41 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 && EnvaterAcilabilirmi == 1 && oyun_ilk_basladi == 0 timeout 7200
+press F10
+type coop demir ebru
+press Return
+press F10
+wait until $p2 != 0 timeout 600
+store p2a $p2
+assert $coop == 1 && $coop1 == 0 && $coop2 == 1 && $character == 0 && $p2health == 100 && $count(Oyuncu_Ebru) == 1 && $count(Oyuncu_Demir) == 1
+assert $dist(@p2a) > 15 && $dist(@p2a) < 120 && $bank1(player) == @p2a && player != @p2a
+# P1 walks off; P2 (no input) is left behind and returns beside P1 (leash: 350 units for 2 s).
+route 30 1600 700 1486 450 1486 250 1486 110 timeout 2400
+wait until $dist(@p2a) < 350 timeout 300
+walk-to 1486 72 10 timeout 600
+turn-to 1486 0 6
+press-until D LY_AktifLevelID == 43 timeout 600
+wait until $level == "tnel10.wmb" && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
+# The next level: P2 is a new body beside P1.
+wait until $p2 != 0 && $p2 != @p2a timeout 600
+store p2 $p2
+assert $dist(@p2) < 120 && $bank1(player) == @p2
+find n duma_yaratik
+press F10
+type god
+press Return
+press F10
+walk-to @n 300 path timeout 2400
+# P1 backs off: the duma (nearest player: P2) hurts P2.
+press Down 60
+store h0 $p2health
+wait until $p2health < @h0 timeout 1200
+assert player.skill1 == 100
+capture coop_p2_hurt
+# P2 dies (console kill 2): its own death loop (bank 1 game_over_start), no game over; ~5 s later a new P2 beside P1, full health.
+press F10
+type kill 2
+press Return
+press F10
+wait until $bank1(game_over_start) == 1 timeout 120
+frames 200
+assert $p2 == @p2 && game_over_start == 0 && LY_AktifLevelID == 43
+wait until $p2 != @p2 timeout 400
+store p2b $p2
+assert $p2health == 100 && $bank1(game_over_start) == 0 && game_over_start == 0 && $coop == 1 && $dist(@p2b) < 120
+# P1 dies (god off): P2 lives on; P1 respawns beside P2 and the cameras follow the new P1.
+store p1 player
+press F10
+type kill
+press Return
+press F10
+wait until game_over_start == 1 timeout 120
+frames 200
+assert player == @p1 && LY_AktifLevelID == 43 && $p2 == @p2b
+wait until player != @p1 && player != 0 timeout 400
+assert player.skill1 == 100 && game_over_start == 0 && $coop == 1 && $p2 == @p2b && $dist(@p2b) < 120 && level_yuklendi_ok == 1
+# Both down: the original game over (K22.wdl game_over_strtr) returns to the main menu and coop ends.
+press F10
+type kill 2
+press Return
+type kill
+press Return
+press F10
+wait until LY_AktifLevelID == 0 timeout 3000
+wait until $coop == 0 && $p2 == 0 timeout 1200
+wait until AMP_YeniOyun.visible == 1 timeout 1200

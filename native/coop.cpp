@@ -67,8 +67,11 @@ int Engine::coop_resolve(Runtime& runtime,FunctionId f,ObjectId my,int inherited
 }
 void Engine::coop_banks(Runtime& runtime,bool on){
  if(on==coopBanks_)return;
- coopBanks_=on;coopKinds_.clear();coopP2_=0;coopOver_=coopHidden_=false;coopDown_={};coopLeash_=0;coopSettle_=0;rumbleEntity.fill(0);
- if(!on){runtime.enable_banks({},{});return;}
+ coopBanks_=on;coopKinds_.clear();coopOver_=coopHidden_=false;coopDown_={};coopLeash_=0;coopSettle_=0;rumbleEntity.fill(0);
+ if(on)coopP2_=0;
+ if(!on){ // coop ends: P2's body, gun and radio go (in the next level they are gone already), the globals are shared again
+  if(const auto p2=coop_body(1)){for(auto name:{"a_Silah","a_Telsiz"})if(auto v=runtime.bank_value(1,name);v.kind==Value::Kind::Object&&v.bits&&v.bits!=runtime.bank_value(0,name).bits&&v.bits!=p2)remove_entity(runtime,v.bits);remove_entity(runtime,p2);}
+  coopP2_=0;runtime.enable_banks({},{});return;}
  auto names=runtime.assigned_globals(playerFiles);for(auto n:extra)names.emplace_back(n);
  std::erase_if(names,[](const std::string& n){return listed(shared,n);});
  std::sort(names.begin(),names.end(),CaseLess{});names.erase(std::unique(names.begin(),names.end(),[](auto& a,auto& b){return case_equal(a,b);}),names.end());
@@ -90,21 +93,22 @@ Value Engine::coop_read(Runtime& runtime,std::string_view call){
   const int pad=coop_pad(1);return Value::from_int(pad>=0&&(input.controllerButtons[pad][SDL_CONTROLLER_BUTTON_A]||input.controllerPressed[pad][SDL_CONTROLLER_BUTTON_A]));
  }
  const auto own=global("game_over_start");if(!coop.active||!coopBanks_)return own;
- // Game over when both players are down (a missing or dead body counts), or for a scripted death while P1 still lives
- // (dinamik_modeller.wdl:1040 plane crash). One player down respawns beside the other (coop_play).
- auto out=[&](int b){const auto body=coop_body(b);return runtime.bank_value(b,"game_over_start").real()!=0||!body||field(body,"skill1")<=0;};
- const auto p1=coop_body(0);const bool scripted=own.real()!=0&&p1&&field(p1,"skill1")>0;
- if((out(0)&&out(1))||scripted){coopOver_=true;return Value::from_int(1);}
+ // Game over when both players are down, when one is down and the other has no living body to respawn beside, or for a
+ // scripted death while P1 still lives (dinamik_modeller.wdl:1040 plane crash). Otherwise the one down respawns (coop_play).
+ // A body missing between levels is not "down": only a death loop's own game_over_start is.
+ auto live=[&](int b){const auto body=coop_body(b);return body&&field(body,"skill1")>0;};
+ const bool d0=own.real()!=0,d1=runtime.bank_value(1,"game_over_start").real()!=0;
+ if((d0&&d1)||(d0&&(live(0)||!live(1)))||(d1&&!live(0))){coopOver_=true;return Value::from_int(1);}
  return Value{};
 }
 // A free spot beside ANCHOR: its own hull swept from it (USE_BOX|IGNORE_PASSABLE, the scenario planner's query), on a floor at most
-// 32 units off its own; right, left, behind, then wider. ponytail: eight fixed candidates, the anchor's own spot when all fail.
+// 32 units off its own; right, left, behind, closer (tunnels), then wider. ponytail: fixed candidates, the anchor's spot when all fail.
 Vec3 Engine::coop_spot(ObjectId anchor){
  const Vec3 a=position(anchor);const ProcessContext ctx{0,anchor,0};
  auto floor=[&](Vec3 p)->std::optional<float>{auto h=collide({p.x,p.y,p.z+48},{p.x,p.y,p.z-400},{},4,anchor,&ctx);if(!h.hit||h.fraction<=0)return std::nullopt;return h.position.z;};
  const auto under=floor(a);if(!under)return a;const float lift=a.z-*under;
  const double pan=field(anchor,"pan")*M_PI/180;const float fx=float(std::cos(pan)),fy=float(std::sin(pan));
- static constexpr std::array<std::array<float,2>,8> tries{{{40,0},{-40,0},{0,-45},{60,-30},{-60,-30},{0,-75},{0,45},{90,0}}}; // right, forward
+ static constexpr std::array<std::array<float,2>,14> tries{{{40,0},{-40,0},{0,-45},{28,0},{-28,0},{0,-30},{20,-20},{-20,-20},{0,30},{60,-30},{-60,-30},{0,-75},{0,45},{90,0}}}; // right, forward
  for(auto [r,f]:tries){
   const Vec3 c{a.x+fy*r+fx*f,a.y-fx*r+fy*f,a.z};
   if(collide({a.x,a.y,a.z+16},{c.x,c.y,c.z+16},{},4|8192,anchor,&ctx).hit)continue;
@@ -131,12 +135,15 @@ ObjectId Engine::coop_spawn(Runtime& runtime,int bank,ObjectId anchor,bool helpe
  if(bank==1){coopP2_=id;coopHidden_=false;coopLast_=at;}
  return id;
 }
-// P2 weapon choice (no inventory menu for P2): d-pad right/left cycles the shared inventory's firearms the P2 body can hold, the
-// way EM_KuBiGoSMenu equips one (KuBiGoMenu.wdl:44-47: Aktif_Silah, Demir's gun model morphed to Silah_isimleri[Aktif_Silah]).
+// P2 weapon choice (no inventory or spell menu for P2): d-pad right/left cycles the shared inventory's firearms the P2 body can
+// hold, the way EM_KuBiGoSMenu equips one (KuBiGoMenu.wdl:44-47: Aktif_Silah, Demir's gun model morphed to Silah_isimleri[Aktif_Silah]);
+// Inzar's spells 1-6 as KoruyucuMenu.wdl KOM_Kernel sets buyu_no (every spell is selectable there).
 void Engine::coop_weapon(Runtime& runtime){
- const int pad=coop_pad(1),c=coop.characters[1];if(pad<0||c==2||!coop_body(1))return;
+ const int pad=coop_pad(1),c=coop.characters[1];if(pad<0||!coop_body(1))return;
  const bool next=input.controllerPressed[pad][SDL_CONTROLLER_BUTTON_DPAD_RIGHT],prev=input.controllerPressed[pad][SDL_CONTROLLER_BUTTON_DPAD_LEFT];
- if(next==prev||runtime.bank_value(1,"silah_kaldir").real()!=0)return; // not while aiming
+ if(next==prev)return;
+ if(c==2){const int b=std::clamp(int(runtime.bank_value(1,"buyu_no").real()),1,6);runtime.set_bank_value(1,"buyu_no",Value::from_int((b-1+(next?1:5))%6+1));return;}
+ if(runtime.bank_value(1,"silah_kaldir").real()!=0)return; // not while aiming
  auto list=global("Silahlar");auto* o=list.kind==Value::Kind::Object?state.get(list.bits):nullptr;if(!o)return;
  std::vector<int> owned;const auto count=std::min<std::size_t>(o->array.size(),std::size_t(std::max(0.0,number("SilahSayisi"))));
  for(std::size_t i=0;i<count;++i){const int w=int(o->array[i].value.real());if(w>=1&&(c==0?w<=7:(w<=5||w==8))&&std::find(owned.begin(),owned.end(),w)==owned.end())owned.push_back(w);} // character.cpp character_weapons
@@ -150,8 +157,9 @@ void Engine::coop_weapon(Runtime& runtime){
 // Engine::tick, after the input and UI, before the scripts run.
 void Engine::coop_play(Runtime& runtime){
  coopRuntime_=&runtime;
- coop_banks(runtime,coop.active);
- if(!coop.active)return;
+ const bool campaign=runtime.function(actions[0])&&state.globals.contains("Key_Ileri"); // the original player scripts
+ coop_banks(runtime,coop.active&&campaign);
+ if(!coop.active||!campaign)return;
  auto down=[&](int b){return runtime.bank_value(b,"game_over_start").real()!=0;};
  if(coopOver_){ // both down: the original game over runs (K22.wdl game_over_strtr); coop ends with it, back in the main menu
   if(!down(0)&&number("LY_AktifLevelID")==0){coop={};coop_banks(runtime,false);}
@@ -186,7 +194,7 @@ void Engine::coop_play(Runtime& runtime){
   return;
  }
  // P2 joins after every level entry once P1 is placed: the original LevelYukle has run its Giris placement (LV_*_Giris).
- const bool placed=live(p1)&&!down(0)&&number("LY_AktifLevelID")!=0&&number("player_morph_ok")!=0&&!pendingLevelLoad&&!runtime.running(runtime.function("LevelYukle"));
+ const bool placed=live(p1)&&!down(0)&&number("LY_AktifLevelID")!=0&&number("player_morph_ok")!=0&&!pendingLevelLoad&&!positionRestore&&!runtime.running(runtime.function("LevelYukle"));
  if(!p2){coopSettle_=placed?coopSettle_+1:0;if(coopSettle_>=10){coopSettle_=0;coop_spawn(runtime,1,p1,true);}return;}
  coopSettle_=0;
  // Cutscenes hide P1 (player.invisible): P2 hides with it and lets the scene's actors through.
