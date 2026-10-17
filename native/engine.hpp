@@ -144,6 +144,11 @@ public:
  void set_character_lock(int character);
  int character_prompt()const{return switchPrompt_;}
  int story_character()const;int body_character()const;int menu_character();int weapon_character()const;
+ // Local two-player coop (docs/COOP.md); not in the original. Set when New Game starts from the 2 PLAYER select (native/coop_menu.cpp):
+ // characters 0 Demir, 1 Ebru, 2 Inzar for P1/P2; P1's is also the character lock. A 1-player New Game or a slot load clears it.
+ struct Coop {bool active=false;std::array<int,2> characters{-1,-1};} coop;
+ int coop_menu()const{return coopScreen_!=CoopScreen::Off?2:coopItem_?1:0;} // 0 off, 1 the 2 PLAYER item is highlighted, 2 select screen
+ int coop_pick(int player)const{return coopJoined_[player]?coopPick_[player]:-1;} // select screen highlight, -1 not joined
 private:
  enum class DoorPhase {Idle,Opening,Crossing,Holding,Revealing};
  struct DoorGroup {int target=0;std::vector<Vec3> triggers;Vec3 centroid{};std::optional<DoorLink> link;bool linked=false;};
@@ -162,10 +167,14 @@ private:
  void apply_character_lock(Runtime&,std::vector<std::pair<ObjectId,FunctionId>>& placedActions);
  bool character_tick(Runtime&,const Input&); // true: a switch prompt is open and the scripts stay paused this frame
  void character_weapons(Runtime&,bool spawning);int ebruWeapon_=0;bool ebruSpawn_=false;
- void character_overlay();float draw_menu_word(std::string_view,float x,float y,float scale,float alpha,bool measure);
+ void character_overlay();float draw_menu_word(std::string_view,float x,float y,float scale,float alpha,bool measure,bool lit=false); // lit: the selected-item style
+ void coop_tick(Runtime&,const Input&);void coop_models(Runtime&);void coop_overlay(); // native/coop_menu.cpp
+ enum class CoopScreen {Off,Select,Leaving,Starting};CoopScreen coopScreen_=CoopScreen::Off;bool coopItem_=false,coopPending_=false;float coopTime_=0;
+ std::array<int,2> coopPick_{0,1};std::array<bool,2> coopJoined_{},coopReady_{};std::array<ObjectId,2> coopModels_{};Rect coopItemRect_{};std::array<Rect,3> coopRects_{};
+ std::bitset<SDL_NUM_SCANCODES> coopKeys_;std::bitset<SDL_CONTROLLER_BUTTON_MAX> coopPad_;
  int storyAtLevel_=-1,switchPrompt_=-1,promptCursor_=0,newGameChoice_=0,menuLatch_=-1;bool adoptStory_=false,promptRelease_=false,promptArmed_=false,newGameMenu_=false,menuInventory_=false;
  static constexpr double bossDamageScale=20;ObjectId bossId_=0;double bossHealth_=0; // character_tick: Inzar against the final boss
- std::shared_ptr<const Image> menuAtlas_;std::array<Rect,256> menuGlyphs_{};std::array<Rect,2> menuArrows_{},promptRows_{};std::string promptTitle_,language_;
+ std::shared_ptr<const Image> menuAtlas_,menuAtlasLit_;std::array<Rect,256> menuGlyphs_{};std::array<Rect,2> menuArrows_{},promptRows_{};std::string promptTitle_,language_;
  std::string consoleLine_,consolePrompt_,toast_,fpsText_;std::deque<std::string> consoleLog_;std::vector<std::string> consoleHistory_;std::size_t historyCursor_=0;
  double toastUntil_=0,fpsTime_=0;int fpsFrames_=0;Input consoleInput_;
  bool display_admitted();void prepare_display();float display_aspect(float authored)const;

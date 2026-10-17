@@ -26,7 +26,7 @@ constexpr std::array<std::string_view,1> ebruFiles{"oyuncu2_ebru.wdl"};
 constexpr std::array<std::string_view,2> posingFunctions{"oy_Oynat","Hareket_Hizi"};
 // Glyph cells of the original language-independent menu atlas (TusYonetim.wdl TYI_Tus*): 170x32 cells, one key label each.
 struct Cell {char c;int x,y;};
-constexpr std::array<Cell,28> cells{{{'Q',0,320},{'W',0,352},{'E',0,384},{'R',0,416},{'T',0,448},{'Y',0,480},{'U',0,512},{'I',0,544},{'O',0,576},{'P',0,608},
+constexpr std::array<Cell,30> cells{{{'1',0,0},{'2',0,32},{'Q',0,320},{'W',0,352},{'E',0,384},{'R',0,416},{'T',0,448},{'Y',0,480},{'U',0,512},{'I',0,544},{'O',0,576},{'P',0,608},
  {'A',0,704},{'S',0,736},{'D',0,768},{'F',0,800},{'G',0,832},{'H',0,864},{'J',0,896},{'K',0,928},{'L',0,960},
  {'Z',170,0},{'X',170,32},{'C',170,64},{'V',170,96},{'B',170,128},{'N',170,160},{'M',170,192},{'<',170,704},{'>',170,736}}};
 }
@@ -127,14 +127,15 @@ void Engine::character_weapons(Runtime& runtime,bool spawning){
 // to follow the story; the scripts are paused until the answer. Loads and New Game adopt the story character silently.
 bool Engine::character_tick(Runtime& runtime,const Input& in){
  if(auto start=runtime.function("YeniOyunBaslat");runtime.running(start)){
-  if(newGameMenu_){set_character_lock(newGameChoice_-1);newGameMenu_=false;}
+  // The 2 PLAYER select (coop_menu.cpp) left its choice pending for this New Game; any other New Game is one player.
+  if(newGameMenu_){if(coopPending_){coop={true,coopPick_};set_character_lock(coopPick_[0]);}else{coop={};set_character_lock(newGameChoice_-1);}newGameMenu_=false;coopPending_=false;}
   adoptStory_=true;
  }
  // A slot load (Yukleme_Kontrol, YukleMenu.wdl:324-340) first resets the story (Yeni_Oyun_Kolay: Aktif_Player 0), then reads the slot:
  // neither is a story switch. Without this an in-game load of a locked non-Demir game opened the prompt and paused the load forever.
  if(number("Yukleme_Yapilsin")!=0)adoptStory_=true;
  const auto menuPanel=global("YMP_Normal");newGameMenu_=menuPanel.kind==Value::Kind::Object&&state.get(menuPanel.bits)&&field(menuPanel.bits,"visible")!=0;
- if(newGameMenu_){
+ if(newGameMenu_&&!coopPending_){
   const bool left=in.pressed[SDL_SCANCODE_LEFT]||in.pressed[SDL_SCANCODE_KP_4]||in.pad_pressed(SDL_CONTROLLER_BUTTON_DPAD_LEFT);
   const bool right=in.pressed[SDL_SCANCODE_RIGHT]||in.pressed[SDL_SCANCODE_KP_6]||in.pad_pressed(SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
   int clicked=0;if(in.mousePressed[SDL_BUTTON_LEFT])for(int i=0;i<2;++i)if(menuArrows_[i].width>0&&in.mouseX>=menuArrows_[i].x&&in.mouseX<menuArrows_[i].x+menuArrows_[i].width&&in.mouseY>=menuArrows_[i].y&&in.mouseY<menuArrows_[i].y+menuArrows_[i].height)clicked=i?1:-1;
@@ -188,15 +189,17 @@ bool Engine::character_tick(Runtime& runtime,const Input& in){
  return true;
 }
 // Glyphs cut from the original menu atlas (menu_dildenbagimsiz.tga, same font and colour as the menu buttons).
-float Engine::draw_menu_word(std::string_view word,float x,float y,float scale,float alpha,bool measure){
+// lit: the selected-item style of the menu buttons (Menu_*_A.tga beside Menu_*_N.tga): same red, the fill raised to grey (G=B≈1.85(R-62)).
+float Engine::draw_menu_word(std::string_view word,float x,float y,float scale,float alpha,bool measure,bool lit){
  if(!menuAtlas_){if(!assets.contains("menu_dildenbagimsiz.tga"))return 0;menuAtlas_=assets.image_ptr("menu_dildenbagimsiz.tga");
   for(const auto& c:cells){int x0=c.x+170,x1=c.x,y0=c.y+32,y1=c.y;for(int py=c.y;py<c.y+32;++py)for(int px=c.x;px<c.x+170;++px)if(menuAtlas_->rgba[(std::size_t(py)*menuAtlas_->width+px)*4+3]>24){x0=std::min(x0,px);x1=std::max(x1,px+1);y0=std::min(y0,py);y1=std::max(y1,py+1);}
-   menuGlyphs_[std::uint8_t(c.c)]={float(x0),float(c.y),float(std::max(0,x1-x0)),32};}}
+   menuGlyphs_[std::uint8_t(c.c)]={float(x0),float(c.y),float(std::max(0,x1-x0)),32};}
+  auto selected=std::make_shared<Image>(*menuAtlas_);for(std::size_t i=0;i+3<selected->rgba.size();i+=4){const int r=selected->rgba[i];selected->rgba[i+1]=selected->rgba[i+2]=std::uint8_t(std::clamp(int((r-62)*1.85f),0,r));}menuAtlasLit_=selected;}
  float pen=x;
  for(char ch:word){
   if(ch==' '){pen+=9*scale;continue;}
   const auto& g=menuGlyphs_[std::uint8_t(ch)];if(g.width<=0)continue;
-  if(!measure){UICommand c;c.image=menuAtlas_.get();c.rect={pen,y,g.width*scale,g.height*scale};c.uv={g.x/menuAtlas_->width,g.y/menuAtlas_->height,g.width/menuAtlas_->width,g.height/menuAtlas_->height};c.color={1,1,1,alpha};c.layer=1e6f;c.filter=true;ui_.push_back(c);}
+  if(!measure){UICommand c;c.image=(lit?menuAtlasLit_:menuAtlas_).get();c.rect={pen,y,g.width*scale,g.height*scale};c.uv={g.x/menuAtlas_->width,g.y/menuAtlas_->height,g.width/menuAtlas_->width,g.height/menuAtlas_->height};c.color={1,1,1,alpha};c.layer=1e6f;c.filter=true;ui_.push_back(c);}
   pen+=(g.width+1)*scale;
  }
  return pen-x;
@@ -204,7 +207,8 @@ float Engine::draw_menu_word(std::string_view word,float x,float y,float scale,f
 void Engine::character_overlay(){
  menuArrows_={};promptRows_={};
  if(!renderer||currentWidth_<=0)return;
- if(newGameMenu_&&switchPrompt_<0){
+ coop_overlay();
+ if(newGameMenu_&&switchPrompt_<0&&!coopPending_){
   // One button height above NORMAL (YeniMenu.wdl YeniMenuAc), at the menu's own scale: "< ORIGINAL >".
   const auto panel=global("YMP_Normal").bits;const float sx=std::max(0.1f,float(field(panel,"scale_x"))),sy=std::max(0.1f,float(field(panel,"scale_y")));
   static constexpr std::array<std::string_view,4> choices{"ORIGINAL","DEMIR","EBRU","INZAR"};

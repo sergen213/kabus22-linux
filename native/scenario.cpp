@@ -53,6 +53,9 @@ struct Eval {
    if(name=="door")return {false,double(engine.door_phase()),{}};if(name=="doorswaps")return {false,double(engine.doorSwaps),{}};if(name=="fadeframes")return {false,double(engine.fadeFrames),{}};
    if(name=="movie")return {false,engine.movie&&engine.media.movie_playing(engine.movie)?1.0:0.0,{}}; // full-screen media_play (no target bitmap)
    if(name=="character")return {false,double(engine.characterLock),{}}; // native character lock: -1 original, 0 Demir, 1 Ebru, 2 Inzar
+   // Coop (docs/COOP.md): $coop active, $coop1/$coop2 its characters, $coopmenu 0 off/1 2 PLAYER highlighted/2 select screen, $pick1/$pick2 the select highlight (-1 not joined).
+   if(name=="coop")return {false,engine.coop.active?1.0:0.0,{}};if(name=="coop1"||name=="coop2")return {false,double(engine.coop.characters[name=="coop2"]),{}};
+   if(name=="coopmenu")return {false,double(engine.coop_menu()),{}};if(name=="pick1"||name=="pick2")return {false,double(engine.coop_pick(name=="pick2")),{}};
    if(name=="prompt")return {false,double(engine.character_prompt()),{}}; // story-switch prompt: the story's character, -1 when closed
    if(name=="health"){static constexpr std::string_view vars[]{"oyn_yaralanma","ebru_yaralanma","koru_yaralanma"};return {false,engine.number(vars[engine.body_character()]),{}};} // the played body's health variable
    if(name=="movieframe")return {false,engine.movie?engine.media.movie_status(engine.movie):0.0,{}}; // media_playing: 1-based decoded frame, 0 when stopped
