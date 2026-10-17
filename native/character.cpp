@@ -132,7 +132,7 @@ void Engine::character_weapons(Runtime& runtime,bool spawning){
 bool Engine::character_tick(Runtime& runtime,const Input& in){
  if(auto start=runtime.function("YeniOyunBaslat");runtime.running(start)){
   // The 2 PLAYER select (coop_menu.cpp) left its choice pending for this New Game; any other New Game is one player.
-  if(newGameMenu_){if(coopPending_){coop={true,coopPick_};set_character_lock(coopPick_[0]);}else{coop={};set_character_lock(newGameChoice_-1);}newGameMenu_=false;coopPending_=false;}
+  if(newGameMenu_){if(coopPending_){coop={true,coopPick_};set_character_lock(coopPick_[0]);}else{coop={};set_character_lock(newGameChoice_-1);}coopRestart_=true;newGameMenu_=false;coopPending_=false;}
   adoptStory_=true;
  }
  // A slot load (Yukleme_Kontrol, YukleMenu.wdl:324-340) first resets the story (Yeni_Oyun_Kolay: Aktif_Player 0), then reads the slot:

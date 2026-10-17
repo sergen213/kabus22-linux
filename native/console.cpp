@@ -63,7 +63,7 @@ std::string Engine::saved_position()const{
 // A slot read is a load: its sidecar restores the quicksave position and the character lock (none: original, the body follows the
 // story); the loaded Aktif_Player is adopted without a switch prompt.
 void Engine::read_saved_position(const std::filesystem::path& slot){
- positionRestore.reset();auto meta=saves::read_meta(slot);coop=meta&&meta->coop[0]>=0?Coop{true,meta->coop}:Coop{}; // coop slots restore both characters (native/coop.cpp)
+ positionRestore.reset();auto meta=saves::read_meta(slot);coop=meta&&meta->coop[0]>=0?Coop{true,meta->coop}:Coop{};coopRestart_=true; // coop slots restore both characters (native/coop.cpp)
  characterLock=meta&&meta->character>=0?meta->character:characterDefault;switchPrompt_=-1;adoptStory_=true;if(!meta||meta->position.empty())return;
  std::istringstream in(meta->position);PositionRestore r;if(in>>r.level>>r.position.x>>r.position.y>>r.position.z>>r.pan&&r.level>0)positionRestore=r;
 }
@@ -216,7 +216,7 @@ std::string Engine::console_command(Runtime& runtime,std::string_view line){
    auto pick=[&](const std::string& s){return int(std::find(choices.begin(),choices.end(),lower(s))-choices.begin());};
    if(w.size()==2&&lower(w[1])=="off"){coop={};return "coop off";}
    if(w.size()==3){const int a=pick(w[1]),b=pick(w[2]);if(a>2||b>2)return "coop [off | P1 P2]: demir, ebru or inzar";if(state.profile!=SemanticProfile::CampaignA6)return "coop applies to the campaign only";
-    coop={true,{a,b}};set_character_lock(a);}
+    coop={true,{a,b}};coopRestart_=true;set_character_lock(a);}
    else if(w.size()!=1)return "coop [off | P1 P2]";
    return coop.active?"coop "+std::string(choices[coop.characters[0]])+' '+std::string(choices[coop.characters[1]]):std::string("coop off");
   }

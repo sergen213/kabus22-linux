@@ -158,6 +158,7 @@ void Engine::coop_weapon(Runtime& runtime){
 void Engine::coop_play(Runtime& runtime){
  coopRuntime_=&runtime;
  const bool campaign=runtime.function(actions[0])&&state.globals.contains("Key_Ileri"); // the original player scripts
+ if(coopRestart_){coopRestart_=false;coop_banks(runtime,false);} // a new coop game or slot: fresh banks, P2 rejoins
  coop_banks(runtime,coop.active&&campaign);
  if(!coop.active||!campaign)return;
  auto down=[&](int b){return runtime.bank_value(b,"game_over_start").real()!=0;};
@@ -217,8 +218,9 @@ void Engine::coop_hud(){
  auto crop=[&](const Object& o,const Image& image)->Rect{auto get=[&](std::string_view n,float d){auto it=o.fields.find(n);return it==o.fields.end()?d:float(it->second.value.real());};
   Rect r{get("source_x",0),get("source_y",0),get("width",float(image.width)),get("height",float(image.height))};if(r.width<=0)r.width=float(image.width);if(r.height<=0)r.height=float(image.height);return r;};
  auto width=[&](Value v){auto* o=bmap(v);if(!o)return 0.f;return crop(*o,image_of(*o)).width;};
+ // A6 004447e0 (engine.cpp update_ui): a 32-bit TGA panel bitmap blends at min(2·ALPHA, 255).
  auto draw=[&](Value v,float x,float y,float s,float alpha,bool overlay){auto* o=bmap(v);if(!o)return;const Image& image=image_of(*o);const Rect r=crop(*o,image);
-  UICommand cmd;cmd.image=&image;cmd.rect={x,y,r.width*s,r.height*s};cmd.uv={r.x/image.width,r.y/image.height,r.width/image.width,r.height/image.height};cmd.color={1,1,1,alpha};cmd.overlay=overlay;cmd.filter=true;cmd.layer=-1;ui_.push_back(cmd);};
+  UICommand cmd;cmd.image=&image;cmd.rect={x,y,r.width*s,r.height*s};cmd.uv={r.x/image.width,r.y/image.height,r.width/image.width,r.height/image.height};cmd.color={1,1,1,image.a6AlphaFormat?std::min(1.f,2*alpha):alpha};cmd.overlay=overlay;cmd.filter=true;cmd.layer=-1;ui_.push_back(cmd);};
  // Scale: P1's HUD panels' (native display scaling included), else the art tier's basis.
  const bool hi=number("GA_Cozunurluk")>1;float s=0;
  for(auto name:{"PEMP_Enerji","KVMP_Enerji"}){auto panel=global(name);if(panel.kind==Value::Kind::Object&&state.get(panel.bits)&&field(panel.bits,"visible")!=0&&field(panel.bits,"scale_x")>0){s=float(field(panel.bits,"scale_x"));break;}}

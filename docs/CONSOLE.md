@@ -64,6 +64,7 @@ Command names are case-insensitive. Output also goes to stderr (`kabus22: consol
 | `help [COMMAND]` | List all commands, or one command's usage. |
 | `save` | Quicksave (as F5). |
 | `character [original\|demir\|ebru\|inzar]` | Print or set the character lock ([Character lock](CHARACTER_LOCK.md)). It applies from the next level entry (a door, `level ID` or a load); `original` lets the body follow the story again. |
+| `coop`, `coop P1 P2`, `coop off` | Print, start or end local two-player coop ([COOP.md](COOP.md)); P1/P2 are `demir`, `ebru` or `inzar`. Starting sets P1's character lock (from the next level entry) and P2 joins beside P1; `off` removes P2. |
 | `load [SLOT]` | Quickload the newest slot, or `kayitSLOT.sav` (0-98; the load menu shows slot N as entry N+1). |
 | `god` | Toggle invulnerability: after every frame the played character's `ENERJI` (`SKILL1`) and health VAR are refilled (Demir `oyn_yaralanma` 100, Ebru `ebru_yaralanma` 100, Inzar `koru_yaralanma` 200, the new-game values). A hit can still play its flinch animation, and one hit of the full health or more in a single frame (an own grenade at point blank) still kills. |
 | `noclip` | Toggle walking through walls and entities: the player gets `PASSABLE`, which the A6 mover treats as "move without collision". Gravity and floor tracing still apply, so it walks, not flies. |
@@ -78,7 +79,7 @@ Command names are case-insensitive. Output also goes to stderr (`kabus22: consol
 | `level ID\|WMB`, `map ID\|WMB` | Go to a level through the original door transition (`LY_HedefLevel`, `LevelYonetim.wdl LY_YuklemeTakip`), as a door from the current level would. The level's own entry rules apply: an entry refused by the scripts shows their message, and a level without an entry point for the current level keeps the WMB's own player placement. |
 | `pos` | Print the player position, `PAN`, level ID and WMB. |
 | `tp X Y Z [PAN]` | Teleport the player. |
-| `kill` | Set the player's `ENERJI` to 0: the original death and game over (also turns `god` off). |
+| `kill [2]` | Set the player's `ENERJI` to 0: the original death and game over (also turns `god` off). `kill 2` kills coop player 2 ([COOP.md](COOP.md): in coop a player down respawns beside the partner; game over needs both). |
 | `fps` | Toggle a frame-rate counter (top right). |
 | `timescale [FACTOR]` | Print or set `TIME_FACTOR` (0.1-10, 1 = normal). |
 | `clear` | Clear the console. |

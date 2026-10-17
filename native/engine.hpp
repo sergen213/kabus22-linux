@@ -179,7 +179,7 @@ private:
  // Coop gameplay (native/coop.cpp): banks, P2 body, input, leash, respawn, HUD.
  void coop_play(Runtime&);void coop_hud();void coop_banks(Runtime&,bool on);int coop_resolve(Runtime&,FunctionId,ObjectId my,int inherited);
  ObjectId coop_spawn(Runtime&,int bank,ObjectId anchor,bool helper);Vec3 coop_spot(ObjectId anchor);void coop_weapon(Runtime&);Value coop_read(Runtime&,std::string_view call);
- Runtime* coopRuntime_=nullptr;bool coopBanks_=false,coopOver_=false,coopHidden_=false,coopLevelOk_=false;ObjectId coopP2_=0;int coopSpawn_=-1,coopSettle_=0;
+ Runtime* coopRuntime_=nullptr;bool coopBanks_=false,coopRestart_=false,coopOver_=false,coopHidden_=false,coopLevelOk_=false;ObjectId coopP2_=0;int coopSpawn_=-1,coopSettle_=0;
  std::array<double,2> coopDown_{};double coopLeash_=0;float coopHeart_=0;std::bitset<32> coopHeld_;Vec3 coopLast_{};std::vector<std::int8_t> coopKinds_;
  int storyAtLevel_=-1,switchPrompt_=-1,promptCursor_=0,newGameChoice_=0,menuLatch_=-1;bool adoptStory_=false,promptRelease_=false,promptArmed_=false,newGameMenu_=false,menuInventory_=false;
  static constexpr double bossDamageScale=20;ObjectId bossId_=0;double bossHealth_=0; // character_tick: Inzar against the final boss
