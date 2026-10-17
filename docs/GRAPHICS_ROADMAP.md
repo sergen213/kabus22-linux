@@ -211,6 +211,10 @@ frame-interpolation swapchain is not used. Ported from IKV (`src/fsr_vk.cpp`, `r
   93.5, current 90.0 px), keep its area (no cross-fade) and carry exactly this frame's HUD; on RT a SHADOW caster moving
   over a lamp-lit floor must not leave a cross-faded shadow (82 changed pixels on the shadow rows, 4 blended; upstream
   interpolation: 72). `graphics_policy` checks the option and its admission.
+- **Validation:** Khronos layer with synchronization validation and no duplicate limit, level5 walk (raster and RT) and
+  `k22-render-check`: frame generation on adds no message kind over off, and off equals main (the remaining
+  depth-resolve WAW hazard, FSR autogen-reactive storage format mismatch, `vkDestroyImageView` in-use and raster
+  unconsumed fragment output predate it).
 - **Measured** (private virtual KWin 2560x1440 at 60 Hz, FIFO, RX 7900 XTX RADV, all `ultra`-like effects, `fsr=quality`,
   level5 walk from `kayit0.sav`): RT `presents=600 generated=300 real=300 presentedFps=60.0 renderedFps=30.0`,
   present interval p50 16.68 ms, p99 16.81 ms; rendered frames are bit-identical with frame generation on and off.
