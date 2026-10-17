@@ -17,10 +17,10 @@ ControllerConfig parse_controller_config(std::string_view text,std::ostream& war
 ControllerConfig load_controller_config(std::ostream& warnings);
 // Radial: magnitudes inside the deadzone become 0, the rest rescales to 0-1 keeping direction.
 std::array<float,2> radial_deadzone(float x,float y,float deadzone);
-// Modern mode: remaps [Buttons] into legacy joystick slot 0 (with edges against `held`) and returns joy_force.
-// Original GenelAyarlar.wdl:75-78 halves joy_force into JOY_Ileri/Geri/Sag/Sol, and oyuncu2.wdl moves only on
-// Key_Ileri==1, so forward/back is digital (force 2) while turn is analog 0-2, scaled by sensitivity.
-Vec3 apply_modern_controller(const ControllerConfig&,Input&,std::bitset<32>& held);
+// Modern mode: remaps pad PAD's [Buttons] into legacy joystick slot 0 (with edges against `held`) and returns joy_force;
+// PAD -1 (or out of range) is a pad at rest. Original GenelAyarlar.wdl:75-78 halves joy_force into JOY_Ileri/Geri/Sag/Sol, and
+// oyuncu2.wdl moves only on Key_Ileri==1, so forward/back is digital (force 2) while turn is analog 0-2, scaled by sensitivity.
+Vec3 apply_modern_controller(const ControllerConfig&,Input&,int pad,std::bitset<32>& held);
 // Enhancement (no original force feedback exists): rumble strength when the same player entity's health
 // (oyuncu2.wdl DEFINE Enerji,skill1) drops; a new player entity (level/save load) only re-baselines.
 struct DamageRumble {std::uint32_t player=0;double health=0;float update(std::uint32_t id,double current);};

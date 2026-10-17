@@ -23,7 +23,7 @@
 namespace k22 {
 namespace { using namespace render_policy; }
 struct Renderer::Impl {
-    SDL_Window* window{}; SDL_GameController* controller{};
+    SDL_Window* window{}; std::array<SDL_GameController*,Input::Pads> controllers{};
     std::array<SDL_Joystick*,2> joysticks{};
     bool quit{},sdlInitialized{}; std::uint64_t counter{};
     RenderOptions options; FT_Library freetype{};
@@ -45,7 +45,7 @@ struct Renderer::Impl {
             if(FT_Init_FreeType(&freetype))throw std::runtime_error("FreeType initialization failed");if(!FcInit())throw std::runtime_error("Fontconfig initialization failed");
             counter=SDL_GetPerformanceCounter();
             for(int device=0;device<SDL_NumJoysticks();++device)open_joystick(device);
-            for(int device=0;device<SDL_NumJoysticks()&&!controller;++device)open_controller(device);
+            for(int device=0;device<SDL_NumJoysticks();++device)open_controller(device);
         }catch(...){destroy();throw;}
     }
     void open_joystick(int device){
@@ -54,15 +54,20 @@ struct Renderer::Impl {
         for(auto&joy:joysticks)if(!joy){joy=SDL_JoystickOpen(device);if(!joy)throw std::runtime_error(SDL_GetError());return;}
     }
     void open_controller(int device){
-        if(controller||!SDL_IsGameController(device))return;
-        controller=SDL_GameControllerOpen(device);
-        if(controller)std::cerr<<"kabus22: game controller '"<<SDL_GameControllerName(controller)<<"' opened"<<(SDL_GameControllerHasRumble(controller)?" (rumble)":"")<<'\n';
+        if(!SDL_IsGameController(device))return;
+        SDL_JoystickID id=SDL_JoystickGetDeviceInstanceID(device);
+        for(auto*pad:controllers)if(pad&&SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad))==id)return;
+        for(int slot=0;slot<Input::Pads;++slot)if(!controllers[slot]){
+            auto*&pad=controllers[slot];pad=SDL_GameControllerOpen(device);
+            if(pad)std::cerr<<"kabus22: game controller '"<<SDL_GameControllerName(pad)<<"' opened in slot "<<slot<<(SDL_GameControllerHasRumble(pad)?" (rumble)":"")<<'\n';
+            return;
+        }
     }
     void destroy(){
         vk.reset();gl.reset();
         for(auto&joy:joysticks)if(joy){SDL_JoystickClose(joy);joy=nullptr;}
         if(freetype){FT_Done_FreeType(freetype);freetype=nullptr;}
-        if(controller){SDL_GameControllerClose(controller);controller=nullptr;}
+        for(auto&pad:controllers)if(pad){SDL_GameControllerClose(pad);pad=nullptr;}
         if(window){SDL_DestroyWindow(window);window=nullptr;}
         if(sdlInitialized){SDL_QuitSubSystem(SDL_INIT_VIDEO|SDL_INIT_GAMECONTROLLER|SDL_INIT_EVENTS);sdlInitialized=false;}
     }
@@ -77,7 +82,7 @@ void Renderer::set_mode(int w,int h,WindowMode mode){if(w<1||h<1)throw std::runt
 void Renderer::set_title(std::string_view title){std::string s(title);SDL_SetWindowTitle(impl_->window,s.c_str());}
 void Renderer::set_position(int x,int y){SDL_SetWindowPosition(impl_->window,x,y);}
 void Renderer::set_mouse_mode(bool visible,bool relative){SDL_ShowCursor(visible?SDL_ENABLE:SDL_DISABLE);if(SDL_SetRelativeMouseMode(relative?SDL_TRUE:SDL_FALSE))throw std::runtime_error(SDL_GetError());}
-void Renderer::rumble(float strength,std::uint32_t milliseconds){if(impl_->controller){auto level=Uint16(std::clamp(strength,0.f,1.f)*65535);SDL_GameControllerRumble(impl_->controller,level,level,milliseconds);}}
+void Renderer::rumble(int pad,float strength,std::uint32_t milliseconds){if(pad>=0&&pad<Input::Pads&&impl_->controllers[pad]){auto level=Uint16(std::clamp(strength,0.f,1.f)*65535);SDL_GameControllerRumble(impl_->controllers[pad],level,level,milliseconds);}}
 void Renderer::request_quit(){impl_->quit=true;}
 int Renderer::shader_version()const{return impl_->gl?impl_->gl->shader_version():impl_->vk->shader_version();}
 PresentationState Renderer::presentation_state()const{return impl_->gl?impl_->gl->presentation_state():impl_->vk->presentation_state();}
@@ -135,7 +140,8 @@ std::optional<PortalSurface>Renderer::portal_surface(const RenderFrame&frame,con
 void Renderer::poll(Input&in){
     auto&i=*impl_;
     in.pressed.reset();in.released.reset();in.mousePressed.reset();in.mouseReleased.reset();
-    in.controllerPressed.reset();in.controllerReleased.reset();
+    for(auto&buttons:in.controllerPressed)buttons.reset();
+    for(auto&buttons:in.controllerReleased)buttons.reset();
     for(auto&buttons:in.joystickPressed)buttons.reset();
     for(auto&buttons:in.joystickReleased)buttons.reset();
     in.mouseDX=in.mouseDY=in.wheelX=in.wheelY=0;in.text.clear();
@@ -147,7 +153,7 @@ void Renderer::poll(Input&in){
     };
     SDL_Event event;
     bool devicesChanged=false;
-    auto controller_event=[&](SDL_JoystickID id){return i.controller&&SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(i.controller))==id;};
+    auto controller_slot=[&](SDL_JoystickID id)->int{for(int slot=0;slot<Input::Pads;++slot)if(i.controllers[slot]&&SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(i.controllers[slot]))==id)return slot;return -1;};
     while(SDL_PollEvent(&event)){
         switch(event.type){
         case SDL_QUIT:i.quit=true;break;
@@ -185,19 +191,21 @@ void Renderer::poll(Input&in){
         case SDL_CONTROLLERDEVICEADDED:
             i.open_controller(event.cdevice.which);break;
         case SDL_CONTROLLERDEVICEREMOVED:
-            if(i.controller&&SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(i.controller))==event.cdevice.which){std::cerr<<"kabus22: game controller removed\n";SDL_GameControllerClose(i.controller);i.controller=nullptr;in.controllerReleased|=in.controllerButtons;in.controllerButtons.reset();in.controllerAxes.fill(0);}
+            if(int p=controller_slot(event.cdevice.which);p>=0){std::cerr<<"kabus22: game controller removed from slot "<<p<<'\n';SDL_GameControllerClose(i.controllers[p]);i.controllers[p]=nullptr;in.controllerReleased[p]|=in.controllerButtons[p];in.controllerButtons[p].reset();in.controllerAxes[p].fill(0);}
             break;
         case SDL_CONTROLLERBUTTONDOWN:case SDL_CONTROLLERBUTTONUP:
-            if(controller_event(event.cbutton.which)&&event.cbutton.button<SDL_CONTROLLER_BUTTON_MAX){bool down=event.type==SDL_CONTROLLERBUTTONDOWN;in.controllerButtons.set(event.cbutton.button,down);(down?in.controllerPressed:in.controllerReleased).set(event.cbutton.button);}break;
+            if(int p=controller_slot(event.cbutton.which);p>=0&&event.cbutton.button<SDL_CONTROLLER_BUTTON_MAX){bool down=event.type==SDL_CONTROLLERBUTTONDOWN;in.controllerButtons[p].set(event.cbutton.button,down);(down?in.controllerPressed[p]:in.controllerReleased[p]).set(event.cbutton.button);}break;
         case SDL_CONTROLLERAXISMOTION:
-            if(controller_event(event.caxis.which)&&event.caxis.axis<SDL_CONTROLLER_AXIS_MAX)in.controllerAxes[event.caxis.axis]=event.caxis.value/(event.caxis.value<0?32768.0f:32767.0f);break;
+            if(int p=controller_slot(event.caxis.which);p>=0&&event.caxis.axis<SDL_CONTROLLER_AXIS_MAX)in.controllerAxes[p][event.caxis.axis]=event.caxis.value/(event.caxis.value<0?32768.0f:32767.0f);break;
         default:break;
         }
     }
     if(devicesChanged)for(int device=0;device<SDL_NumJoysticks();++device){i.open_joystick(device);i.open_controller(device);}
-    if(i.controller){
-        for(int axis=0;axis<SDL_CONTROLLER_AXIS_MAX;++axis){int value=SDL_GameControllerGetAxis(i.controller,static_cast<SDL_GameControllerAxis>(axis));in.controllerAxes[axis]=value/(value<0?32768.0f:32767.0f);}
-        for(int button=0;button<SDL_CONTROLLER_BUTTON_MAX;++button){bool down=SDL_GameControllerGetButton(i.controller,static_cast<SDL_GameControllerButton>(button));if(down!=in.controllerButtons[button]){(down?in.controllerPressed:in.controllerReleased).set(button);in.controllerButtons.set(button,down);}}
+    for(int p=0;p<Input::Pads;++p){
+        auto*pad=i.controllers[p];in.controllerConnected[p]=pad!=nullptr;
+        if(!pad)continue;
+        for(int axis=0;axis<SDL_CONTROLLER_AXIS_MAX;++axis){int value=SDL_GameControllerGetAxis(pad,static_cast<SDL_GameControllerAxis>(axis));in.controllerAxes[p][axis]=value/(value<0?32768.0f:32767.0f);}
+        for(int button=0;button<SDL_CONTROLLER_BUTTON_MAX;++button){bool down=SDL_GameControllerGetButton(pad,static_cast<SDL_GameControllerButton>(button));if(down!=in.controllerButtons[p][button]){(down?in.controllerPressed[p]:in.controllerReleased[p]).set(button);in.controllerButtons[p].set(button,down);}}
     }
     for(int index=0;index<2;++index){
         auto*joy=i.joysticks[index];in.joystickConnected[index]=joy!=nullptr;

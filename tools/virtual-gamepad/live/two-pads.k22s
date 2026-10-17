@@ -1,0 +1,55 @@
+# requires: saves, two live pads (tools/virtual-gamepad/run-live.sh ... two-pads modern.ini)
+# Two game controllers (two-pads.vpad, "# pads: 2"): pad 0 exists at start (slot 0), pad 1 hotplugs (slot 1). Pad 0 still drives
+# Demir at Cami (Engine::legacyPad 0); pad 1's input reaches Input slot 1 only and never moves the player. Unplugging pad 0
+# keeps pad 1 in slot 1; the replugged pad 0 returns to slot 0 and walks again.
+pad live
+load-save 1
+wait until LY_AktifLevelID == 7 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 && oyun_ilk_basladi == 0 && EnvaterAcilabilirmi == 1 timeout 7200
+frames 60
+assert $pad(0) == 1 && $pad(1) == 0
+store pad1_plug $pad(1)
+wait until $pad(1) == 1 timeout 600
+frames 30
+# pad 1: full forward + X held, seen in slot 1 only; the player stays put
+store pad1_forward player.x
+store y0 player.y
+wait until $pad(1,lefty) < -0.9 && $pad(1,x) == 1 timeout 300
+frames 120
+assert $pad(0,lefty) == 0 && $pad(0,x) == 0
+assert player.x == @pad1_forward && player.y == @y0
+store pad1_release player.x
+wait until $pad(1,lefty) == 0 && $pad(1,x) == 0 timeout 300
+frames 30
+# pad 0: full forward walks; slot 1 stays at rest
+store pad0_forward player.x
+store y1 player.y
+wait until $pad(0,lefty) < -0.9 timeout 300
+assert $pad(1,lefty) == 0
+wait until player.x != @pad0_forward || player.y != @y1 timeout 120
+frames 30
+print player.x - @pad0_forward
+print player.y - @y1
+capture two-pads-walked
+store pad0_stop player.x
+wait until $pad(0,lefty) == 0 timeout 300
+frames 60
+# unplug pad 0: pad 1 keeps slot 1
+store pad0_unplug $pad(0)
+wait until $pad(0) == 0 timeout 600
+frames 30
+assert $pad(1) == 1
+store pad1_a $pad(1,a)
+wait until $pad(1,a) == 1 timeout 300
+assert $pad(0,a) == 0
+store pad1_a_up $pad(1,a)
+wait until $pad(1,a) == 0 timeout 300
+# replug pad 0: the lowest free slot is 0 again, and it walks
+store pad0_plug $pad(0)
+wait until $pad(0) == 1 timeout 600
+assert $pad(1) == 1
+frames 30
+store pad0_replug_forward player.x
+store y2 player.y
+wait until player.x != @pad0_replug_forward || player.y != @y2 timeout 180
+store pad_done player.x
+frames 30

@@ -58,11 +58,12 @@ std::array<float,2> radial_deadzone(float x,float y,float deadzone){
  float magnitude=std::hypot(x,y);if(!(magnitude>deadzone))return {0,0};
  float scale=std::min(1.f,(magnitude-deadzone)/(1-deadzone))/magnitude;return {x*scale,y*scale};
 }
-Vec3 apply_modern_controller(const ControllerConfig& c,Input& in,std::bitset<32>& held){
- const auto& a=in.controllerAxes;std::bitset<32> now;
+Vec3 apply_modern_controller(const ControllerConfig& c,Input& in,int pad,std::bitset<32>& held){
+ const bool valid=pad>=0&&pad<Input::Pads;static const std::array<float,SDL_CONTROLLER_AXIS_MAX> rest{};static const std::bitset<SDL_CONTROLLER_BUTTON_MAX> none;
+ const auto& a=valid?in.controllerAxes[pad]:rest;const auto& buttons=valid?in.controllerButtons[pad]:none;const auto& pressed=valid?in.controllerPressed[pad]:none;std::bitset<32> now;
  for(int s=0;s<ControllerConfig::Sources;++s){
   if(!c.buttons[s])continue;
-  bool down=s<SDL_CONTROLLER_BUTTON_MAX?in.controllerButtons[s]||in.controllerPressed[s]:a[s==ControllerConfig::LeftTrigger?SDL_CONTROLLER_AXIS_TRIGGERLEFT:SDL_CONTROLLER_AXIS_TRIGGERRIGHT]>=0.5f;
+  bool down=s<SDL_CONTROLLER_BUTTON_MAX?buttons[s]||pressed[s]:a[s==ControllerConfig::LeftTrigger?SDL_CONTROLLER_AXIS_TRIGGERLEFT:SDL_CONTROLLER_AXIS_TRIGGERRIGHT]>=0.5f;
   if(down)now.set(c.buttons[s]-1);
  }
  // ponytail: the mapped pad owns legacy slot 0; a second raw device stays in slot 1 only.

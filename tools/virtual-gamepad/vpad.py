@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Virtual Xbox 360 pad (uinput) for live Kabus 22 controller tests. Needs python-evdev and write access to /dev/uinput.
 
-  vpad.py [--sync LOG] [--ff-log FILE] [--probe] [SCRIPT]
+  vpad.py [--pads N] [--sync LOG] [--ff-log FILE] [--probe] [SCRIPT]
 
 The device copies the xpad driver's Xbox 360 identity (USB 045e:028e, BTN_A..BTN_THUMBR, ABS_X/Y/RX/RY +-32767,
 ABS_Z/RZ 0-255 triggers, ABS_HAT0X/Y d-pad) plus EV_FF/FF_RUMBLE. Every force-feedback upload/erase/play the game
@@ -15,6 +15,9 @@ SCRIPT lines (blank and # ignored), run in order:
   axis AXIS VALUE [MS]   raw evdev value; AXIS: LX LY RX RY (-32768..32767, up is negative), LT RT (0..255),
                          HATX HATY (-1..1); with MS the axis returns to rest after MS
   unplug | plug          destroy / recreate the device (hotplug)
+  pad K COMMAND...       any command above for pad K (0-based); a bare command drives pad 0
+--pads N: N virtual pads (default 1). Pad 0 is created at start; pads 1.. stay unplugged until their `pad K plug`, so the
+game always enumerates pad 0 first and each later pad hotplugs into the next game controller slot.
 --probe: after creating the device, list SDL2 joysticks with SDL_IsGameController and send one 200 ms rumble.
 """
 import argparse, ctypes, ctypes.util, os, select, signal, sys, threading, time
@@ -31,13 +34,15 @@ CAPS = {e.EV_KEY: list(BUTTONS.values()),
 
 
 class Pad:
-    def __init__(self, ff_log):
-        self.lock, self.ui, self.ff_log, self.t0, self.stop = threading.Lock(), None, ff_log, time.monotonic(), False
-        self.plug()
+    def __init__(self, ff_log, index=0, t0=None):
+        self.lock, self.ui, self.ff_log, self.stop = threading.Lock(), None, ff_log, False
+        self.t0, self.tag = t0 or time.monotonic(), f"pad{index} " if index else ""
+        if not index:
+            self.plug()
         threading.Thread(target=self.serve_ff, daemon=True).start()
 
     def log(self, text):
-        line = f"t={time.monotonic() - self.t0:.3f} {text}"
+        line = f"t={time.monotonic() - self.t0:.3f} {self.tag}{text}"
         print("vpad:", line, flush=True)
         if self.ff_log and text.startswith("ff"):
             with open(self.ff_log, "a") as f:
@@ -121,14 +126,19 @@ def probe(pad):
     return found
 
 
-def run(pad, path, sync):
+def run(pads, path, sync):
     offset = 0
     for no, raw in enumerate(open(path), 1):
         w = raw.split("#", 1)[0].split()
         if not w:
             continue
+        pads[0].log(f"script {no}: {' '.join(w)}")
+        pad = pads[0]
+        if w[0] == "pad":
+            if len(w) < 3 or not w[1].isdigit() or int(w[1]) >= len(pads):
+                raise RuntimeError(f"line {no}: pad K COMMAND with K < --pads {len(pads)}")
+            pad, w = pads[int(w[1])], w[2:]
         c = w[0]
-        pad.log(f"script {no}: {' '.join(w)}")
         if c == "wait":
             text, deadline = " ".join(w[1:]), time.monotonic() + 600
             while True:
@@ -170,6 +180,7 @@ def run(pad, path, sync):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("script", nargs="?")
+    ap.add_argument("--pads", type=int, default=1, choices=range(1, 5))
     ap.add_argument("--sync", help="log file that `wait` lines watch (the game's stdout)")
     ap.add_argument("--ff-log", help="append force-feedback events here")
     ap.add_argument("--probe", action="store_true")
@@ -179,18 +190,20 @@ def main():
         raise SystemExit(128 + sig)
     for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(s, bye)
-    pad = Pad(a.ff_log)
+    t0 = time.monotonic()
+    pads = [Pad(a.ff_log, i, t0) for i in range(a.pads)]
     try:
         time.sleep(0.5)  # let udev publish the node
-        if a.probe and not probe(pad):
+        if a.probe and not probe(pads[0]):
             raise SystemExit("probe: no Xbox 360 game controller found")
         if a.script:
-            run(pad, a.script, a.sync)
+            run(pads, a.script, a.sync)
         elif not a.probe:
             signal.pause()
     finally:
-        pad.stop = True
-        pad.unplug()
+        for pad in pads:
+            pad.stop = True
+            pad.unplug()
 
 
 if __name__ == "__main__":

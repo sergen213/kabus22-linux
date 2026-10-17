@@ -122,7 +122,7 @@ const Input& Engine::console(Runtime& runtime,const Input& in){
  auto guarded=[&](auto&& action){try{notify(action());}catch(const std::exception& e){notify(std::string("Error: ")+e.what());}};
  // The game sees no keyboard/mouse/pad input while the console is open (time keeps running), and after it closes none until every
  // key is up, so the closing key never reaches the scripts (a held Escape would open the in-game Smartmenu).
- auto neutral=[&]()->const Input&{consoleInput_=Input{};consoleInput_.dt=in.dt;consoleInput_.quit=in.quit;consoleInput_.mouseX=in.mouseX;consoleInput_.mouseY=in.mouseY;consoleInput_.joystickConnected=in.joystickConnected;return consoleInput_;};
+ auto neutral=[&]()->const Input&{consoleInput_=Input{};consoleInput_.dt=in.dt;consoleInput_.quit=in.quit;consoleInput_.mouseX=in.mouseX;consoleInput_.mouseY=in.mouseY;consoleInput_.joystickConnected=in.joystickConnected;consoleInput_.controllerConnected=in.controllerConnected;return consoleInput_;};
  const bool toggle=in.pressed[SDL_SCANCODE_GRAVE]||in.pressed[SDL_SCANCODE_F10];
  if(toggle){consoleOpen_=!consoleOpen_;consoleLine_.clear();historyCursor_=consoleHistory_.size();consoleRelease_=!consoleOpen_;}
  if(!consoleOpen_){

@@ -111,7 +111,12 @@ public:
  bool iniInitialized=false,pluginNative=false,pluginGamma=false;
  int windowStyle=0;std::vector<std::uint8_t> discordInput;bool discordReady=false;std::uint64_t discordRetryAt=0;
  std::string discordDetails,discordState;bool discordActivitySent=false;
- ControllerConfig controller;float rumble=0; // rumble: strength requested this tick (0 none).
+ ControllerConfig controller;std::array<float,Input::Pads> rumble{}; // rumble[p]: strength requested for pad p this tick (0 none).
+ // legacyPad: the game controller slot behind the original joystick globals (joy_force/joy_rot, modern mapping into JOY_* slot 0) and
+ // key_state's pad aliases (d-pad = arrows, modern A/B = Enter/Esc); -1 none. Native menus/prompts/skip accept any pad (Input::pad_pressed).
+ int legacyPad=0;
+ // rumbleEntity[p]: entity whose skill1 drops rumble pad p; 0 = the global player for legacyPad, nothing for the other pads.
+ std::array<ObjectId,Input::Pads> rumbleEntity{};
  // Optional community-patch 1.8.5 first-person camera (cam.wdl fps_camera_control), engine-side for original scripts.
  enum class CameraMode {Original,FirstPerson};CameraMode cameraMode=CameraMode::Original;
  bool first_person_active()const{return firstPersonActive_;}
@@ -244,7 +249,7 @@ private:
  std::unordered_map<ObjectId,const FontAtlas*> systemFonts_;
  std::array<Slot*,128> keyboard_{},keyboardCallbacks_{};
  std::array<std::array<Slot*,12>,2> joystick_{},joystickCallbacks_{};
- std::bitset<32> controllerHeld_;Vec3 modernForce_{};DamageRumble damageRumble_;std::string saveScript_;bool saveScriptKnown_=false;
+ std::bitset<32> controllerHeld_;Vec3 modernForce_{};std::array<DamageRumble,Input::Pads> damageRumble_;std::string saveScript_;bool saveScriptKnown_=false;
  std::array<Slot*,3> mouse_{},mouseCallbacks_{};
  std::optional<std::size_t> pressedButton_,hoveredButton_;std::size_t focusedButton_=0;
  Vec2 mouseHit_{};

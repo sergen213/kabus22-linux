@@ -983,7 +983,9 @@ static bool core_key_bits(const std::bitset<SDL_NUM_SCANCODES>& bits,int code){a
 // The d-pad doubles as the arrow keys in both controller modes. A/B → Enter/Esc only in modern mode: in original mode they
 // are raw JOY_1/JOY_2, the shipped aim/fire (GA_JTuslar), and Enter while aiming reloads instead (oyuncu2.wdl:2529).
 static int core_gamepad_key(int code,bool modern){switch(code){case 28:return modern?SDL_CONTROLLER_BUTTON_A:-1;case 1:return modern?SDL_CONTROLLER_BUTTON_B:-1;case 72:return SDL_CONTROLLER_BUTTON_DPAD_UP;case 80:return SDL_CONTROLLER_BUTTON_DPAD_DOWN;case 75:return SDL_CONTROLLER_BUTTON_DPAD_LEFT;case 77:return SDL_CONTROLLER_BUTTON_DPAD_RIGHT;default:return -1;}}
-Value Engine::key_state(int code)const{if(code<0||code>=127)return {};bool down=core_key_bits(input.keys,code)||core_key_bits(input.pressed,code);auto pad=core_gamepad_key(code,controller.modern);if(pad>=0)down=down||input.controllerButtons[pad]||input.controllerPressed[pad];
+// The legacy pad (Engine::legacyPad) alone stands in for keys: pad 2's d-pad must not walk player 1. held: down now, else pressed this frame.
+static bool legacy_pad(const Input& in,int pad,int button,bool held){return pad>=0&&pad<Input::Pads&&button>=0&&(in.controllerPressed[pad][button]||(held&&in.controllerButtons[pad][button]));}
+Value Engine::key_state(int code)const{if(code<0||code>=127)return {};bool down=core_key_bits(input.keys,code)||core_key_bits(input.pressed,code)||legacy_pad(input,legacyPad,core_gamepad_key(code,controller.modern),true);
  // Patch 1.8.5 YukleMenu.wdl: the load list also takes JOY_Button[GA_JTuslar[1]]/[2] as Enter/Esc and JOY_Ileri/Geri as
  // Up/Down. Offered only in modern controller mode; original mode keeps the ISO keyboard-only list.
  if(!down&&controller.modern&&(code==28||code==1||code==72||code==80)&&field(global("YUMT_Liste").bits,"visible")!=0){
@@ -1000,7 +1002,7 @@ void Engine::update_input(Runtime& runtime){auto edge=[&](Value fn,int code){if(
   if(global("mouse_mode").raw()>=3072)set_vector(global_vector("mouse_pos"),{input.mouseX,input.mouseY,0});
  }
  for(int code=0;code<127;++code)if(keyboard_[code])keyboard_[code]->value=key_state(code);
- set_global("key_any",Value::from_int(input.keys.any()||input.pressed.any()));for(int code=0;code<127;++code){auto pad=core_gamepad_key(code,controller.modern);if(core_key_bits(input.pressed,code)||(pad>=0&&input.controllerPressed[pad])){if(keyboardCallbacks_[code])edge(keyboardCallbacks_[code]->value,code);anykey(code);}}
+ set_global("key_any",Value::from_int(input.keys.any()||input.pressed.any()));for(int code=0;code<127;++code){if(core_key_bits(input.pressed,code)||legacy_pad(input,legacyPad,core_gamepad_key(code,controller.modern),false)){if(keyboardCallbacks_[code])edge(keyboardCallbacks_[code]->value,code);anykey(code);}}
  constexpr int mouseButtons[]={SDL_BUTTON_LEFT,SDL_BUTTON_RIGHT,SDL_BUTTON_MIDDLE};for(std::size_t i=0;i<3;++i){auto b=mouseButtons[i];mouse_[i]->value=Value::from_int(input.mouseButtons[b]||input.mousePressed[b]);if(input.mousePressed[b]){edge(mouseCallbacks_[i]->value,280+int(i));anykey(280+int(i));}}
  if(state.profile==SemanticProfile::CampaignA6)set_vector(global_vector("mouse_pos"),{input.mouseX,input.mouseY,0});
  // A6 K22.exe 00422000 (A7 acknex.dll 10027844 identical, constants 10.0/50.0): mickeys scaled by MOUSE_SENSE*10/max(raw
@@ -1024,12 +1026,15 @@ void Engine::update_input(Runtime& runtime){auto edge=[&](Value fn,int code){if(
  const auto a6Force=[&](float a,bool negate){const int r=int(a6Axis(a)),dz=r>32?r-32:r<-32?r+32:0;const std::int64_t sense=global("JOY_SENSE").raw();
   const double v=double(float(dz))*double(float(float(sense)*0.02f));return float(std::clamp<std::int64_t>(std::int64_t(negate?-v:v),-2*sense,2*sense))/1024;};
  set_global("num_joysticks",Value::from_int(int(input.joystickConnected[0])+int(input.joystickConnected[1])));set_vector(global_vector("joy_raw"),{a6Axis(input.joystickAxes[0][0]),a6Axis(input.joystickAxes[0][1]),a6Axis(input.joystickAxes[0][2])});set_vector(global_vector("joy2_raw"),{a6Axis(input.joystickAxes[1][0]),a6Axis(input.joystickAxes[1][1]),a6Axis(input.joystickAxes[1][2])});
- set_vector(global_vector("joy_force"),controller.modern?modernForce_:Vec3{a6Force(input.controllerAxes[SDL_CONTROLLER_AXIS_LEFTX],false),a6Force(input.controllerAxes[SDL_CONTROLLER_AXIS_LEFTY],true),0});set_vector(global_vector("joy_rot"),{a6Axis(input.controllerAxes[SDL_CONTROLLER_AXIS_RIGHTX]),a6Axis(input.controllerAxes[SDL_CONTROLLER_AXIS_RIGHTY]),a6Axis(input.controllerAxes[SDL_CONTROLLER_AXIS_TRIGGERRIGHT])});
+ static const std::array<float,SDL_CONTROLLER_AXIS_MAX> rest{};const auto& axes=legacyPad>=0&&legacyPad<Input::Pads?input.controllerAxes[legacyPad]:rest;
+ set_vector(global_vector("joy_force"),controller.modern?modernForce_:Vec3{a6Force(axes[SDL_CONTROLLER_AXIS_LEFTX],false),a6Force(axes[SDL_CONTROLLER_AXIS_LEFTY],true),0});set_vector(global_vector("joy_rot"),{a6Axis(axes[SDL_CONTROLLER_AXIS_RIGHTX]),a6Axis(axes[SDL_CONTROLLER_AXIS_RIGHTY]),a6Axis(axes[SDL_CONTROLLER_AXIS_TRIGGERRIGHT])});
  if(input.quit){auto close=global("on_close");if(close.kind==Value::Kind::Function)edge(close,0);else quit=true;}if(renderer&&state.profile==SemanticProfile::CampaignA6)renderer->set_mouse_mode(number("mouse_mode")!=0,number("mouse_mode")==0&&(number("enable_mouse")!=0||firstPersonActive_));}
 void Engine::tick(Runtime& runtime,const Input& in){ensure_font_palette(runtime.compiler_settings().entry);input=in;if(!std::isfinite(in.dt))throw std::runtime_error("nonfinite native frame duration");auto seconds=std::clamp(in.dt,0.0,1.0);time_+=std::max(0.0,in.dt);auto frameRaw=std::max<std::int32_t>(1,Value::from_double(seconds*16).raw());set_global("time_frame",Value::from_raw(frameRaw));set_global("total_ticks",Value::from_raw(std::bit_cast<std::int32_t>(global("total_ticks").bits+std::uint32_t(frameRaw))));set_global("total_secs",Value::from_double(time_));set_global("total_frames",Value::from_int(global("total_frames").integer()+1));set_global("fps",Value::from_double(seconds?1/seconds:0));
  // A6 00414650 (004146e0-004147fb): every main-loop pass copies localtime into SYS_*; DOW is Monday=1..Sunday=7, DOY 1-based.
  {const auto now=std::time(nullptr);std::tm t{};localtime_r(&now,&t);for(auto [name,value]:{std::pair{"sys_seconds",t.tm_sec},{"sys_minutes",t.tm_min},{"sys_hours",t.tm_hour},{"sys_day",t.tm_mday},{"sys_month",t.tm_mon+1},{"sys_year",t.tm_year+1900},{"sys_dow",(t.tm_wday+6)%7+1},{"sys_doy",t.tm_yday+1}})set_global(name,Value::from_int(value));}
- rumble=0;if(controller.modern){modernForce_=apply_modern_controller(controller,input,controllerHeld_);if(controller.vibration){auto p=global("player");ObjectId id=p.kind==Value::Kind::Object&&entities.contains(p.bits)&&state.get(p.bits)&&state.get(p.bits)->alive?p.bits:0;rumble=damageRumble_.update(id,id?field(id,"skill1"):0);if(rumble>0&&renderer)renderer->rumble(rumble,250);}}
+ rumble.fill(0);if(controller.modern){modernForce_=apply_modern_controller(controller,input,legacyPad,controllerHeld_);if(controller.vibration)for(int pad=0;pad<Input::Pads;++pad){
+  ObjectId id=rumbleEntity[pad];if(!id&&pad==legacyPad){auto p=global("player");if(p.kind==Value::Kind::Object)id=p.bits;}if(!(id&&entities.contains(id)&&state.get(id)&&state.get(id)->alive))id=0;
+  rumble[pad]=damageRumble_[pad].update(id,id?field(id,"skill1"):0);if(rumble[pad]>0&&renderer)renderer->rumble(pad,rumble[pad],250);}}
  auto timeRaw=number("fps_lock")!=0?Value::from_double(16/std::max(1.0,number("fps_max"))).raw():frameRaw;auto minfps=std::max(1.0,number("fps_min"));timeRaw=std::clamp(timeRaw,51,std::max(51,Value::from_double(16/minfps).raw()));auto mul=[](std::int32_t a,std::int32_t b){auto n=std::int64_t(a)*b+512;auto q=n>=0?n/1024:-((-n+1023)/1024);return std::bit_cast<std::int32_t>(std::uint32_t(q));};timeRaw=mul(timeRaw,global("time_factor").raw());auto prior=global("time").raw();auto diff=std::bit_cast<std::int32_t>(std::uint32_t(prior)-std::uint32_t(timeRaw));timeRaw=std::bit_cast<std::int32_t>(std::uint32_t(timeRaw)+std::uint32_t(mul(diff,global("time_smooth").raw())));set_global("time",Value::from_raw(timeRaw));set_global("time_fac",Value::from_raw(0x100000/std::max(51,timeRaw)));
  if(renderer){auto m=renderer->metrics();currentWidth_=m.width;currentHeight_=m.height;set_vector(global_vector("screen_size"),{float(m.width),float(m.height),0});}
  if(nativeDisplay_&&(displayWidth_!=currentWidth_||displayHeight_!=currentHeight_))prepare_display();
@@ -1064,10 +1069,10 @@ void Engine::finish_frame(Runtime& runtime){if(state.profile==SemanticProfile::B
 // media_loop main-menu background, Kabusdismenu.wdl kn_arg.k22). Afterwards the
 // game sees no input until everything is released, so the press never reaches the menu or the game.
 const Input& Engine::skip_intro(Runtime& runtime,const Input& in){
- auto neutral=[&]{skipInput=Input{};skipInput.dt=in.dt;skipInput.quit=in.quit;skipInput.mouseX=in.mouseX;skipInput.mouseY=in.mouseY;skipInput.joystickConnected=in.joystickConnected;return std::cref(skipInput);};
- if(skipHold){if(in.keys.any()||in.mouseButtons.any()||in.controllerButtons.any()||in.joystickButtons[0].any()||in.joystickButtons[1].any())return neutral();skipHold=false;}
+ auto neutral=[&]{skipInput=Input{};skipInput.dt=in.dt;skipInput.quit=in.quit;skipInput.mouseX=in.mouseX;skipInput.mouseY=in.mouseY;skipInput.joystickConnected=in.joystickConnected;skipInput.controllerConnected=in.controllerConnected;return std::cref(skipInput);};
+ if(skipHold){if(in.keys.any()||in.mouseButtons.any()||in.pad_any()||in.joystickButtons[0].any()||in.joystickButtons[1].any())return neutral();skipHold=false;}
  const bool press=in.pressed[SDL_SCANCODE_ESCAPE]||in.pressed[SDL_SCANCODE_RETURN]||in.pressed[SDL_SCANCODE_KP_ENTER]||in.pressed[SDL_SCANCODE_SPACE]||in.mousePressed[SDL_BUTTON_LEFT]
-  ||in.controllerPressed[SDL_CONTROLLER_BUTTON_A]||in.controllerPressed[SDL_CONTROLLER_BUTTON_B]||in.controllerPressed[SDL_CONTROLLER_BUTTON_START];
+  ||in.pad_pressed(SDL_CONTROLLER_BUTTON_A)||in.pad_pressed(SDL_CONTROLLER_BUTTON_B)||in.pad_pressed(SDL_CONTROLLER_BUTTON_START);
  if(!press||state.profile==SemanticProfile::BonusA7)return in;
  if(auto logos=runtime.function("Menu_AcilisEkrani");runtime.running(logos)){
   neutral();skipInput.dt=1.0/60;
@@ -3071,7 +3076,7 @@ void Engine::update_ui(Runtime& runtime){
  if(input.mousePressed[SDL_BUTTON_LEFT]&&hover){pressedButton_=hover;focusedButton_=*hover;Button b=buttons_[*hover];dispatch(b,b.callback,"event_click");}
  if(input.mouseReleased[SDL_BUTTON_LEFT]){if(pressedButton_&&*pressedButton_<buttons_.size()&&hover==pressedButton_){Button b=buttons_[*pressedButton_];dispatch(b,b.leaveCallback,"event_buttonup");}pressedButton_.reset();}
  if(buttons_.empty()){pressedButton_.reset();hoveredButton_.reset();focusedButton_=0;return;}
- if(!bonusMouse){bool next=input.pressed[SDL_SCANCODE_TAB]||input.pressed[SDL_SCANCODE_DOWN]||input.controllerPressed[SDL_CONTROLLER_BUTTON_DPAD_DOWN],previous=input.pressed[SDL_SCANCODE_UP]||input.controllerPressed[SDL_CONTROLLER_BUTTON_DPAD_UP];focusedButton_%=buttons_.size();if(next)focusedButton_=(focusedButton_+1)%buttons_.size();if(previous)focusedButton_=(focusedButton_+buttons_.size()-1)%buttons_.size();if(input.pressed[SDL_SCANCODE_RETURN]||input.pressed[SDL_SCANCODE_SPACE]||input.controllerPressed[SDL_CONTROLLER_BUTTON_A]){Button b=buttons_[focusedButton_];dispatch(b,b.callback,"event_click");}}
+ if(!bonusMouse){bool next=input.pressed[SDL_SCANCODE_TAB]||input.pressed[SDL_SCANCODE_DOWN]||input.pad_pressed(SDL_CONTROLLER_BUTTON_DPAD_DOWN),previous=input.pressed[SDL_SCANCODE_UP]||input.pad_pressed(SDL_CONTROLLER_BUTTON_DPAD_UP);focusedButton_%=buttons_.size();if(next)focusedButton_=(focusedButton_+1)%buttons_.size();if(previous)focusedButton_=(focusedButton_+buttons_.size()-1)%buttons_.size();if(input.pressed[SDL_SCANCODE_RETURN]||input.pressed[SDL_SCANCODE_SPACE]||input.pad_pressed(SDL_CONTROLLER_BUTTON_A)){Button b=buttons_[focusedButton_];dispatch(b,b.callback,"event_click");}}
  if(dispatched)make_frame();
 }
 } // namespace k22
