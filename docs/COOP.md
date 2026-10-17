@@ -104,6 +104,7 @@ Every slot written in coop records `coop=P1,P2` (for example `coop=demir,ebru`) 
 - Enemies pick the nearest player at each resume; an enemy can switch targets mid-attack, and a hit landing on the farther player is ignored by the original `you==player` check.
 - The ammo pool, inventory, story flags and picked items are shared; only P1 opens the inventory, map and spell menus. P2's grenades do not shake the camera (the camera reads bank 0).
 - Scripted scenes, doors and pickups act on P1 even when P2 triggers them.
+- Seamless doors ([SEAMLESS_DOORS.md](SEAMLESS_DOORS.md)) open when either player walks up to them and cross when either walks in; they close once both are more than 140 units away.
 - P2's health and weapon are not saved.
 
 ### Menu limitations
