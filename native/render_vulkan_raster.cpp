@@ -513,7 +513,7 @@ struct Raster {
             if(s.generating){fx.interpolated=s.image(s.extent.width,s.extent.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);readable(fx.interpolated);}
             fx.opaque=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);fx.reactive=s.image(w,h,VK_FORMAT_R8_UNORM,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);readable(fx.reactive);}
         if(f.fxaa&&f.sharpen)fx.sharp=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);
-        if(f.taa)for(auto&i:fx.taa){i=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);readable(i);}
+        if(f.taa&&!f.fsr)for(auto&i:fx.taa){i=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);readable(i);} // FSR replaces TAA (composite).
         if(f.bloom)for(unsigned i=0;i<fx.bloom.size();++i)fx.bloom[i]=s.image(std::max(1u,w>>(i+1)),std::max(1u,h>>(i+1)),VK_FORMAT_R16G16B16A16_SFLOAT,color);
         if(motionVectors()){fx.motion=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);fx.motionDepth=s.image(w,h,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);readable(fx.motion);}
         if(rt){
@@ -749,7 +749,7 @@ struct Raster {
         const std::array<Image*,6>compositeInputs{source,f.bloom?&fx.bloom[0]:&white};const std::array<VkSampler,6>compositeSampling{nearest,linear};
         const bool chain=f.taa||f.fxaa||f.sharpen||f.fsr;Image*current=&fx.ldr;
         if(chain)pass(fx.ldr,8,compositeInputs,compositeSampling);else{begin(s.scene);set_region(full());u.pass={8,0,0,0};bind({EffectProgram},u,compositeInputs,compositeSampling);vkCmdDraw(s.command,3,1,0,0);}
-        if(f.taa){
+        if(f.taa&&!f.fsr){ // FSR replaces TAA: its output was never read.
             auto&next=fx.taa[fx.taaIndex];auto&history=fx.taa[fx.taaIndex^1u];u.inverseViewProjection=fx.inverseVP;u.previousViewProjection=fx.previousVP;u.cameraPosition=vec(fx.eye,fx.farPlane);u.camera=vec(fx.forward,fx.nearPlane);u.range[3]=fx.taaValid&&fx.linearValid?1.f:0.f;
             pass(next,9,{&fx.ldr,&history,fx.linearValid?&fx.linear:&white,fx.motionValid?&fx.motion:&black},{nearest,linear,nearest,nearest});current=&next;fx.taaIndex^=1u;fx.taaValid=fx.linearValid;
         }
