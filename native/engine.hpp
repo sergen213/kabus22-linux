@@ -178,9 +178,9 @@ private:
  std::bitset<SDL_NUM_SCANCODES> coopKeys_;std::array<std::bitset<SDL_CONTROLLER_BUTTON_MAX>,Input::Pads> coopPad_;
  // Coop gameplay (native/coop.cpp): banks, P2 body, input, leash, respawn, HUD.
  void coop_play(Runtime&);void coop_hud();void coop_banks(Runtime&,bool on);int coop_resolve(Runtime&,FunctionId,ObjectId my,int inherited);
- ObjectId coop_spawn(Runtime&,int bank,ObjectId anchor,bool helper);Vec3 coop_spot(ObjectId anchor);void coop_weapon(Runtime&);Value coop_read(Runtime&,std::string_view call);
+ ObjectId coop_spawn(Runtime&,int bank,ObjectId anchor,bool helper);Vec3 coop_spot(ObjectId anchor);void coop_weapon(Runtime&);Value coop_read(Runtime&,std::string_view call);bool coop_shove(ObjectId mover,ObjectId body,Vec3 by);
  Runtime* coopRuntime_=nullptr;bool coopBanks_=false,coopRestart_=false,coopOver_=false,coopHidden_=false,coopLevelOk_=false;ObjectId coopP2_=0;int coopSpawn_=-1,coopSettle_=0;
- std::array<double,2> coopDown_{};double coopLeash_=0;float coopHeart_=0;std::bitset<32> coopHeld_;Vec3 coopLast_{};std::vector<std::int8_t> coopKinds_;
+ std::array<double,2> coopDown_{};double coopLeash_=0;float coopHeart_=0;std::bitset<32> coopHeld_;std::array<ObjectId,2> coopPair_{};std::vector<std::int8_t> coopKinds_;
  int storyAtLevel_=-1,switchPrompt_=-1,promptCursor_=0,newGameChoice_=0,menuLatch_=-1;bool adoptStory_=false,promptRelease_=false,promptArmed_=false,newGameMenu_=false,menuInventory_=false;
  static constexpr double bossDamageScale=20;ObjectId bossId_=0;double bossHealth_=0; // character_tick: Inzar against the final boss
  std::shared_ptr<const Image> menuAtlas_,menuAtlasLit_;std::array<Rect,256> menuGlyphs_{};std::array<Rect,2> menuArrows_{},promptRows_{};std::string promptTitle_,language_;

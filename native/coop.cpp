@@ -25,11 +25,15 @@ constexpr std::array<std::string_view,7> enemyFiles{"bond_bekci.wdl","boss.wdl",
 constexpr std::array<std::string_view,17> extra{"player","Key_Ileri","Key_Geri","Key_Sag","Key_Sol","Key_SilahKaldir","Key_Ates","Key_Kosma","Key_Menu",
  "Key_Harita","Key_Buyu","dmr_yaralan_tip","d_yaralan_source","koyucu_yaralan_tip","game_over_start","Aktif_Silah","player_morph_ok"};
 // Shared by both players although the player files write them: story gates, the inventory and its ammo pool, level state, time,
-// engine scratch and camera globals (docs/COOP.md "Banked globals").
-constexpr std::array<std::string_view,31> shared{"oyuncu_pasif","koruyucu_pasif","Aktif_Player","time_factor","level_yuklendi_ok","LY_AktifLevelID",
+// engine scratch and camera globals, and Inzar's effect-trail scratch arrays (47k elements: swapping them at every bank switch
+// cost ~1 ms a frame; ponytail: two Inzars swinging at once share trail buffers, bank them per entity if that ever matters)
+// (docs/COOP.md "Banked globals").
+constexpr std::array<std::string_view,40> shared{"oyuncu_pasif","koruyucu_pasif","Aktif_Player","time_factor","level_yuklendi_ok","LY_AktifLevelID",
  "LY_HedefLevel","Silahlar","SilahSayisi","Kursun_Sayisi","S_Kursun_Sayisi","Nesneler","NesneSayisi","freeze_mode","move_mode","move_friction",
  "trace_mode","shadow_offset","camera","fog_color","aktif_oldurme_sayisi","EnvaterAcilabilirmi","HaritaAcilabilirmi","SmartAcilabilirmi",
- "ucak_olum_ok","oyun_finish_start","cadde_yara_adet","v_dmryakalan_ok","unic_obje_dizi","boss_ebruhedefpan","result"};
+ "ucak_olum_ok","oyun_finish_start","cadde_yara_adet","v_dmryakalan_ok","unic_obje_dizi","boss_ebruhedefpan","result",
+ "buyuparca_dizi","solsword_alt_dizi","solsword_ust_dizi","sagsword_alt_dizi","sagsword_ust_dizi","effectenerji1_alt_dizi","effectenerji1_ust_dizi",
+ "effectenerji2_alt_dizi","effectenerji2_ust_dizi"};
 // Run only for P1: HUD panels (P2's HUD is native, coop_hud) and the inventory/spell menus (P2 has no menu key).
 constexpr std::array<std::string_view,7> p1Only{"PEM_Ac","PEM_Kapat","KVM_Ac","KVM_Kapat","EnvanterAcKapat","KoruyucuAcKapat","EM_Kernel"};
 enum Kind : std::int8_t {WorldSide,PlayerSide,EnemySide,P1Only};
@@ -132,7 +136,7 @@ ObjectId Engine::coop_spawn(Runtime& runtime,int bank,ObjectId anchor,bool helpe
   id=create_entity(runtime,models[c],at,runtime.function(actions[c]));
  }catch(...){coopSpawn_=-1;throw;}
  coopSpawn_=-1;set_field(id,"pan",field(anchor,"pan"));
- if(bank==1){coopP2_=id;coopHidden_=false;coopLast_=at;}
+ if(bank==1){coopP2_=id;coopHidden_=false;}
  return id;
 }
 // P2 weapon choice (no inventory or spell menu for P2): d-pad right/left cycles the shared inventory's firearms the P2 body can
@@ -159,7 +163,7 @@ void Engine::coop_play(Runtime& runtime){
  coopRuntime_=&runtime;
  const bool campaign=runtime.function(actions[0])&&state.globals.contains("Key_Ileri"); // the original player scripts
  if(coopRestart_){coopRestart_=false;coop_banks(runtime,false);} // a new coop game or slot: fresh banks, P2 rejoins
- coop_banks(runtime,coop.active&&campaign);
+ coop_banks(runtime,coop.active&&campaign);coopPair_={};
  if(!coop.active||!campaign)return;
  auto down=[&](int b){return runtime.bank_value(b,"game_over_start").real()!=0;};
  if(coopOver_){ // both down: the original game over runs (K22.wdl game_over_strtr); coop ends with it, back in the main menu
@@ -205,6 +209,18 @@ void Engine::coop_play(Runtime& runtime){
   const Vec3 a=position(p1),b=position(p2);const bool lost=std::hypot(a.x-b.x,a.y-b.y)>350||b.z<a.z-250||(world&&b.z<world->mesh.min.z);
   coopLeash_=lost?coopLeash_+dt:0;if(coopLeash_>=2){coopLeash_=0;set_position(p2,coop_spot(p1));set_field(p2,"pan",field(p1,"pan"));}
  }else coopLeash_=0;
+ if(live(p1)&&live(p2)&&!down(0)&&!down(1)&&!coopHidden_)coopPair_={p1,p2}; // coop_shove
+}
+// Players push each other (docs/COOP.md "Pushing"): when one's ent_move runs into the other (move_a6_legacy), the rest of the
+// step shoves the partner, swept against the level and other entities like its own move; a partner that cannot move blocks
+// as in the original. Returns whether the partner moved, so the mover retries the step.
+bool Engine::coop_shove(ObjectId mover,ObjectId body,Vec3 by){
+ if(!coopPair_[0]||!((mover==coopPair_[0]&&body==coopPair_[1])||(mover==coopPair_[1]&&body==coopPair_[0]))||by.x*by.x+by.y*by.y<1e-4f)return false;
+ if(auto it=entities.find(mover);it!=entities.end())it->second.legacyPushEpoch=legacyMoveEpoch_; // the mover does not block the shove
+ const Vec3 from=position(body),to{from.x+by.x,from.y+by.y,from.z};ProcessContext q;q.my=body;
+ const Hit h=collide_legacy(from,to,4|8192,body,&q,true);
+ if((h.status&1)||h.fraction<=0)return false;
+ set_position(body,h.position);return true;
 }
 // P2's HUD, top-right: PlayerEnerji_Menu.wdl PEM_Ac (Demir, Ebru: energy ring and heart) or KoruViewMenu.wdl KVM_Ac (Inzar: health,
 // mana, spell), mirrored from P1's top-left corner, from the same BMAPs and P2's own values. Shown while P1's HUD is.

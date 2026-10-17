@@ -1,0 +1,22 @@
+# requires: saves
+# bodies: demir
+# Coop players push each other (docs/COOP.md "Pushing"), Tnel9 (kayit14.sav): P1 walks into the standing P2 and shoves P2 aside
+# instead of being blocked (before: P1 stopped against P2 and P2 never moved); the bodies never overlap.
+realtime off
+load-save 14
+wait until LY_AktifLevelID == 41 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 && EnvaterAcilabilirmi == 1 && oyun_ilk_basladi == 0 timeout 7200
+press F10
+type coop demir ebru
+press Return
+press F10
+wait until $p2 != 0 timeout 600
+store p2 $p2
+frames 30
+turn-to @p2 6
+store x0 $p2x
+store y0 $p2y
+store x1 player.x
+press Up 90
+assert $p2x - @x0 > 15 || @x0 - $p2x > 15 || $p2y - @y0 > 15 || @y0 - $p2y > 15
+assert player.x - @x1 > 40 || @x1 - player.x > 40
+assert $dist(@p2) > 15

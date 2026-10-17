@@ -2187,7 +2187,7 @@ Engine::Hit Engine::move_a6_legacy(Runtime& runtime,ProcessContext& query,Object
  // A6 00453940: six bumps, five retained planes, fractional time and source contact XYZ.
  // c_move has a different four-pass solver (0046f730); Bonus is not routed here.
  const Vec3 originalVelocity=velocity,origin=current;Vec3 planeVelocity=velocity;
- std::array<Vec3,5> planes{};std::size_t planeCount=0;float time=1;Hit contact;
+ std::array<Vec3,5> planes{};std::size_t planeCount=0;float time=1;Hit contact;int shoves=0;
  bool worldEvent=false,blocked=false;++legacyMoveEpoch_;
  auto alive=[&]{const auto* o=state.get(id);return o&&o->alive&&entities.contains(id);};
  auto quantize=[](Vec3 v){return Vec3{wQueryFixed(v.x),wQueryFixed(v.y),wQueryFixed(v.z)};};
@@ -2214,6 +2214,8 @@ Engine::Hit Engine::move_a6_legacy(Runtime& runtime,ProcessContext& query,Object
    if(auto found=entities.find(h.entity);found!=entities.end())found->second.legacyPushEpoch=legacyMoveEpoch_;
    --bump;continue; // 00453b9b retries without consuming one of the six bumps.
   }
+  // Coop: the rest of the step shoves the other player (native/coop.cpp coop_shove), then the step is retried.
+  if(h.entity&&!(h.status&1)&&h.fraction<1&&shoves<2&&coop_shove(id,h.entity,{end.x-h.position.x,end.y-h.position.y,0})){++shoves;--bump;continue;}
   set_global("in_solid",{});set_global("in_passable",Value::from_int((h.status&0x40)!=0));
   if(h.hit)contact=h;
   if(h.status&1){
