@@ -74,7 +74,8 @@ struct Parameter {std::string name;bool reference=false;};
 struct Function {std::string name;Location loc;std::vector<Parameter> params;std::vector<std::pair<std::string,std::size_t>> localDefinitions;std::vector<Instruction> code;std::map<std::string,std::size_t,CaseLess> labels;std::vector<std::pair<std::size_t,std::string>> gotos;std::uint32_t schedulerFlags=0;bool starter=false,defined=false,external=false;};
 struct Declaration {std::string type,name;Location loc;bool pointer=false;E size,init;std::vector<std::pair<std::string,std::vector<E>>> properties;ObjectId object=0;Slot* pointerCell=nullptr;};
 struct LocalSnapshot {ObjectId object;std::size_t offset,count;};
-struct Process {ProcessContext context;std::array<ObjectId,2> retainedContext{};FunctionId function=0;std::uint32_t schedulerFlags=0;std::size_t pc=0;Fields locals;std::map<std::string,Argument,CaseLess> bindings;std::vector<ObjectId> ownedLocals;std::vector<LocalSnapshot> snapshots;std::vector<Value> savedLocals;std::int32_t countdown=0;bool yielded=false,cancelled=false,noContinuation=false,running=false;Value result;};
+struct Process {ProcessContext context;std::array<ObjectId,2> retainedContext{};FunctionId function=0;std::uint32_t schedulerFlags=0;std::size_t pc=0;Fields locals;std::map<std::string,Argument,CaseLess> bindings;std::vector<ObjectId> ownedLocals;std::vector<LocalSnapshot> snapshots;std::vector<Value> savedLocals;std::int32_t countdown=0;int bank=0;bool yielded=false,cancelled=false,noContinuation=false,running=false;Value result;};
+std::string_view function_file_name(const Function& f){std::string_view n=f.loc.file;return n.substr(n.find_last_of("/\\")+1);}
 int precedence(std::string_view s){if(s=="="||s=="+="||s=="-="||s=="*="||s=="/="||s=="%="||s=="|="||s=="&="||s=="^=")return 1;if(s=="?")return 2;if(s=="||")return 3;if(s=="&&")return 4;if(s=="|")return 5;if(s=="^")return 6;if(s=="&")return 7;if(s=="=="||s=="!=")return 8;if(s=="<"||s==">"||s=="<="||s==">=")return 9;if(s=="<<"||s==">>")return 10;if(s=="+"||s=="-")return 11;if(s=="*"||s=="/"||s=="%")return 12;return 0;}
 bool declaration_type(std::string_view s){return s=="var"||s=="var_nsave"||s=="string"||s=="bmap"||s=="sound"||s=="font"||s=="entity"||s=="panel"||s=="text"||s=="view"||s=="material"||s=="window"||s=="vector";}
 bool registered_pointer_type(std::string_view s){return s=="entity"||s=="panel"||s=="view"||s=="string"||s=="bmap"||s=="material"||s=="function";}
@@ -85,6 +86,15 @@ struct Runtime::Impl {
  std::vector<Token> tokens;std::size_t pos=0;std::map<std::string,std::vector<Token>,CaseLess> macros;std::size_t includeDepth=0;bool compactExpressions=false;CompilerSettings compilerSettings;
  std::deque<Function> functions;std::map<std::string,FunctionId,CaseLess> names;std::vector<Declaration> declarations;std::vector<E> initializers;
  bool suppressContinuations=false;
+ // Coop banks: SLOT entries swap the global's Value with VALUE (the other bank's); OBJECT entries swap array elements or text.
+ struct Banked {Slot* slot=nullptr;ObjectId object=0;bool text=false,pointer=false;Value value;std::vector<Value> values;std::string string;};
+ std::vector<Banked> banked;std::unordered_map<std::string,std::size_t,CaseHash,CaseEqual> bankIndex;BankResolver resolver;int liveBank=0;
+ void use_bank(int bank){
+  if(bank==liveBank)return;
+  for(auto& b:banked){if(b.slot)std::swap(b.slot->value,b.value);else if(b.text)state.require(b.object).text.swap(b.string);else{auto& a=state.require(b.object).array;for(std::size_t i=0;i<b.values.size();++i)std::swap(a[i].value,b.values[i]);}}
+  liveBank=bank;
+ }
+ void disable_banks(){use_bank(0);banked.clear();bankIndex.clear();resolver={};}
  std::deque<std::unique_ptr<Process>> queued;std::deque<std::unique_ptr<Process>>* pendingQueue=nullptr;Process* active=nullptr;std::uint64_t nextProcess=1;std::int32_t time=1024;std::size_t callDepth=0;
  struct LocalLease {std::size_t owners=0,references=0;bool available=false,scalarValue=false;};std::unordered_map<ObjectId,LocalLease> localLeases;std::vector<ObjectId> freeLocals;
  Impl(Runtime& r,State& s,Builtin b):runtime(r),state(s),builtin(std::move(b)){functions.emplace_back();}
@@ -371,8 +381,10 @@ struct Runtime::Impl {
  Slot& context_slot(Process& p,const char* name){return state.require(p.locals.at(name).value.bits).array[0];}
  void clear_context(Process& p,const char* name){(std::string_view(name)=="my"?p.context.my:p.context.you)=0;auto id=p.locals.at(name).value.bits;context_slot(p,name).value=Value::object(0);for(auto& snapshot:p.snapshots)if(snapshot.object==id)p.savedLocals[snapshot.offset]=Value::object(0);}
  void clear_you(Process& p){clear_context(p,"you");}
- void prepare(Process& p,FunctionId id,std::span<const Argument> args,ObjectId my,ObjectId you){
+ // Returns false when the bank resolver skips the call (nothing allocated).
+ bool prepare(Process& p,FunctionId id,std::span<const Argument> args,ObjectId my,ObjectId you){
   if(!id||id>=functions.size()||!functions[id].defined)throw std::runtime_error("undefined WDL function "+std::to_string(id));
+  if(resolver){p.bank=resolver(id,my,liveBank);if(p.bank==Runtime::BankSkip)return false;}
   p.context={nextProcess++,my,you};p.retainedContext={my,you};for(auto context:p.retainedContext)state.retain_object(context);p.function=id;
   p.schedulerFlags=functions[id].schedulerFlags;
   auto& f=functions[id];p.ownedLocals.reserve(f.params.size()+6+f.localDefinitions.size());auto value_slot=[&](std::string_view name,Value value){auto& object=local_storage(p,name,3,true);object.array[0].value=value;p.locals[std::string(name)].value=Value::object(object.id);};
@@ -380,8 +392,9 @@ struct Runtime::Impl {
    static constexpr std::array<std::string_view,4> argNames{"_arg1","_arg2","_arg3","_arg4"};for(std::size_t i=0;i<4;++i)value_slot(argNames[i],i<args.size()?args[i].current():Value{});
    for(auto& [name,size]:f.localDefinitions)if(!p.locals.contains(name)){auto& object=local_storage(p,name,size);p.locals[name].value=Value::object(object.id);}
   }catch(...){release(p);throw;}
+  return true;
  }
- std::unique_ptr<Process> frame(FunctionId id,std::span<const Argument> args,ObjectId my,ObjectId you){auto p=std::make_unique<Process>();prepare(*p,id,args,my,you);return p;}
+ std::unique_ptr<Process> frame(FunctionId id,std::span<const Argument> args,ObjectId my,ObjectId you){auto p=std::make_unique<Process>();if(!prepare(*p,id,args,my,you))return {};return p;}
  void capture(const Process& p){
   if(suppressContinuations||p.noContinuation)return;auto snapshot=std::make_unique<Process>(p);snapshot->running=false;snapshot->yielded=false;snapshot->snapshots.clear();snapshot->savedLocals.clear();
   // A7 100145c0 copies function+0x1c into each newly allocated continuation.
@@ -393,10 +406,11 @@ struct Runtime::Impl {
  }
  Value start(FunctionId id,std::span<const Argument> args,ObjectId my,ObjectId you){
   if(++callDepth>256){--callDepth;throw std::runtime_error("WDL call stack exceeds 256");}
-  Process p;try{prepare(p,id,args,my,you);run(p);}catch(...){release(p);--callDepth;throw;}--callDepth;auto value=p.result;release(p);return value;
+  Process p;try{if(!prepare(p,id,args,my,you)){--callDepth;return {};}run(p);}catch(...){release(p);--callDepth;throw;}--callDepth;auto value=p.result;release(p);return value;
  }
  void run(Process& p){
   for(auto& snapshot:p.snapshots){auto& object=state.require(snapshot.object);for(std::size_t i=0;i<snapshot.count;++i)object.array[i].value=p.savedLocals[snapshot.offset+i];}p.snapshots.clear();p.savedLocals.clear();
+  const int previousBank=liveBank;if(resolver)use_bank((p.bank==Runtime::BankDynamic?resolver(p.function,p.context.my,Runtime::BankDynamic):p.bank)==1?1:0);
   auto* previous=active;active=&p;auto& f=functions[p.function];p.yielded=false;p.running=true;
   try{while(p.pc<f.code.size()&&!p.yielded&&!p.cancelled){auto& i=f.code[p.pc++];switch(i.kind){
    case Instruction::Eval:p.result=evaluate(*i.expr,&p).current();break;
@@ -406,7 +420,7 @@ struct Runtime::Impl {
    case Instruction::Return:if(i.expr)p.result=evaluate(*i.expr,&p).current();p.pc=f.code.size();break;
    case Instruction::Late:f.schedulerFlags|=2;break;
    case Instruction::Declare:{auto& slot=p.locals[i.name];auto value=i.expr&&i.expr->kind!=Expr::List?evaluate(*i.expr,&p).current():Value{};auto* object=slot.value.kind==Value::Kind::Object?state.get(slot.value.bits):nullptr;if(!object||!localLeases.contains(object->id)||std::find(p.ownedLocals.begin(),p.ownedLocals.end(),object->id)==p.ownedLocals.end())object=&local_storage(p,i.name,i.size?i.size:3);auto& o=*object;slot.value=Value::object(o.id);for(auto& s:o.array)s.value={};if(i.expr&&i.expr->kind==Expr::List){if(i.expr->args.size()>o.array.size())fail(i.loc,"too many local array initializers");for(std::size_t n=0;n<i.expr->args.size();++n)o.array[n].value=evaluate(*i.expr->args[n],&p).current();}else if(!o.array.empty())o.array[0].value=value;break;}
-  }}p.context.my=context_slot(p,"my").value.bits;p.context.you=context_slot(p,"you").value.bits;}catch(...){p.running=false;active=previous;throw;}p.running=false;active=previous;
+  }}p.context.my=context_slot(p,"my").value.bits;p.context.you=context_slot(p,"you").value.bits;}catch(...){p.running=false;active=previous;if(resolver)use_bank(previousBank);throw;}p.running=false;active=previous;if(resolver)use_bank(previousBank);
  }
  void tick(std::int32_t raw,std::int32_t freeze){
   const bool bonus=state.profile==SemanticProfile::BonusA7;
@@ -430,7 +444,7 @@ struct Runtime::Impl {
  }
  void load(std::string_view entry,std::string_view text,Source s,Resource r){
   for(auto& p:queued)if(p)release(*p);
-  clear_layouts();
+  disable_banks();clear_layouts();
   source=std::move(s);resource=std::move(r);metrics={};tokens.clear();macros.clear();declarations.clear();initializers.clear();functions.clear();functions.emplace_back();names.clear();queued.clear();diagnostics.clear();pos=0;includeDepth=0;compactExpressions=false;compilerSettings={};compilerSettings.entry=entry;suppressContinuations=false;
   for(auto& [name,value]:state.compilerMacros){ParseMetrics scratch;auto ts=lex(value,"<compiler DEFINE "+name+">",scratch);ts.pop_back();macros.emplace(name,std::move(ts));}
   ++metrics.files;preprocess(entry,text);tokens.push_back({Token::End,"",{std::string(entry),metrics.lines,1}});parse();initialize();
@@ -442,7 +456,7 @@ void Runtime::load(std::string_view entry,Source source,Resource resource){auto 
 void Runtime::load_text(std::string_view name,std::string_view text){impl_->load(name,text,{},{});}
 Value Runtime::start(FunctionId id,std::span<const Argument> args,ObjectId my,ObjectId you){return impl_->start(id,args,my,you);}
 Value Runtime::start(std::string_view name,std::span<const Argument> args,ObjectId my,ObjectId you){auto id=function(name);if(!id)throw std::runtime_error("unknown WDL function "+std::string(name));return start(id,args,my,you);}
-void Runtime::enqueue(FunctionId id,std::span<const Argument> args,ObjectId my,ObjectId you){impl_->queued.push_back(impl_->frame(id,args,my,you));}
+void Runtime::enqueue(FunctionId id,std::span<const Argument> args,ObjectId my,ObjectId you){if(auto p=impl_->frame(id,args,my,you))impl_->queued.push_back(std::move(p));}
 void Runtime::bootstrap(){auto main=function("main");if(!main)throw std::runtime_error("WDL entry has no MAIN");enqueue(main);for(std::size_t id=impl_->functions.size();id-->1;)if(impl_->functions[id].starter&&impl_->functions[id].defined)enqueue(FunctionId(id));}
 void Runtime::tick(std::int32_t raw,std::int32_t freeze){impl_->tick(raw,freeze);}
 void Runtime::kill_for_entity(ObjectId id){
@@ -458,8 +472,54 @@ void Runtime::kill_for_entity(ObjectId id){
  if(impl_->state.profile!=SemanticProfile::CampaignA6||!object||object->kind!=Object::Kind::Entity)return;
  const auto mask=object->fields.find("event_flags");if(mask==object->fields.end()||!mask->second.value.bits)return;
  for(auto& declaration:impl_->declarations)if(auto* cell=declaration.pointerCell;cell&&cell->value.kind==Value::Kind::Object&&cell->value.bits==id)cell->value={};
+ for(auto& b:impl_->banked)if(b.pointer&&b.value.kind==Value::Kind::Object&&b.value.bits==id)b.value={};
  if(impl_->active&&impl_->active->context.my==id)impl_->clear_context(*impl_->active,"my");
 }
+void Runtime::enable_banks(std::span<const std::string> names,BankResolver resolver){
+ auto& m=*impl_;m.disable_banks();if(names.empty())return;if(!resolver)throw std::invalid_argument("enable_banks requires a resolver");
+ for(const auto& name:names){
+  if(m.bankIndex.contains(name))continue;auto global=m.state.globals.find(name);if(global==m.state.globals.end())throw std::invalid_argument("bank global '"+name+"' is not a global");
+  auto d=std::find_if(m.declarations.begin(),m.declarations.end(),[&](auto& d){return case_equal(d.name,name);});Impl::Banked b;
+  if(d==m.declarations.end()||d->pointer||d->type=="function"||((d->type=="var"||d->type=="var_nsave")&&!d->size)){b.slot=&global->second;b.pointer=d!=m.declarations.end()&&d->pointerCell;b.value=global->second.value;}
+  else if(d->object&&d->type=="string"){b.object=d->object;b.text=true;b.string=m.state.require(d->object).text;}
+  else if(d->object&&(d->type=="var"||d->type=="var_nsave"||d->type=="vector")){b.object=d->object;for(auto& s:m.state.require(d->object).array)b.values.push_back(s.value);}
+  else {m.disable_banks();throw std::invalid_argument("bank global '"+name+"' has unsupported type "+d->type);}
+  m.bankIndex.emplace(name,m.banked.size());m.banked.push_back(std::move(b));
+ }
+ m.resolver=std::move(resolver);
+}
+int Runtime::active_bank()const{return impl_->liveBank;}
+Value Runtime::bank_value(int bank,std::string_view global)const{
+ auto& m=*impl_;if(auto it=m.bankIndex.find(global);it!=m.bankIndex.end()&&m.banked[it->second].slot&&bank!=m.liveBank)return m.banked[it->second].value;
+ auto g=m.state.globals.find(global);return g==m.state.globals.end()?Value{}:g->second.value;
+}
+void Runtime::set_bank_value(int bank,std::string_view global,Value v){
+ auto& m=*impl_;if(auto it=m.bankIndex.find(global);it!=m.bankIndex.end()&&m.banked[it->second].slot&&bank!=m.liveBank){m.banked[it->second].value=std::move(v);return;}
+ auto g=m.state.globals.find(global);if(g==m.state.globals.end())throw std::invalid_argument("unknown global '"+std::string(global)+"'");g->second.value=std::move(v);
+}
+std::vector<std::string> Runtime::assigned_globals(std::span<const std::string_view> files)const{
+ const auto& m=*impl_;std::set<std::string,CaseLess> out;
+ // Non-pointer storage whose elements/components/text a member, index or vec_/str_ write changes in place.
+ auto storage=[&](std::string_view n){return std::any_of(m.declarations.begin(),m.declarations.end(),[&](auto& d){return case_equal(d.name,n)&&!d.pointer&&(d.type=="var"||d.type=="var_nsave"||d.type=="vector"||d.type=="string");});};
+ static constexpr std::string_view readers[]={"str_cmp","str_cmpi","str_cmpni","str_create","str_cursor","str_len","str_remove","str_stri","str_to_asc","str_to_num","vec_dist","vec_dot","vec_length","vec_to_mesh","vec_to_uv"};
+ auto writes_first=[&](std::string_view n){return (n.starts_with("vec_")||n.starts_with("str_"))&&std::none_of(std::begin(readers),std::end(readers),[&](auto r){return case_equal(r,n);});};
+ for(const auto& f:m.functions){
+  if(!f.defined||std::none_of(files.begin(),files.end(),[&](auto x){return case_equal(x,function_file_name(f));}))continue;
+  std::set<std::string,CaseLess> locals={"my","you","me","your","_arg1","_arg2","_arg3","_arg4"};for(auto& p:f.params)locals.insert(p.name);for(auto& l:f.localDefinitions)locals.insert(l.first);
+  auto global=[&](const Expr& e){return e.kind==Expr::Name&&!locals.contains(e.op)&&m.state.globals.contains(e.op);};
+  std::function<void(const Expr&)> walk=[&](const Expr& e){
+   const Expr* target=nullptr;
+   if((e.kind==Expr::Binary&&precedence(e.op)==1)||(e.kind==Expr::Unary&&(e.op.ends_with("++")||e.op.ends_with("--"))))target=e.args[0].get();
+   else if(e.kind==Expr::Call&&e.args.size()>1&&e.args[0]->kind==Expr::Name&&writes_first(e.args[0]->op)&&global(*e.args[1])&&storage(e.args[1]->op))out.insert(e.args[1]->op);
+   if(target){if(global(*target))out.insert(target->op);else if((target->kind==Expr::Member||target->kind==Expr::Index)&&global(*target->args[0])&&storage(target->args[0]->op))out.insert(target->args[0]->op);}
+   for(auto& a:e.args)if(a)walk(*a);
+  };
+  for(auto& i:f.code)if(i.expr)walk(*i.expr);
+ }
+ return {out.begin(),out.end()};
+}
+std::string_view Runtime::function_file(FunctionId id)const{return id&&id<impl_->functions.size()?function_file_name(impl_->functions[id]):std::string_view{};}
+std::string_view Runtime::function_name(FunctionId id)const{return id&&id<impl_->functions.size()?std::string_view(impl_->functions[id].name):std::string_view{};}
 void Runtime::late_current(){if(!impl_->active)throw std::runtime_error("proc_late outside current process");impl_->functions[impl_->active->function].schedulerFlags|=2;}
 State& Runtime::state(){return impl_->state;}
 FunctionId Runtime::function(std::string_view name)const{auto it=impl_->names.find(name);return it==impl_->names.end()?0:it->second;}
@@ -478,7 +538,7 @@ std::size_t Runtime::reroute_reads(std::string_view global,std::string_view call
   const bool indexed=e->kind==Expr::Index&&e->args[0]->kind==Expr::Name&&std::any_of(arrays.begin(),arrays.end(),[&](auto a){return case_equal(a,e->args[0]->op);});
   for(std::size_t i=0;i<e->args.size();++i)walk(e->args[i],all||(indexed&&i==1),i==0&&assignment(*e));
  };
- auto in_file=[&](const Function& f){std::string_view n=f.loc.file;n=n.substr(n.find_last_of("/\\")+1);return std::any_of(files.begin(),files.end(),[&](auto x){return case_equal(x,n);});};
+ auto in_file=[&](const Function& f){return std::any_of(files.begin(),files.end(),[&](auto x){return case_equal(x,function_file_name(f));});};
  for(auto& f:impl_->functions){const bool all=in_file(f)||std::any_of(functions.begin(),functions.end(),[&](auto n){return case_equal(n,f.name);});for(auto& ins:f.code)walk(ins.expr,all,false);}
  return count;
 }

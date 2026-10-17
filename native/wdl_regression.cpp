@@ -51,6 +51,9 @@ struct Fixture {
             const auto id = args[0].current().bits;
             vm.kill_for_entity(id);
             state.retire(id);
+        } else if (name == "set_text") {
+            assert(args.size() == 2);
+            state.require(args[0].current().bits).text = std::to_string(args[1].current().integer());
         } else {
             throw std::runtime_error("unexpected regression builtin: " + std::string(name));
         }
@@ -1593,6 +1596,112 @@ void obsolete_window_is_parsed_without_finalizing() {
     assert(native_diagnostic);
     assert(f.events.empty() && f.runtime.processes() == 0);
 }
+// Coop banks (docs/COOP.md): per-process global banks swapped on run() entry/exit; bank 0 live between processes.
+void coop_banks_isolate_processes() {
+    Fixture f;
+    f.load(R"wdl(
+        var score; ENTITY* hero; var ammo[2]; VECTOR dist; STRING label = "a"; var shared;
+        function worker(n) { score = n; hero = my; ammo[0] = n*2; dist.x = n; set_text(label, n); shared += 1;
+            while (1) { wait(1); emit(n, score, ammo[0], dist.x, hero == my); } }
+        function peek() { return score; }
+        function outer() { score = 9; var got = peek(); emit(got, score); }
+        function skipme() { shared = 100; return 5; }
+        function roamer() { while (1) { emit(score); wait(1); } }
+    )wdl");
+    const auto e0 = f.entity(0), e1 = f.entity(1);
+    f.state.require(e1).field("event_flags").value = Value::from_raw(1);
+    int dynamicBank = 0;
+    std::vector<std::pair<std::string, int>> asked;
+    const std::vector<std::string> names{"score", "hero", "ammo", "dist", "label"};
+    f.runtime.enable_banks(names, [&](FunctionId fn, ObjectId my, int inherited) {
+        const std::string name(f.runtime.function_name(fn));
+        asked.emplace_back(name, inherited);
+        if (name == "worker") return my == e1 ? 1 : 0;
+        if (name == "peek") return 0;
+        if (name == "skipme") return Runtime::BankSkip;
+        if (name == "roamer") return inherited == Runtime::BankDynamic ? dynamicBank : Runtime::BankDynamic;
+        return my == e1 ? 1 : inherited;
+    });
+    assert(f.runtime.function_file(f.runtime.function("worker")) == "wdl_regression.wdl");
+    auto& ammo = f.state.require(f.state.global("ammo").value.bits).array;
+    auto& dist = f.state.require(f.state.global("dist").value.bits).array;
+    auto& label = f.state.require(f.state.global("label").value.bits).text;
+    const Slot* ammo0 = &ammo[0];
+    f.start("worker", {raw(1)}, e0);
+    f.start("worker", {raw(2)}, e1);
+    assert(f.runtime.active_bank() == 0);
+    assert(asked.size() == 2 && asked[0].second == 0 && asked[1].second == 0);
+    // Bank 0 live between processes; bank 1 stored. Element storage never moves.
+    assert(f.state.global("score").value.raw() == raw(1) && f.runtime.bank_value(1, "score").raw() == raw(2));
+    assert(f.runtime.bank_value(0, "score").raw() == raw(1));
+    assert(f.state.global("hero").value.bits == e0 && f.runtime.bank_value(1, "hero").bits == e1);
+    assert(&ammo[0] == ammo0 && ammo[0].value.raw() == raw(2) && dist[0].value.raw() == raw(1) && label == "1");
+    assert(f.state.global("shared").value.raw() == raw(2)); // unbanked: shared by both
+    f.runtime.tick(64, 0);
+    assert(f.events.size() == 2 && f.runtime.active_bank() == 0);
+    f.expect(0, {raw(1), raw(1), raw(2), raw(1), raw(1)}, e0);
+    f.expect(1, {raw(2), raw(2), raw(4), raw(2), raw(1)}, e1);
+    assert(&ammo[0] == ammo0 && label == "1");
+
+    // Nested call from bank 1 into a bank-0 function sees bank 0 and restores bank 1 on return.
+    f.events.clear();
+    asked.clear();
+    f.start("outer", {}, e1);
+    f.expect(0, {raw(1), raw(9)}, e1);
+    assert(asked.size() == 2 && asked[1] == std::make_pair(std::string("peek"), 1));
+    assert(f.state.global("score").value.raw() == raw(1) && f.runtime.bank_value(1, "score").raw() == raw(9));
+    f.runtime.set_bank_value(1, "score", Value::from_int(2));
+    assert(f.runtime.bank_value(1, "score").raw() == raw(2));
+
+    // BankSkip: start returns 0 without running; enqueue drops it.
+    const auto processes = f.runtime.processes();
+    assert(!f.runtime.start("skipme") && f.state.global("shared").value.raw() == raw(2));
+    f.runtime.enqueue(f.runtime.function("skipme"));
+    assert(f.runtime.processes() == processes);
+
+    // BankDynamic is re-resolved at every resume.
+    f.runtime.enqueue(f.runtime.function("roamer"));
+    auto roamer = [&] {
+        for (auto it = f.events.rbegin(); it != f.events.rend(); ++it)
+            if (!it->context.my) return it->values.at(0);
+        assert(false);
+        return 0;
+    };
+    f.events.clear();
+    dynamicBank = 1;
+    f.runtime.tick(64, 0);
+    assert(roamer() == raw(2) && f.runtime.active_bank() == 0);
+    f.events.clear();
+    dynamicBank = 0;
+    f.runtime.tick(64, 0);
+    assert(roamer() == raw(1));
+
+    // kill_for_entity nulls the dead id in the inactive bank's pointer copy too.
+    f.runtime.kill_for_entity(e1);
+    assert(!f.runtime.bank_value(1, "hero").bits && f.state.global("hero").value.bits == e0);
+
+    // Banks off: one shared set of globals again, bank 0 values kept.
+    f.runtime.enable_banks({}, {});
+    f.events.clear();
+    f.start("outer", {}, e1);
+    f.expect(0, {raw(9), raw(9)}, e1);
+    assert(f.runtime.bank_value(1, "score").raw() == raw(9) && f.runtime.active_bank() == 0);
+
+    // assigned_globals: global write targets (=, op=, ++, element/member, vec_/str_ first arg) in the given files only.
+    Fixture g;
+    g.runtime.load("main.wdl", [](std::string_view file) -> std::string {
+        if (file == "main.wdl") return R"wdl(include "player.wdl"; var world; var story_only; function story() { story_only = 1; })wdl";
+        return R"wdl(
+            var hp; var ammo[3]; VECTOR dist; VECTOR aim; STRING nm; ENTITY* hero; ENTITY* other; var flags; var read_only;
+            function act(n) { var loc; loc = 1; n = 2; hp -= 1; ammo[1] = 3; dist.x = 4; hero = my; flags++;
+                other.skill1 = 5; vec_set(aim, dist); str_cpy(nm, "x"); if (vec_length(read_only) == 0) { world = 2; } }
+        )wdl";
+    });
+    const std::string_view files[]{"player.wdl"};
+    assert(g.runtime.assigned_globals(files)
+           == (std::vector<std::string>{"aim", "ammo", "dist", "flags", "hero", "hp", "nm", "world"}));
+    assert(g.runtime.function_file(g.runtime.function("story")) == "main.wdl");
+}
 } // namespace
 
 int main() {
@@ -1641,5 +1750,6 @@ int main() {
     call_arguments_are_captured_right_to_left();
     panel_digits_numeric_binding_warning_policy();
     obsolete_window_is_parsed_without_finalizing();
+    coop_banks_isolate_processes();
     std::cout << "WDL arithmetic and scheduler regression passed\n";
 }

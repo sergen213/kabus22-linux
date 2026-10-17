@@ -31,6 +31,22 @@ public:
  std::size_t reroute_reads(std::string_view global,std::string_view call,std::span<const std::string_view> functions,std::span<const std::string_view> arrays={},std::span<const std::string_view> files={});
  // Native override: in FUNCTION, a statement `X.FIELD = GLOBAL` assigns the native call CALL() instead; returns the count.
  std::size_t reroute_assigned_read(std::string_view function,std::string_view field,std::string_view global,std::string_view call);
+ // Coop: per-player global banks (docs/COOP.md). Off until enable_banks; zero overhead when off.
+ static constexpr int BankDynamic=-1,BankSkip=-2;
+ // resolver(function,my,inherited): inherited = the active process's bank (0 if none) when a process is prepared (start/enqueue/
+ // builtin-spawned), or BankDynamic when re-asked at a resume. Returns 0 or 1; BankDynamic (prepare only): re-ask at every resume;
+ // BankSkip (prepare only): the call does not run and returns 0.
+ using BankResolver=std::function<int(FunctionId,ObjectId my,int inherited)>;
+ // Two banks. NAMES are globals (scalars, pointer cells such as ENTITY* player, and vector/array/string globals element-wise,
+ // never by moving storage — Refs into elements must stay valid) whose live values belong to the running process's bank.
+ // run() swaps on entry/exit/exception when the bank differs; between processes bank 0 is live. Empty NAMES: banks off.
+ // Bank 1 starts as a copy of the current values. load()/load_text() turn banks off.
+ void enable_banks(std::span<const std::string> names,BankResolver);
+ int active_bank()const;                       // bank whose values are live now (0 between processes)
+ Value bank_value(int bank,std::string_view global)const;          // scalar/pointer value as stored for that bank
+ void set_bank_value(int bank,std::string_view global,Value);
+ std::vector<std::string> assigned_globals(std::span<const std::string_view> files)const; // globals assigned (=,+=,++,vec_set target…) in functions defined in FILES
+ std::string_view function_file(FunctionId)const; std::string_view function_name(FunctionId)const;
 private: struct Impl;std::unique_ptr<Impl> impl_;
 };
 }
