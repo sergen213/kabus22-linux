@@ -158,12 +158,12 @@ struct VulkanBackend::State::Presenter {
         if(const char* lead=std::getenv("K22_FG_PACING_LEAD_MS");lead&&*lead){const double v=std::strtod(lead,nullptr);if(std::isfinite(v)&&v>=0&&v<=20)leadMs=v;}
         try {
             for(unsigned i=0;i<2;++i) {
-                VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pool.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;pool.queueFamilyIndex=s.queueFamily;
+                VkCommandPoolCreateInfo pool{};pool.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;pool.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;pool.queueFamilyIndex=s.queueFamily;
                 require(vkCreateCommandPool(s.device,&pool,nullptr,&pools[i]),"Creating Vulkan present pool");
-                VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};allocation.commandPool=pools[i];allocation.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;allocation.commandBufferCount=1;
+                VkCommandBufferAllocateInfo allocation{};allocation.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;allocation.commandPool=pools[i];allocation.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;allocation.commandBufferCount=1;
                 require(vkAllocateCommandBuffers(s.device,&allocation,&commands[i]),"Allocating Vulkan present command");
-                VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};fence.flags=VK_FENCE_CREATE_SIGNALED_BIT;require(vkCreateFence(s.device,&fence,nullptr,&fences[i]),"Creating Vulkan present fence");
-                VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};require(vkCreateSemaphore(s.device,&semaphore,nullptr,&acquired[i]),"Creating Vulkan present acquisition semaphore");
+                VkFenceCreateInfo fence{};fence.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;fence.flags=VK_FENCE_CREATE_SIGNALED_BIT;require(vkCreateFence(s.device,&fence,nullptr,&fences[i]),"Creating Vulkan present fence");
+                VkSemaphoreCreateInfo semaphore{};semaphore.sType=VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;require(vkCreateSemaphore(s.device,&semaphore,nullptr,&acquired[i]),"Creating Vulkan present acquisition semaphore");
             }
             thread=std::thread([this]{loop();});
         } catch(...) {release();throw;}
@@ -194,14 +194,14 @@ struct VulkanBackend::State::Presenter {
         if(result==VK_ERROR_OUT_OF_DATE_KHR){stale=true;return false;}
         if(result==VK_SUBOPTIMAL_KHR)stale=true;else require(result,"Acquiring Vulkan frame-generation image");
         require(vkResetCommandPool(s.device,pools[index],0),"Resetting Vulkan present command");
-        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VkCommandBufferBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         require(vkBeginCommandBuffer(command,&begin),"Beginning Vulkan present command");
-        VkMemoryBarrier2 written{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};written.srcStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;written.srcAccessMask=VK_ACCESS_2_MEMORY_WRITE_BIT;
+        VkMemoryBarrier2 written{};written.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;written.srcStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;written.srcAccessMask=VK_ACCESS_2_MEMORY_WRITE_BIT;
         written.dstStageMask=VK_PIPELINE_STAGE_2_TRANSFER_BIT;written.dstAccessMask=VK_ACCESS_2_TRANSFER_READ_BIT;
-        VkImageMemoryBarrier2 swap{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};swap.srcStageMask=VK_PIPELINE_STAGE_2_TRANSFER_BIT;swap.dstStageMask=VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        VkImageMemoryBarrier2 swap{};swap.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;swap.srcStageMask=VK_PIPELINE_STAGE_2_TRANSFER_BIT;swap.dstStageMask=VK_PIPELINE_STAGE_2_TRANSFER_BIT;
         swap.dstAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;swap.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;swap.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         swap.srcQueueFamilyIndex=swap.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;swap.image=s.swapImages[image];swap.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
-        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};dependency.memoryBarrierCount=1;dependency.pMemoryBarriers=&written;dependency.imageMemoryBarrierCount=1;dependency.pImageMemoryBarriers=&swap;
+        VkDependencyInfo dependency{};dependency.sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO;dependency.memoryBarrierCount=1;dependency.pMemoryBarriers=&written;dependency.imageMemoryBarrierCount=1;dependency.pImageMemoryBarriers=&swap;
         vkCmdPipelineBarrier2(command,&dependency);
         VkImageBlit blit{};blit.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};blit.dstSubresource=blit.srcSubresource;blit.srcOffsets[1]={static_cast<int>(source.width),static_cast<int>(source.height),1};blit.dstOffsets[1]=blit.srcOffsets[1];
         vkCmdBlitImage(command,source.handle,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,s.swapImages[image],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,VK_FILTER_NEAREST);
@@ -209,11 +209,11 @@ struct VulkanBackend::State::Presenter {
         swap.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;swap.newLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;dependency.memoryBarrierCount=0;
         vkCmdPipelineBarrier2(command,&dependency);
         require(vkEndCommandBuffer(command),"Ending Vulkan present command");require(vkResetFences(s.device,1,&fence),"Resetting Vulkan present fence");
-        VkSemaphoreSubmitInfo wait{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};wait.semaphore=acquired[index];wait.stageMask=VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-        VkSemaphoreSubmitInfo signal{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};signal.semaphore=s.swapRendered[image];signal.stageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-        VkCommandBufferSubmitInfo commandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};commandInfo.commandBuffer=command;
-        VkSubmitInfo2 submit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};submit.waitSemaphoreInfoCount=1;submit.pWaitSemaphoreInfos=&wait;submit.commandBufferInfoCount=1;submit.pCommandBufferInfos=&commandInfo;submit.signalSemaphoreInfoCount=1;submit.pSignalSemaphoreInfos=&signal;
-        VkPresentInfoKHR info{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};info.waitSemaphoreCount=1;info.pWaitSemaphores=&s.swapRendered[image];info.swapchainCount=1;info.pSwapchains=&s.swapchain;info.pImageIndices=&image;
+        VkSemaphoreSubmitInfo wait{};wait.sType=VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;wait.semaphore=acquired[index];wait.stageMask=VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        VkSemaphoreSubmitInfo signal{};signal.sType=VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;signal.semaphore=s.swapRendered[image];signal.stageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        VkCommandBufferSubmitInfo commandInfo{};commandInfo.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;commandInfo.commandBuffer=command;
+        VkSubmitInfo2 submit{};submit.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO_2;submit.waitSemaphoreInfoCount=1;submit.pWaitSemaphoreInfos=&wait;submit.commandBufferInfoCount=1;submit.pCommandBufferInfos=&commandInfo;submit.signalSemaphoreInfoCount=1;submit.pSignalSemaphoreInfos=&signal;
+        VkPresentInfoKHR info{};info.sType=VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;info.waitSemaphoreCount=1;info.pWaitSemaphores=&s.swapRendered[image];info.swapchainCount=1;info.pSwapchains=&s.swapchain;info.pImageIndices=&image;
         {std::scoped_lock lock(s.queueMutex);require(vkQueueSubmit2(s.queue,1,&submit,fence),"Submitting Vulkan present copy");result=vkQueuePresentKHR(s.queue,&info);}
         if(result==VK_ERROR_OUT_OF_DATE_KHR||result==VK_SUBOPTIMAL_KHR)stale=true;else require(result,"Presenting Vulkan frame-generation image");
         return result!=VK_ERROR_OUT_OF_DATE_KHR;
@@ -504,7 +504,7 @@ void VulkanBackend::State::begin(WindowMetrics metrics,std::int32_t tripleBuffer
     }
     auto& slot=slots[slotIndex];if(slot.pending)retire_slot(*this,slotIndex);
     garbage(*this,slot);
-    if(generating){require(vkResetCommandPool(device,slot.pool,0),"Resetting Vulkan frame commands");VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};beginInfo.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;require(vkBeginCommandBuffer(slot.command,&beginInfo),"Beginning Vulkan frame");command=slot.command;if(timing.enabled){vkCmdResetQueryPool(command,slot.queries,0,64);slot.marks.clear();mark("start");}return;}
+    if(generating){require(vkResetCommandPool(device,slot.pool,0),"Resetting Vulkan frame commands");VkCommandBufferBeginInfo beginInfo{};beginInfo.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;beginInfo.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;require(vkBeginCommandBuffer(slot.command,&beginInfo),"Beginning Vulkan frame");command=slot.command;if(timing.enabled){vkCmdResetQueryPool(command,slot.queries,0,64);slot.marks.clear();mark("start");}return;}
     const auto acquireStart=std::chrono::steady_clock::now();
     VkResult acquired=vkAcquireNextImageKHR(device,swapchain,UINT64_MAX,slot.acquired,VK_NULL_HANDLE,&acquiredIndex);
     timing.acquire+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-acquireStart).count();
@@ -526,10 +526,11 @@ void VulkanBackend::State::finish(){
         if(generatedValid)transition(generated[slotIndex],VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
         mark("present_copy");
         require(vkEndCommandBuffer(command),"Ending Vulkan frame");require(vkResetFences(device,1,&slot.fence),"Resetting Vulkan frame fence");
-        VkCommandBufferSubmitInfo commands{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};commands.commandBuffer=command;VkSubmitInfo2 submit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};submit.commandBufferInfoCount=1;submit.pCommandBufferInfos=&commands;
+        VkCommandBufferSubmitInfo commands{};commands.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;commands.commandBuffer=command;VkSubmitInfo2 submit{};submit.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO_2;submit.commandBufferInfoCount=1;submit.pCommandBufferInfos=&commands;
         while(pending>=limit){retire_slot(*this,front);front=(front+1)%slots.size();}
         {std::scoped_lock lock(queueMutex);require(vkQueueSubmit2(queue,1,&submit,slot.fence),"Submitting Vulkan frame");}
-        if(!pending)front=slotIndex;slot.pending=true;++pending;++submissions;finalSlot=slotIndex;finalSubmission=submissions;finalValid=true;command=VK_NULL_HANDLE;
+        if(!pending)front=slotIndex;
+        slot.pending=true;++pending;++submissions;finalSlot=slotIndex;finalSubmission=submissions;finalValid=true;command=VK_NULL_HANDLE;
         {std::scoped_lock lock(presenter->mutex);presenter->jobs.push_back({slotIndex,generatedValid,slot.fence});++presenter->queued;}
         presenter->cv.notify_all();slotIndex=(slotIndex+1)%slots.size();
         return;
@@ -583,7 +584,8 @@ void VulkanBackend::State::account(Slot& slot){
 void VulkanBackend::State::drain(){drain_presents();for(unsigned i=0;i<slots.size();++i)retire_slot(*this,i);front=slotIndex;}
 // Frame generation: wait until at most `outstanding` present jobs remain, then rethrow a present-thread failure.
 void VulkanBackend::State::drain_presents(std::uint64_t outstanding){
-    if(!presenter)return;auto& p=*presenter;std::unique_lock lock(p.mutex);
+    if(!presenter)return;
+    auto& p=*presenter;std::unique_lock lock(p.mutex);
     p.cv.wait(lock,[&]{return p.queued-p.done<=outstanding;});
     if(p.error)std::rethrow_exception(std::exchange(p.error,nullptr));
 }

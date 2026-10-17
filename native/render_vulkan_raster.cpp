@@ -499,7 +499,7 @@ struct Raster {
     }
     void ensure_effects(){
         const auto&f=s.options.features;const bool depthEffects=f.ssao||f.fog||f.taa||f.fsr,rt=rtSignals();
-        if((!depthEffects&&!f.bloom&&!f.fxaa&&!rt)||(fx.extent.width==s.render.width&&fx.extent.height==s.render.height&&(!f.fsr||(fx.upscaled.width==s.extent.width&&fx.upscaled.height==s.extent.height))&&(!s.generating||fx.interpolated.width==s.extent.width&&fx.interpolated.height==s.extent.height)))return;
+        if((!depthEffects&&!f.bloom&&!f.fxaa&&!rt)||(fx.extent.width==s.render.width&&fx.extent.height==s.render.height&&(!f.fsr||(fx.upscaled.width==s.extent.width&&fx.upscaled.height==s.extent.height))&&(!s.generating||(fx.interpolated.width==s.extent.width&&fx.interpolated.height==s.extent.height))))return;
         free_effects(false);fx.extent=s.render;const auto w=s.render.width,h=s.render.height;
         constexpr VkImageUsageFlags color=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,storage=VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
         auto readable=[&](Image&i){s.transition(i,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);};
@@ -508,7 +508,7 @@ struct Raster {
         if(f.ssao)fx.ao=s.image(w,h,VK_FORMAT_R16_SFLOAT,color);
         if(f.fog)fx.fog=s.image(std::max(1u,w/2),std::max(1u,h/2),VK_FORMAT_R16G16B16A16_SFLOAT,color);
         if(f.taa||f.fxaa||f.sharpen||f.fsr)fx.ldr=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);
-        if(f.fsr){fx.fsrDepth=s.image(w,h,VK_FORMAT_R32_SFLOAT,color);fx.fsrMotion=s.image(w,h,VK_FORMAT_R16G16_SFLOAT,color);fx.upscaled=s.image(s.extent.width,s.extent.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|(s.generating?VK_IMAGE_USAGE_TRANSFER_SRC_BIT:0u));readable(fx.upscaled);
+        if(f.fsr){fx.fsrDepth=s.image(w,h,VK_FORMAT_R32_SFLOAT,color);fx.fsrMotion=s.image(w,h,VK_FORMAT_R16G16_SFLOAT,color);fx.upscaled=s.image(s.extent.width,s.extent.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|(s.generating?VkImageUsageFlags{VK_IMAGE_USAGE_TRANSFER_SRC_BIT}:0u));readable(fx.upscaled);
             // Frame interpolation copies its source (upscaled) for the next frame and may clear its output.
             if(s.generating){fx.interpolated=s.image(s.extent.width,s.extent.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);readable(fx.interpolated);}
             fx.opaque=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);fx.reactive=s.image(w,h,VK_FORMAT_R8_UNORM,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);readable(fx.reactive);}
