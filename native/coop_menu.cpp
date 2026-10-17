@@ -8,6 +8,7 @@
 #include "wdl.hpp"
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 namespace k22 {
 namespace {
