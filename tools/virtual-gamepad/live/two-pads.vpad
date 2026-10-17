@@ -1,0 +1,27 @@
+# Pad side of live/two-pads.k22s (raw evdev values; LY negative = forward). Pad 1 starts unplugged.
+# pads: 2
+wait store pad1_plug
+pad 1 plug
+wait store pad1_forward
+pad 1 axis LY -32767
+pad 1 down X
+wait store pad1_release
+pad 1 axis LY 0
+pad 1 up X
+wait store pad0_forward
+axis LY -32767
+wait store pad0_stop
+axis LY 0
+wait store pad0_unplug
+unplug
+wait store pad1_a
+pad 1 down A
+wait store pad1_a_up
+pad 1 up A
+wait store pad0_plug
+plug
+wait store pad0_replug_forward
+axis LY -32767
+wait store pad_done
+axis LY 0
+wait scenario: two-pads.k22s

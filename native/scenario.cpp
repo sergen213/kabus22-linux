@@ -59,6 +59,12 @@ struct Eval {
    if(name=="wall"){static const auto start=std::chrono::steady_clock::now();return {false,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count(),{}};} // seconds since first $wall read
    if(name=="count"){if(!take("("))fail("expected (");auto action=runtime.function(ident());if(!take(")"))fail("expected )");if(!action)fail("unknown action");int n=0;for(const auto& [id,data]:engine.entities)n+=runs(engine,id,action);return {false,double(n),{}};}
    if(name=="dist"||name=="facing"){if(!take("(")||!take("@"))fail("expected (@name)");auto v=stored_term();if(!take(")"))fail("expected )");auto id=ObjectId(v.number);return {false,name=="dist"?dist(id):facing(id),{}};}
+   // $pad(N): game controller slot N connected; $pad(N,BUTTON) held (or pressed) 1/0; $pad(N,AXIS) -1..1. The input the engine ticked last.
+   if(name=="pad"){if(!take("("))fail("expected (");auto n=sum();if(n.text||n.number<0||n.number>=Input::Pads)fail("pad 0 or 1");const int pad=int(n.number);const auto& in=engine.input;
+    if(take(")"))return {false,in.controllerConnected[pad]?1.0:0.0,{}};if(!take(","))fail("expected , or )");auto what=lower(ident());if(!take(")"))fail("expected )");
+    if(auto b=SDL_GameControllerGetButtonFromString(what.c_str());b!=SDL_CONTROLLER_BUTTON_INVALID)return {false,in.controllerButtons[pad][b]||in.controllerPressed[pad][b]?1.0:0.0,{}};
+    if(auto a=SDL_GameControllerGetAxisFromString(what.c_str());a!=SDL_CONTROLLER_AXIS_INVALID)return {false,double(in.controllerAxes[pad][a]),{}};
+    fail("unknown pad button or axis "+what);}
    fail("unknown $"+name);}
   auto name=ident();auto it=engine.state.globals.find(name);if(it==engine.state.globals.end())fail("unknown WDL global "+name);Value v=it->second.value;
   if(take("[")){auto i=sum();if(i.text||i.number<0)fail("bad index");const auto index=std::size_t(i.number);if(!take("]"))fail("expected ]");auto* o=v.kind==Value::Kind::Object?object(v.bits):nullptr;if(!o||index>=o->array.size())fail(name+"["+std::to_string(index)+"] is not an array element");v=o->array[index].value;}

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Live pad test: one rendered kabus22 scenario with vpad.py feeding a virtual Xbox 360 pad in parallel.
 #   run-live.sh KABUS22 GAME_ROOT WINDOWS_SAVE_DIR OUT_DIR CASE [CONTROLLER_INI|-]
-# CASE names live/CASE.k22s + live/CASE.vpad. "-" (default) = no controller.ini (original mode).
+# CASE names live/CASE.k22s + live/CASE.vpad. "-" (default) = no controller.ini (original mode). A "# pads: N" line in CASE.vpad
+# creates N virtual pads (vpad.py --pads).
 # Private XDG tree per run (saves imported fresh); logs: game.log (scenario), stderr.log, vpad.log, ff.log (rumble).
 set -uo pipefail
 k22=$1 game=$2 saves=$3 out=$4 case=$5 ini=${6:--}
@@ -15,7 +16,8 @@ export SDL_VIDEODRIVER=x11 SDL_AUDIODRIVER=pipewire PIPEWIRE_RUNTIME_DIR=/run/us
 export SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=${SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS:-1}
 [ "$ini" = - ] || cp "$ini" "$root/config/kabus22/controller.ini"
 : >"$root/game.log"; : >"$root/ff.log"
-python3 "$here/vpad.py" --sync "$root/game.log" --ff-log "$root/ff.log" "$here/live/$case.vpad" >"$root/vpad.log" 2>&1 &
+pads=$(sed -n 's/^# pads: *\([0-9]\) *$/\1/p' "$here/live/$case.vpad")
+python3 "$here/vpad.py" --pads "${pads:-1}" --sync "$root/game.log" --ff-log "$root/ff.log" "$here/live/$case.vpad" >"$root/vpad.log" 2>&1 &
 vpad=$!
 trap 'kill $vpad 2>/dev/null; wait $vpad 2>/dev/null' EXIT
 sleep 1 # device node published before SDL enumerates
