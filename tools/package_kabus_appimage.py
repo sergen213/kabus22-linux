@@ -719,7 +719,7 @@ def build(args) -> None:
                          appdir / "usr/share/licenses/kabus22/dependencies/ode" / name)
                 for name in ("ode-LICENSE-BSD.TXT", "ode-ou-LICENSE-BSD.TXT")]}
         license_report["fidelityfx"] = {
-            "version": "FidelityFX SDK v1.1.4 (FSR 3.1.4 upscaler, statically linked)",
+            "version": "FidelityFX SDK v1.1.4 (FSR 3.1.4 upscaler + frame generation, statically linked)",
             "notices": [
                 snapshot(ROOT / "third_party/FidelityFX-SDK" / name,
                          appdir / "usr/share/licenses/kabus22/dependencies/fidelityfx" / name)

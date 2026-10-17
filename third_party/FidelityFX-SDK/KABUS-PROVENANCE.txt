@@ -49,8 +49,18 @@ Local patches (each marked "Kabus22 local patch (shared with IKV)" in the source
      ffxFrameInterpolationDispatch never registers an optical-flow confidence resource (FSR 3.1 optical flow has none),
      so r_optical_flow_confidence was never written (VUID-vkCmdDispatch-None-08114; D3D12 reads a null SRV as 0).
      Returns the null-SRV value 0 without declaring the texture; its only caller computes a weight it never uses.
+  7. (Kabus22 only, marked "Kabus22 local patch 7") sdk/include/FidelityFX/gpu/frameinterpolation/ffx_frameinterpolation.h,
+     computeInterpolatedColor: where both game-vector samples are valid and not disoccluded and their luma differs
+     (w = smoothstep(0.05, 0.15, |luma(prev) - luma(curr)|), display-encoded values), the colour becomes
+     lerp(upstream colour, current game-vector sample, w) and fGameMvBias lerp(bias, 1, w). A shadow moving over a static
+     surface no longer cross-fades into two half-strength copies (k22-render-check RT probe: 72 -> 4 blended of 82 changed
+     pixels); it steps at the rendered cadence. In-shader variant of ETI Yami's application shading-change mask; w = 0
+     is exactly upstream.
 
 Patched files: unmodified upstream sha256 -> Kabus22 sha256
+  sdk/include/FidelityFX/gpu/frameinterpolation/ffx_frameinterpolation.h
+    upstream 9b9280a86a00850e2930fd6e19442d2984aa36964dd22a077a328a573f7b4830
+    kabus22  1182b38491fcf31523f3a6983399ca1018a21eea047a7c1722b49a990900af69
   sdk/include/FidelityFX/gpu/frameinterpolation/ffx_frameinterpolation_callbacks_glsl.h
     upstream e1e132729a80fe8e812c83d527056a17d62e7d815a79511465bfd1b0f8483095
     kabus22  af8775fef7713fb553a199c1397e35d62c6a94bd940365324f9f7c342ab6d278
@@ -64,7 +74,7 @@ Patched files: unmodified upstream sha256 -> Kabus22 sha256
     upstream 0b1f1227535971a818c6367f1c27f115db682aea4371fa0c15e8dbd3b0ba5764
     kabus22  2d40ba406ec223f83d9a1774313584b27f4e898b28a29bba01ff5b4396aa8b1d
 
-Upstream sha256 of every vendored file (unmodified originals; the 4 patched files differ as listed above)
+Upstream sha256 of every vendored file (unmodified originals; the 5 patched files differ as listed above)
 82cf74fc23885107c7f69249ac3f1dac55898ff68320eb2c753984cae6b2d78a  LICENSE.txt
 a19560f837c09f0c990e98b5925b731135d908e372af41c5895cbfa70cc9e5c8  sdk/include/FidelityFX/gpu/ffx_common_types.h
 e439aa5f516b2d2ebf070ff1d24561f04fa5f00262a2e4f760764a7d07de7997  sdk/include/FidelityFX/gpu/ffx_core.h
