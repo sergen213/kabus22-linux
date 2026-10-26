@@ -1,5 +1,7 @@
 #include "layout.hpp"
 #include <algorithm>
+#include <array>
+#include <tuple>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -130,7 +132,18 @@ std::vector<std::string> installed_versions(const fs::path& root) {
     std::error_code error;
     for (const auto& entry : fs::directory_iterator(root/"versions", error))
         if (const auto name = entry.path().filename().string(); versionDir(root, name)) result.push_back(name);
-    std::sort(result.begin(), result.end());
+    // Semantic order (string order put 0.4.10 before 0.4.9): numeric major.minor.patch, then a release after its prereleases.
+    // shortcut: prerelease tags compare as plain strings (beta.10 < beta.9); upgrade if numbered prereleases pass 9.
+    auto key = [](const std::string& v) {
+        std::array<unsigned long, 3> core{};
+        const auto dash = v.find('-'), plus = v.find('+');
+        const auto end = std::min(dash, plus);
+        std::size_t at = 0;
+        for (auto& part : core) { part = std::strtoul(v.c_str() + at, nullptr, 10); at = v.find('.', at); if (at == std::string::npos || at >= end) break; ++at; }
+        const std::string pre = dash < plus ? v.substr(dash + 1, plus == std::string::npos ? std::string::npos : plus - dash - 1) : std::string{};
+        return std::tuple(core, pre.empty(), pre);
+    };
+    std::sort(result.begin(), result.end(), [&](const std::string& a, const std::string& b) { return key(a) < key(b); });
     return result;
 }
 std::string running_version(const fs::path& root) {

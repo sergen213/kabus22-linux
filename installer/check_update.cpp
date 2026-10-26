@@ -109,6 +109,13 @@ void layoutChecks(const fs::path& base) {
     check(foreign(root) == untouched, "saves, options, game and icon untouched");
     throws([&] { layout::migrate_flat(base/"nomarker", "0.2.0"); }, "unowned root");
     throws([&] { layout::stage_dir(root, "../x"); }, "invalid version");
+    // installed_versions is semantic, not string order (0.4.10 after 0.4.9).
+    const auto order = base/"order";
+    put(order/".kabus22-owned", "Kabus22 native installation 1\n");
+    put(order/"bin/kabus22", "flat", 0755);
+    layout::migrate_flat(order, "0.4.9");
+    layout::commit(order, stage(order, "0.4.10", "engine 0.4.10"), "0.4.10");
+    check(layout::installed_versions(order) == std::vector<std::string>{"0.4.9", "0.4.10"}, "installed versions in semantic order");
 }
 void versionChecks() {
     const char* order[] = {"0.9.0", "0.10.0", "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta",
