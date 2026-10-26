@@ -284,7 +284,7 @@ Measured 2026-10-10 on an RX 7900 XTX (RADV, Mesa 26.2.4): Demir in level5 (orig
 1920x1080, `--preset ultra` (MSAA 4, PBR, RT shadows/GI/rough reflections, denoise, bloom, TAA, volumetric fog,
 smooth normals, tessellation), immediate present, nested in a headless gamescope. `K22_GPU_TIMING=1` writes Vulkan
 timestamps between the renderer's passes and CPU frame times to stderr, averaged over 300 frames (`K22_FRAME_TIMING=FILE`
-writes one line per frame on any backend: frame, poll+scenario, tick, draw and finish_frame microseconds, live particles). GPU ms per pass:
+writes one line per frame on any backend: frame, poll+scenario, tick, draw and finish_frame microseconds, live particles, seamless-door phase and held flag). GPU ms per pass:
 
 | Pass | RT before | RT `fsr=off` | RT `fsr=quality` (ultra) | raster before | raster `fsr=off` | raster `fsr=quality` |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |

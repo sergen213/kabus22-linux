@@ -250,6 +250,7 @@ public:
     void rumble(int pad, float strength, std::uint32_t milliseconds = 250); // Game controller slot `pad`; empty slots and pads without rumble ignore it.
     void request_quit();
     void release_scene(const Model* keep = nullptr); // keep: this model's GPU mesh and textures survive (seamless door world)
+    void release_scene(std::span<const Model* const> keep); // also persistent entities' models (no re-upload after a level load)
     void purge_model(const Model* model);
     void purge_image(const Image* image);
     int shader_version() const;

@@ -2574,7 +2574,10 @@ void Engine::load_level(Runtime& runtime,std::string_view filename) {
  draws_.clear();shadows_.clear();particles_.clear();lights_.clear();frame_={};world=nullptr;
  entityLightSlots_={};
  for(auto& [id,data]:entities)if(!data.ownedModel){data.model=nullptr;data.light.dirty=true;}
- if(renderer)renderer->release_scene(keep?&keep->mesh:nullptr);meshOverrides.clear();queryActors_.clear();queryGeometry_.clear();assets.release_level(keep?std::string_view(level):std::string_view{});
+ // Persistent entities' models (and planar-shadow LODs) stay decoded and uploaded; the door world, if any, as well.
+ std::vector<const Model*> persistent;for(auto& [id,data]:entities)if(!data.ownedModel&&data.type&&data.type!=4&&!data.file.empty())if(auto* m=assets.find_model(data.file)){persistent.push_back(m);for(const Model* lod:m->shadowLods)if(lod)persistent.push_back(lod);}
+ if(keep)persistent.push_back(&keep->mesh);
+ if(renderer)renderer->release_scene(persistent);meshOverrides.clear();queryActors_.clear();queryGeometry_.clear();assets.release_level(keep?std::string_view(level):std::string_view{},persistent);
  for(auto& [id,data]:entities)if(!data.ownedModel&&data.type&&!data.file.empty())data.model=data.type==4?&assets.world(data.file).mesh:&assets.model(data.file);
  set_global("time_level",Value{});
  if(level.empty())return;
@@ -2663,7 +2666,7 @@ void Engine::load_level(Runtime& runtime,std::string_view filename) {
  physics.load_world();
  if(state.profile==SemanticProfile::BonusA7){prepare(runtime);viewsPrepared_=true;level_progress(runtime,0);level_progress(runtime,1);}
  if(state.profile==SemanticProfile::CampaignA6)apply_character_lock(runtime,actions);
- for(auto [id,action]:actions){auto* object=state.get(id);if(object&&object->alive)runtime.enqueue(action,{},id,0);}
+  for(auto [id,action]:actions){auto* object=state.get(id);if(object&&object->alive)runtime.enqueue(action,{},id,0);}
 }
 }
 

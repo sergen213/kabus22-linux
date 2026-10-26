@@ -342,6 +342,7 @@ std::shared_ptr<const Image> Assets::image_ptr(std::string_view name) {
     auto result=std::make_shared<const Image>(std::move(decoded));images_.emplace(normalized,result);return result;
 }
 const Image& Assets::image(std::string_view name){return *image_ptr(name);}
+const Model* Assets::find_model(std::string_view name) const {auto it=models_.find(safe_name(name));return it==models_.end()?nullptr:&it->second;}
 const Model& Assets::model(std::string_view name) {return *load_model(name,true);}
 const Model* Assets::load_model(std::string_view name,bool initializeShadowResources) {
     auto normalized=safe_name(name);if(auto it=models_.find(normalized);it!=models_.end())return &it->second;
@@ -399,20 +400,41 @@ bool Assets::purge_model(std::string_view name) {
     for(const auto&[key,value]:worlds_){footprint+=world_bytes(value);modelImages(value.mesh);for(const auto&lm:value.lightmaps)image(lm);}
     cachedBytes_=footprint;return true;
 }
-void Assets::release_level(std::string_view keepWorld) {
+void Assets::release_level(std::string_view keepWorld,std::span<const Model* const> keepModels) {
     const auto keep=keepWorld.empty()?std::string{}:safe_name(keepWorld);
     std::erase_if(worlds_,[&](const auto& entry){return entry.first!=keep;});
-    models_.clear();
+    // Persistent entities' models are immutable decodes: re-decoding them on every level load cost ~85 ms (node map: addresses stay valid).
+    std::unordered_set<const Model*> kept;
+    for(const Model* m:keepModels)if(m&&kept.insert(m).second)for(const Model* lod:m->shadowLods)if(lod)kept.insert(lod);
+    std::erase_if(models_,[&](const auto& entry){return !kept.contains(&entry.second);});
     cachedBytes_=0;
     for(const auto&[name,image]:images_)cachedBytes_+=image->rgba.size();
+    for(const auto&[name,value]:models_)cachedBytes_+=model_bytes(value);
     for(const auto&[name,value]:worlds_)cachedBytes_+=world_bytes(value);
+    // The kept world's prefetched entity models join the cache (node moves keep shadow LOD addresses); a name already
+    // cached keeps its decode and adopted LODs that pointed at the duplicate are redirected to it.
+    if(auto it=prefetchedModels_.find(keep);it!=prefetchedModels_.end()) {
+        auto& pending=it->second;std::unordered_map<const Model*,const Model*> remap;std::vector<Model*> adopted;
+        for(auto entry=pending.begin();entry!=pending.end();) {
+            auto current=entry++;
+            if(auto existing=models_.find(current->first);existing!=models_.end()){remap[&current->second]=&existing->second;continue;}
+            Model* m=&current->second;models_.insert(pending.extract(current));adopted.push_back(m);cachedBytes_+=model_bytes(*m);
+        }
+        for(Model* m:adopted)for(auto& lod:m->shadowLods)if(auto r=remap.find(lod);r!=remap.end())lod=r->second;
+    }
+    prefetchedModels_.clear();
     // Finished prefetches are dropped; running ones complete in the background and are adopted or dropped later.
     std::erase_if(prefetches_,[&](const auto& entry){return entry.first!=keep&&entry.second.wait_for(std::chrono::seconds(0))==std::future_status::ready;});
 }
 const World& Assets::world(std::string_view name) {
     auto normalized=safe_name(name);if(auto it=worlds_.find(normalized);it!=worlds_.end())return it->second;
     if(auto it=prefetches_.find(normalized);it!=prefetches_.end()) {
-        auto future=std::move(it->second);prefetches_.erase(it);World value=std::move(*future.get());
+        auto future=std::move(it->second);prefetches_.erase(it);auto& done=*future.get();World value=std::move(done.world);
+        // Entity models/images decoded under other alpha-depth settings are not used (the main thread decodes them again).
+        if(done.alphaDepth==nativeAlphaDepth_) {
+            for(auto& [key,image]:done.images)if(images_.emplace(key,image).second)charge(cachedBytes_,image->rgba.size());
+            prefetchedModels_[normalized]=std::move(done.models);
+        }
         charge(cachedBytes_,world_bytes(value));auto&stored=worlds_.emplace(normalized,std::move(value)).first->second;stored.mesh.nativeWorld=&stored;return stored;
     }
     const auto before=cachedBytes_,imageBefore=image_cache_bytes(images_);
@@ -428,17 +450,29 @@ bool Assets::prefetch_world(std::string_view name) {
         world(name);return true;
     }
     // The worker owns a snapshot without the decoded levels (node-based maps: moving them keeps World addresses stable).
-    auto worlds=std::move(worlds_);auto models=std::move(models_);auto prefetches=std::move(prefetches_);worlds_.clear();models_.clear();prefetches_.clear();
+    auto worlds=std::move(worlds_);auto models=std::move(models_);auto prefetches=std::move(prefetches_);auto pending=std::move(prefetchedModels_);worlds_.clear();models_.clear();prefetches_.clear();prefetchedModels_.clear();
     auto worker=std::make_shared<Assets>(*this);
-    worlds_=std::move(worlds);models_=std::move(models);prefetches_=std::move(prefetches);
+    worlds_=std::move(worlds);models_=std::move(models);prefetches_=std::move(prefetches);prefetchedModels_=std::move(pending);
     prefetches_.emplace(normalized,std::async(std::launch::async,[worker,file=std::string(name)]{
-        auto bytes=worker->read(file);auto value=std::make_shared<World>(worker->decode_world(bytes,file));source_render_links(value->mesh);return value;}).share());
+        auto bytes=worker->read(file);auto value=std::make_shared<Prefetched>();value->world=worker->decode_world(bytes,file);source_render_links(value->world.mesh);
+        // The level's placed entity models and sprite images too (load_entity_asset), so the swap does not decode them; a failure is
+        // left to the real load on the main thread, which reports it.
+        const auto known=worker->images_;
+        for(const auto& e:value->world.entities) {
+            if(e.type==4||e.file.empty())continue;auto dot=e.file.find_last_of('.');if(dot==std::string::npos)continue;
+            std::string ext=e.file.substr(dot);for(auto& c:ext)c=char(std::tolower((unsigned char)c));
+            try{if(ext==".mdl"||ext==".hmp")worker->model(e.file);else if(ext==".pcx"||ext==".tga"||ext==".bmp"||ext==".png"||ext==".jpg"||ext==".jpeg"||ext==".dds")worker->image_ptr(e.file);}catch(...){}
+        }
+        value->models=std::move(worker->models_);value->alphaDepth=worker->nativeAlphaDepth_;
+        for(auto& [key,image]:worker->images_)if(!known.contains(key))value->images.emplace(key,image);
+        return value;}).share());
     return false;
 }
 void Assets::drop_world(std::string_view name) {
     auto normalized=safe_name(name);
     if(auto it=worlds_.find(normalized);it!=worlds_.end()){cachedBytes_-=std::min(cachedBytes_,world_bytes(it->second));worlds_.erase(it);}
     if(auto it=prefetches_.find(normalized);it!=prefetches_.end()&&it->second.wait_for(std::chrono::seconds(0))==std::future_status::ready)prefetches_.erase(it);
+    prefetchedModels_.erase(normalized);
 }
 
 std::shared_ptr<const Image> Assets::embedded_image(std::span<const uint8_t> bytes,size_t&position,uint32_t type,uint32_t width,uint32_t height) {

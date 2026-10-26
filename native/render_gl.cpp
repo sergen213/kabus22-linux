@@ -1237,14 +1237,14 @@ void GLBackend::purge_model(const Model*model){
         if(material.lightmap&&material.lightmap.use_count()==1)purge_image(material.lightmap.get());
     }
 }
-void GLBackend::release_scene(const Model* keep){
+void GLBackend::release_scene(std::span<const Model* const> keep){
     auto&i=*impl_;
     i.drain_completion();
     i.retainedColorValid=i.portalColorValid=false;
     // keep (seamless door world becoming the level) retains its mesh and every image its materials reference, with derived warps/skies.
     std::unordered_set<const Image*> kept;
-    if(keep)for(const auto&material:keep->materials){kept.insert(material.texture.get());kept.insert(material.lightmap.get());}
-    std::erase_if(i.meshes,[&](auto&entry){if(entry.first==keep)return false;auto&m=entry.second;glDeleteVertexArrays(1,&m.vao);glDeleteBuffers(1,&m.vertices);glDeleteBuffers(1,&m.indices);glDeleteBuffers(1,&m.tangents);glDeleteBuffers(1,&m.poseBuffer);glDeleteTextures(1,&m.poses);return true;});
+    for(const Model*model:keep)if(model)for(const auto&material:model->materials){kept.insert(material.texture.get());kept.insert(material.lightmap.get());}
+    std::erase_if(i.meshes,[&](auto&entry){if(std::find(keep.begin(),keep.end(),entry.first)!=keep.end())return false;auto&m=entry.second;glDeleteVertexArrays(1,&m.vao);glDeleteBuffers(1,&m.vertices);glDeleteBuffers(1,&m.indices);glDeleteBuffers(1,&m.tangents);glDeleteBuffers(1,&m.poseBuffer);glDeleteTextures(1,&m.poses);return true;});
     for(auto&[key,m]:i.overrides)release_override(m);
     i.overrides.clear();
     i.lightData.clear();

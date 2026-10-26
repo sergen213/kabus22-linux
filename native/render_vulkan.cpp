@@ -695,7 +695,7 @@ void VulkanBackend::draw(const RenderFrame& frame,WindowMetrics metrics) {
 void VulkanBackend::capture(std::string_view path,WindowMetrics metrics)const{state_->readback(path,metrics);}
 void VulkanBackend::drain(){state_->drain();}
 void VulkanBackend::invalidate(){state_->invalidate();}
-void VulkanBackend::release_scene(const Model* keep){state_->drain();vk22::raster_release(*state_->raster,keep);vk22::rt_release(*state_->rays,keep);state_->retainedColorValid=false;state_->portalColorValid=false;}
+void VulkanBackend::release_scene(std::span<const Model* const> keep){state_->drain();vk22::raster_release(*state_->raster,keep);vk22::rt_release(*state_->rays,keep);state_->retainedColorValid=false;state_->portalColorValid=false;}
 void VulkanBackend::purge_model(const Model* model) {
     state_->drain();
     vk22::raster_purge_model(*state_->raster,model);

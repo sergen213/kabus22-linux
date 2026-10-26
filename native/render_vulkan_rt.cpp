@@ -291,8 +291,8 @@ void rt_replace_texture(RayTracing& rt,VkImageView oldView,VkImageView newView){
 VkDescriptorSetLayout rt_layout(const RayTracing& rt){return rt.layout;}
 VkDescriptorSet rt_set(const RayTracing& rt){return rt.slots[rt.s.slotIndex].set;}
 // keep (seamless door world, render.hpp DoorPortal): its model data, GPU poses and their BLAS survive; scenes never do.
-void rt_release(RayTracing& rt,const Model* keep){
-    auto drop=[&](const Model* model){return !keep||model!=keep;};
+void rt_release(RayTracing& rt,std::span<const Model* const> keep){
+    auto drop=[&](const Model* model){return std::find(keep.begin(),keep.end(),model)==keep.end();};
     for(auto& slot:rt.slots){
         std::erase_if(slot.blas,[&](Blas& b){if(!drop(b.pose->model))return false;rt.destroy(b.acceleration);return true;});
         slot.blasLookup.clear();for(std::size_t i=0;i<slot.blas.size();++i)slot.blasLookup[slot.blas[i].pose].push_back(i);

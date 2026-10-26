@@ -161,9 +161,9 @@ struct Raster {
         if(all){for(auto&v:fx.faces)dropView(v);drop(fx.sun);drop(fx.cube);}
     }
     // keep (seamless door world, render.hpp DoorPortal): its mesh and the textures/lightmaps its materials name survive.
-    void release(const Model*keep=nullptr){
-        std::unordered_set<const k22::Image*>kept;if(keep)for(auto&mat:keep->materials)for(auto*image:{mat.texture.get(),mat.lightmap.get()})if(image)kept.insert(image);
-        fx.fsrValid=false;std::erase_if(meshes,[&](auto&e){if(e.first==keep)return false;s.destroy(e.second.indices);return true;});
+    void release(std::span<const Model* const> keep={}){
+        std::unordered_set<const k22::Image*>kept;for(const Model*model:keep)if(model)for(auto&mat:model->materials)for(auto*image:{mat.texture.get(),mat.lightmap.get()})if(image)kept.insert(image);
+        fx.fsrValid=false;std::erase_if(meshes,[&](auto&e){if(std::find(keep.begin(),keep.end(),e.first)!=keep.end())return false;s.destroy(e.second.indices);return true;});
         std::erase_if(textures,[&](auto&e){if(kept.contains(e.first))return false;for(auto&t:e.second){s.destroy(t.image);s.destroy(t.normal);s.destroy(t.orm);}return true;});
         std::erase_if(warps,[&](auto&e){if(kept.contains(e.first))return false;s.destroy(e.second.image);return true;});std::erase_if(turbulent,[&](auto*image){return !kept.contains(image);});
         std::erase_if(skies,[&](auto&e){if(kept.contains(e.first))return false;s.destroy(e.second.image);return true;});
@@ -884,7 +884,7 @@ void RasterDelete::operator()(Raster*r)const{raster_destroy(r);}
 std::unique_ptr<Raster,RasterDelete> raster_create(VulkanBackend::State&s){return std::unique_ptr<Raster,RasterDelete>(new Raster(s));}
 void raster_destroy(Raster*r){delete r;}
 void raster_draw(Raster&r,const RenderFrame&f,WindowMetrics m){r.draw(f,m);}
-void raster_release(Raster&r,const Model*keep){r.release(keep);}
+void raster_release(Raster&r,std::span<const Model* const> keep){r.release(keep);}
 void raster_purge_model(Raster&r,const Model*model){auto it=r.meshes.find(model);if(it!=r.meshes.end()){r.s.destroy(it->second.indices);r.meshes.erase(it);}for(auto it=r.overrideBounds.begin();it!=r.overrideBounds.end();)if(it->second.model==model)it=r.overrideBounds.erase(it);else ++it;}
 void raster_purge_image(Raster&r,const k22::Image*image){for(auto&[id,effect]:r.effects)for(auto&bank:effect.banks)if(bank.identity==image)bank={};auto found=r.textures.find(image);if(found!=r.textures.end()){for(auto&t:found->second){r.s.destroy(t.image);r.s.destroy(t.normal);r.s.destroy(t.orm);}r.textures.erase(found);}auto warp=r.warps.find(image);if(warp!=r.warps.end()){r.s.destroy(warp->second.image);r.warps.erase(warp);}auto sky=r.skies.find(image);if(sky!=r.skies.end()){r.s.destroy(sky->second.image);r.skies.erase(sky);}r.turbulent.erase(image);}
 int raster_shader_version(const Raster&r){return r.shaders[0]&&r.shaders[1]?2020:0;}

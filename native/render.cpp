@@ -88,7 +88,8 @@ int Renderer::shader_version()const{return impl_->gl?impl_->gl->shader_version()
 PresentationState Renderer::presentation_state()const{return impl_->gl?impl_->gl->presentation_state():impl_->vk->presentation_state();}
 void Renderer::purge_model(const Model*model){if(impl_->gl)impl_->gl->purge_model(model);else impl_->vk->purge_model(model);}
 void Renderer::purge_image(const Image*image){if(impl_->gl)impl_->gl->purge_image(image);else impl_->vk->purge_image(image);}
-void Renderer::release_scene(const Model* keep){if(impl_->gl)impl_->gl->release_scene(keep);else impl_->vk->release_scene(keep);}
+void Renderer::release_scene(const Model* keep){release_scene(keep?std::span<const Model* const>(&keep,1):std::span<const Model* const>{});}
+void Renderer::release_scene(std::span<const Model* const> keep){if(impl_->gl)impl_->gl->release_scene(keep);else impl_->vk->release_scene(keep);}
 void Renderer::draw(const RenderFrame&frame){auto m=metrics();if(impl_->gl)impl_->gl->draw(frame,m);else impl_->vk->draw(frame,m);}
 void Renderer::capture(std::string_view path)const{auto m=metrics();if(impl_->gl)impl_->gl->capture(path,m);else impl_->vk->capture(path,m);}
 std::string Renderer::description()const{return impl_->gl?impl_->gl->description():impl_->vk->description();}

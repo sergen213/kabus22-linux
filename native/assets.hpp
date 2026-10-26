@@ -122,8 +122,10 @@ public:
     void purge_image(std::string_view name);
     // Caller retires all borrowed model/GPU references before purging.
     bool purge_model(std::string_view name);
+    const Model* find_model(std::string_view name) const; // cached decode or null; never loads
     // Invalidates decoded references; call only after scene/render teardown. keepWorld: one decoded world survives (seamless door destination).
-    void release_level(std::string_view keepWorld={});
+    // keepModels: models still used by entities that outlive the level (and their shadow LOD companions) stay decoded.
+    void release_level(std::string_view keepWorld={},std::span<const Model* const> keepModels={});
     // Seamless doors: decodes a WMB on a worker thread from a snapshot of this Assets (archives, decode settings, decoded
     // images); world() adopts the result (waiting if needed). True once the world is cached; decode errors surface there.
     bool prefetch_world(std::string_view name);
@@ -151,7 +153,10 @@ private:
     std::unordered_map<std::string,std::shared_ptr<const Image>> images_;
     std::unordered_map<std::string,Model> models_;
     std::unordered_map<std::string,World> worlds_;
-    std::unordered_map<std::string,std::shared_future<std::shared_ptr<World>>> prefetches_;
+    // Seamless door prefetch: the world plus its entities' models/images, decoded by a worker Assets snapshot.
+    struct Prefetched{World world;std::unordered_map<std::string,Model> models;std::unordered_map<std::string,std::shared_ptr<const Image>> images;double alphaDepth{};};
+    std::unordered_map<std::string,std::shared_future<std::shared_ptr<Prefetched>>> prefetches_;
+    std::unordered_map<std::string,std::unordered_map<std::string,Model>> prefetchedModels_; // by world; adopted when it becomes the level
     size_t cachedBytes_{};
 };
 }

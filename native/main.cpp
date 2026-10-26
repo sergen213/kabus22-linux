@@ -128,7 +128,8 @@ int main(int argc,char** argv){try{
  const double step=graphics.fpsLimit?double(k22::render_policy::frame_period_raw(graphics.fpsLimit,0))/1024000:1.0/60;
  while(!engine.quit&&(!frameLimit||count<frames)){
   // Scenarios use a fixed step (1/60 s, or the --graphics fps_limit period); "realtime on" paces it to the wall clock so movies/sounds keep their timing.
-  if(scenario?scenario->realtime():renderer!=nullptr){
+  // Seamless doors: held (unpresented) load ticks run back to back, so the swap costs their CPU time, not frame periods.
+  if((scenario?scenario->realtime():renderer!=nullptr)&&!engine.hold_presentation()){
    // A6 00414650: floor(1000*1024*1024 / max(FPS_MAX raw,1024)) raw milliseconds, unless fps_limit overrides it.
    // Frame generation presents two frames per rendered frame: a numeric fps_limit caps the presented rate (renders at half
    // of it); the script's own fps_max (original) keeps pacing the rendered game ticks.
@@ -138,7 +139,7 @@ int main(int argc,char** argv){try{
    // Anchor to the actual start, not completion or an overdue scheduled start.
    frameStart=std::chrono::steady_clock::now();
   }
-  // K22_FRAME_TIMING=FILE: one line per frame, microseconds: frame poll+scenario tick draw finish_frame, then live particles.
+  // K22_FRAME_TIMING=FILE: one line per frame, microseconds: frame poll+scenario tick draw finish_frame, then live particles, door phase, held (seamless doors).
   static std::FILE* timingLog=[]{const char* p=std::getenv("K22_FRAME_TIMING");return p&&*p?std::fopen(p,"w"):nullptr;}();
   const auto t0=timingLog?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
   if(renderer)renderer->poll(input);else input.dt=1.0/60;
@@ -150,7 +151,7 @@ int main(int argc,char** argv){try{
   if(renderer&&!engine.hold_presentation())renderer->draw(engine.frame());
   const auto t3=timingLog?std::chrono::steady_clock::now():t0;
   engine.finish_frame(runtime);++count;
-  if(timingLog){const auto t4=std::chrono::steady_clock::now();auto us=[](auto d){return (long long)std::chrono::duration_cast<std::chrono::microseconds>(d).count();};std::fprintf(timingLog,"%llu %lld %lld %lld %lld %zu\n",(unsigned long long)count-1,us(t1-t0),us(t2-t1),us(t3-t2),us(t4-t3),engine.activeParticles.size());}
+  if(timingLog){const auto t4=std::chrono::steady_clock::now();auto us=[](auto d){return (long long)std::chrono::duration_cast<std::chrono::microseconds>(d).count();};std::fprintf(timingLog,"%llu %lld %lld %lld %lld %zu %d %d\n",(unsigned long long)count-1,us(t1-t0),us(t2-t1),us(t3-t2),us(t4-t3),engine.activeParticles.size(),engine.door_phase(),int(engine.hold_presentation()));}
  }
  if(renderer&&!capture.empty())renderer->capture(capture.string());std::cout<<"Native frames="<<count<<" live_processes="<<runtime.processes()<<" entities="<<engine.entities.size()<<" save_root="<<engine.saveRoot.string()<<'\n';return scenario?scenario->finish(std::cout,count,engine.quit):0;
  }catch(const std::exception& e){std::cerr<<"kabus22: "<<e.what()<<'\n';return 1;}}
