@@ -125,27 +125,27 @@ def main() -> None:
         assert run(sys.executable, TOOLS / "make_update_manifest.py", "--tree", bad_tree, "--version", "9.9.9",
                    "--channel", "stable", "--output-dir", work / "refused", check=False).returncode
 
-        build("0.4.11", "stable", "good-0.4.11")
+        build("0.4.12", "stable", "good-0.4.12")
         build("0.5.0-beta.1", "experimental", "good-0.5.0-beta.1")
-        tampered = build("0.4.12", "stable", "bad-0.4.12")
-        payload = tampered / "kabus22-0.4.12-linux-x86_64.tar.gz"
+        tampered = build("0.4.13", "stable", "bad-0.4.13")
+        payload = tampered / "kabus22-0.4.13-linux-x86_64.tar.gz"
         payload.write_bytes(payload.read_bytes()[:-1] + bytes([payload.read_bytes()[-1] ^ 1]))
-        build("0.4.13", "stable", "bad-0.4.13", signer=wrong)
-        edited = build("0.4.14", "stable", "bad-0.4.14")
+        build("0.4.14", "stable", "bad-0.4.14", signer=wrong)
+        edited = build("0.4.15", "stable", "bad-0.4.15")
         (edited / "kabus22-update.json").write_text((edited / "kabus22-update.json").read_text().replace("2.38", "2.17"))
-        build("0.4.15", "experimental", "bad-0.4.15")
-        handmade("0.4.16", "bad-0.4.16", [("bin/kabus22", b"x"), ("bin/kabus22-launcher", b"x"), ("bin/kabus22-setup", b"x"), ("bin/kabus22-updater", b"x"),
+        build("0.4.16", "experimental", "bad-0.4.16")
+        handmade("0.4.17", "bad-0.4.17", [("bin/kabus22", b"x"), ("bin/kabus22-launcher", b"x"), ("bin/kabus22-setup", b"x"), ("bin/kabus22-updater", b"x"),
                                          ("../escaped", b"x")])
-        handmade("0.4.17", "bad-0.4.17", [("bin/kabus22", b"x"), ("bin/kabus22-launcher", b"x"), ("bin/kabus22-setup", b"x"), ("bin/kabus22-updater", b"x")],
-                 manifest_version="0.4.11")
+        handmade("0.4.18", "bad-0.4.18", [("bin/kabus22", b"x"), ("bin/kabus22-launcher", b"x"), ("bin/kabus22-setup", b"x"), ("bin/kabus22-updater", b"x")],
+                 manifest_version="0.4.12")
 
         handler = functools.partial(Quiet, directory=str(server))
         httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         port = httpd.server_address[1]
-        good = [release("0.4.11", False, port, "good-0.4.11", payload_names("0.4.11")),
+        good = [release("0.4.12", False, port, "good-0.4.12", payload_names("0.4.12")),
                 release("0.5.0-beta.1", True, port, "good-0.5.0-beta.1", payload_names("0.5.0-beta.1"))]
         bad = [release(version, False, port, "bad-" + version, payload_names(version))
-               for version in ("0.4.12", "0.4.13", "0.4.14", "0.4.15", "0.4.16", "0.4.17")]
+               for version in ("0.4.13", "0.4.14", "0.4.15", "0.4.16", "0.4.17", "0.4.18")]
         for repository, releases in (("o/n", good), ("o/bad", bad)):
             (server / "repos" / repository).mkdir(parents=True)
             (server / "repos" / repository / "releases").write_text(json.dumps(releases))
@@ -174,14 +174,14 @@ def main() -> None:
                 return run(testhttp, "--install-dir", root, *args, check=check, env=env)
 
             for binary in (testhttp, shipped):
-                assert run(binary, "--version").stdout.startswith("kabus22 native updater 0.4.10")
+                assert run(binary, "--version").stdout.startswith("kabus22 native updater 0.4.11")
                 assert "--rollback" in run(binary, "--help").stdout
             assert b"KABUS22_UPDATER_TEST_API" not in shipped.read_bytes() and b"KABUS22_UPDATER_TEST_API" in testhttp.read_bytes()
             assert run(shipped, "--install-dir", root, "--check", "--repository", "bad", check=False).returncode == 2
 
             check = json.loads(updater("--check", "--json").stdout)
-            assert check == {"current": "0.4.10", "latest": "0.4.11", "channel": "stable", "update_available": True,
-                             "notes": "Notes for 0.4.11", "published": "2026-10-09T00:00:00Z", "repository": "o/n"}, check
+            assert check == {"current": "0.4.11", "latest": "0.4.12", "channel": "stable", "update_available": True,
+                             "notes": "Notes for 0.4.12", "published": "2026-10-09T00:00:00Z", "repository": "o/n"}, check
             assert json.loads(updater("--check", "--json", "--channel", "experimental").stdout)["latest"] == "0.5.0-beta.1"
             assert "update available" in updater("--check").stdout
 
@@ -189,19 +189,19 @@ def main() -> None:
             lines = [line for line in applied.stdout.splitlines() if line.startswith("progress ")]
             assert lines[0].startswith("progress 0 ") and lines[-1].startswith("progress 100 "), applied.stdout
             assert all(0 <= int(line.split()[1]) <= 100 for line in lines)
-            assert os.readlink(root / "current") == "versions/0.4.11" and os.readlink(root / "bin") == "current/bin"
-            assert "kabus22 0.4.11" in run(root / "bin/kabus22").stdout
-            assert (root / "versions/0.4.10/bin/kabus22").read_text() == "legacy kabus22"
-            inventory = json.loads((root / "versions/0.4.11/.kabus22-payload.json").read_text())
-            assert inventory["version"] == "0.4.11" and any(item["path"] == "bin/kabus22-updater" for item in inventory["files"])
-            assert json.loads(updater("--status").stdout) == {"active": "0.4.11", "previous": "0.4.10", "installed": ["0.4.10", "0.4.11"]}
+            assert os.readlink(root / "current") == "versions/0.4.12" and os.readlink(root / "bin") == "current/bin"
+            assert "kabus22 0.4.12" in run(root / "bin/kabus22").stdout
+            assert (root / "versions/0.4.11/bin/kabus22").read_text() == "legacy kabus22"
+            inventory = json.loads((root / "versions/0.4.12/.kabus22-payload.json").read_text())
+            assert inventory["version"] == "0.4.12" and any(item["path"] == "bin/kabus22-updater" for item in inventory["files"])
+            assert json.loads(updater("--status").stdout) == {"active": "0.4.12", "previous": "0.4.11", "installed": ["0.4.11", "0.4.12"]}
             assert snapshot(root) == untouched
             assert "Already up to date" in updater("--apply").stdout
 
             before = full(root)
-            for version, reason in (("0.4.12", "SHA-256 mismatch"), ("0.4.13", "signature is invalid"),
-                                    ("0.4.14", "signature is invalid"), ("0.4.15", "not a stable release"),
-                                    ("0.4.16", "Unsafe payload path"), ("0.4.17", "does not match release")):
+            for version, reason in (("0.4.13", "SHA-256 mismatch"), ("0.4.14", "signature is invalid"),
+                                    ("0.4.15", "signature is invalid"), ("0.4.16", "not a stable release"),
+                                    ("0.4.17", "Unsafe payload path"), ("0.4.18", "does not match release")):
                 result = updater("--apply", "--repository", "o/bad", "--version", version, check=False)
                 assert result.returncode == 1 and reason in result.stderr, (version, result.stdout, result.stderr)
                 assert full(root) == before, f"{version} changed the installation"
@@ -209,10 +209,10 @@ def main() -> None:
 
             updater("--apply", "--channel", "experimental")
             status = json.loads(updater("--status").stdout)
-            assert status == {"active": "0.5.0-beta.1", "previous": "0.4.11", "installed": ["0.4.11", "0.5.0-beta.1"]}, status
-            assert "0.5.0-beta.1 -> 0.4.11" in updater("--rollback").stdout
-            assert "kabus22 0.4.11" in run(root / "bin/kabus22").stdout
-            assert json.loads(run(shipped, "--install-dir", root, "--status", env=env).stdout)["active"] == "0.4.11"
+            assert status == {"active": "0.5.0-beta.1", "previous": "0.4.12", "installed": ["0.4.12", "0.5.0-beta.1"]}, status
+            assert "0.5.0-beta.1 -> 0.4.12" in updater("--rollback").stdout
+            assert "kabus22 0.4.12" in run(root / "bin/kabus22").stdout
+            assert json.loads(run(shipped, "--install-dir", root, "--status", env=env).stdout)["active"] == "0.4.12"
             assert snapshot(root) == untouched
         finally:
             httpd.shutdown()
