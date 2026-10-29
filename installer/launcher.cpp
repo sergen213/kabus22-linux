@@ -1,16 +1,22 @@
 #include "launcher_settings.hpp"
 #include "layout.hpp"
 #include "wizard_style.hpp"
+#include "cgltf.h"
+#include <epoxy/gl.h>
 #include <gtk/gtk.h>
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cerrno>
 #include <cmath>
 #include <csignal>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <map>
+#include <set>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -69,6 +75,123 @@ template<class F> GtkWidget* button(const char* label,gpointer data,F) {
 }
 fs::path tools() {return fs::read_symlink("/proc/self/exe").parent_path();}
 constexpr const char* padLabels[]={"A","B","X","Y","Left shoulder","Right shoulder","Left trigger","Right trigger","Back / View","Start / Menu","Guide","Left stick press","Right stick press","D-pad up","D-pad down","D-pad left","D-pad right","Misc / Share","Paddle 1","Paddle 2","Paddle 3","Paddle 4","Touchpad"};
+// Mods page 3-D viewer: one glTF (the engine's --export-model output) with node transforms, base colour texture × factor,
+// smooth normals and a head light. Frame k = rest + morph target k, blended on the CPU. ponytail: BLEND materials draw opaque.
+struct Viewer {
+    struct Part {std::vector<float> rest,uv;std::vector<std::vector<float>> deltas;std::vector<unsigned> index;GdkPixbuf* image=nullptr;std::array<float,4> color{1,1,1,1};float cutoff=-1;GLuint vao=0,vbo=0,ebo=0,tex=0;};
+    GtkWidget* area=nullptr;std::vector<Part> parts;std::vector<std::string> frames;std::size_t vertices=0,triangles=0;std::array<float,3> center{};float radius=1;
+    GLuint program=0,white=0;int frame=-1;bool upload=false,dirty=false,drag=false;double yaw=0.6,pitch=0.25,zoom=1.25,x=0,y=0;
+    void reset(){yaw=0.6;pitch=0.25;zoom=1.25;}
+    void release(){for(auto& p:parts){glDeleteVertexArrays(1,&p.vao);glDeleteBuffers(1,&p.vbo);glDeleteBuffers(1,&p.ebo);glDeleteTextures(1,&p.tex);p.vao=p.vbo=p.ebo=p.tex=0;}upload=true;}
+    void clear(){
+        if(area&&gtk_widget_get_realized(area)){gtk_gl_area_make_current(GTK_GL_AREA(area));if(!gtk_gl_area_get_error(GTK_GL_AREA(area)))release();}
+        for(auto& p:parts){if(p.image)g_object_unref(p.image);}
+        parts.clear();frames.clear();vertices=triangles=0;frame=-1;
+    }
+    static GdkPixbuf* image(const cgltf_image& image,const fs::path& file) {
+        GdkPixbuf* loaded=nullptr;
+        if(image.uri&&!std::string_view(image.uri).starts_with("data:")){std::string uri=image.uri;uri.resize(cgltf_decode_uri(uri.data()));loaded=gdk_pixbuf_new_from_file((file.parent_path()/uri).c_str(),nullptr);}
+        else if(image.buffer_view&&image.buffer_view->buffer->data){
+            auto* loader=gdk_pixbuf_loader_new();const auto* bytes=static_cast<const guchar*>(image.buffer_view->buffer->data)+image.buffer_view->offset;
+            if(gdk_pixbuf_loader_write(loader,bytes,image.buffer_view->size,nullptr)&&gdk_pixbuf_loader_close(loader,nullptr)&&gdk_pixbuf_loader_get_pixbuf(loader))loaded=GDK_PIXBUF(g_object_ref(gdk_pixbuf_loader_get_pixbuf(loader)));
+            else gdk_pixbuf_loader_close(loader,nullptr);
+            g_object_unref(loader);
+        }
+        if(!loaded)return nullptr;
+        auto* rgba=gdk_pixbuf_add_alpha(loaded,false,0,0,0);g_object_unref(loaded);return rgba;
+    }
+    void load(const fs::path& file) {
+        cgltf_options options{};cgltf_data* data=nullptr;
+        if(cgltf_parse_file(&options,file.c_str(),&data)!=cgltf_result_success)throw std::runtime_error("Cannot read "+file.string());
+        std::unique_ptr<cgltf_data,decltype(&cgltf_free)> owned(data,cgltf_free);
+        if(cgltf_load_buffers(&options,data,file.c_str())!=cgltf_result_success||cgltf_validate(data)!=cgltf_result_success)throw std::runtime_error("Cannot load the buffers of "+file.string());
+        std::vector<std::pair<const cgltf_mesh*,std::array<float,16>>> meshes;
+        for(std::size_t n=0;n<data->nodes_count;++n)if(data->nodes[n].mesh){std::array<float,16> m;cgltf_node_transform_world(&data->nodes[n],m.data());meshes.emplace_back(data->nodes[n].mesh,m);}
+        if(meshes.empty())for(std::size_t m=0;m<data->meshes_count;++m)meshes.emplace_back(&data->meshes[m],std::array<float,16>{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1});
+        clear();float lo[3],hi[3];for(int a=0;a<3;++a){lo[a]=std::numeric_limits<float>::max();hi[a]=-lo[a];}
+        auto unpack=[](const cgltf_accessor* a,std::size_t width){std::vector<float> v(a->count*width);cgltf_accessor_unpack_floats(a,v.data(),v.size());return v;};
+        auto find=[](const cgltf_attribute* list,std::size_t count,cgltf_attribute_type type,int index)->const cgltf_accessor*{for(std::size_t a=0;a<count;++a)if(list[a].type==type&&list[a].index==index)return list[a].data;return nullptr;};
+        for(const auto& [mesh,m]:meshes){
+            if(frames.empty())for(std::size_t t=0;t<mesh->target_names_count;++t)frames.emplace_back(mesh->target_names[t]);
+            for(std::size_t i=0;i<mesh->primitives_count;++i){
+                const auto& prim=mesh->primitives[i];const auto* position=find(prim.attributes,prim.attributes_count,cgltf_attribute_type_position,0);
+                if(prim.type!=cgltf_primitive_type_triangles||!position||!position->count)continue;
+                Part part;const auto count=position->count;part.rest=unpack(position,3);
+                for(std::size_t v=0;v<count;++v){float* p=&part.rest[v*3];float q[3];for(int a=0;a<3;++a){q[a]=m[a]*p[0]+m[4+a]*p[1]+m[8+a]*p[2]+m[12+a];lo[a]=std::min(lo[a],q[a]);hi[a]=std::max(hi[a],q[a]);}std::copy(q,q+3,p);}
+                const auto* uv=find(prim.attributes,prim.attributes_count,cgltf_attribute_type_texcoord,0);part.uv=uv&&uv->count==count?unpack(uv,2):std::vector<float>(count*2,0.f);
+                for(std::size_t t=0;t<prim.targets_count;++t){
+                    const auto* d=find(prim.targets[t].attributes,prim.targets[t].attributes_count,cgltf_attribute_type_position,0);auto delta=d&&d->count==count?unpack(d,3):std::vector<float>(count*3,0.f);
+                    for(std::size_t v=0;v<count;++v){float* p=&delta[v*3];float q[3];for(int a=0;a<3;++a)q[a]=m[a]*p[0]+m[4+a]*p[1]+m[8+a]*p[2];std::copy(q,q+3,p);}
+                    part.deltas.push_back(std::move(delta));
+                }
+                if(prim.indices)for(std::size_t k=0;k+2<prim.indices->count;++k)part.index.push_back(static_cast<unsigned>(cgltf_accessor_read_index(prim.indices,k)));
+                else for(unsigned k=0;k<count;++k)part.index.push_back(k);
+                part.index.resize(part.index.size()/3*3);if(std::any_of(part.index.begin(),part.index.end(),[&](unsigned k){return k>=count;}))continue;
+                if(const auto* material=prim.material){
+                    if(material->has_pbr_metallic_roughness){const auto& pbr=material->pbr_metallic_roughness;std::copy(pbr.base_color_factor,pbr.base_color_factor+4,part.color.begin());
+                        if(pbr.base_color_texture.texture&&pbr.base_color_texture.texture->image)part.image=image(*pbr.base_color_texture.texture->image,file);}
+                    if(material->alpha_mode==cgltf_alpha_mode_mask)part.cutoff=material->alpha_cutoff;
+                }
+                vertices+=count;triangles+=part.index.size()/3;parts.push_back(std::move(part));
+            }
+        }
+        if(parts.empty())throw std::runtime_error(file.string()+" has no triangle mesh");
+        std::size_t targets=parts[0].deltas.size();for(const auto& p:parts)targets=std::min(targets,p.deltas.size());
+        frames.resize(targets);for(std::size_t t=0;t<targets;++t)if(frames[t].empty())frames[t]="frame "+std::to_string(t);
+        for(int a=0;a<3;++a){center[a]=(lo[a]+hi[a])/2;}
+        radius=std::max(1e-3f,std::hypot(hi[0]-lo[0],hi[1]-lo[1],hi[2]-lo[2])/2);
+        frame=targets?0:-1;upload=dirty=true;
+    }
+    void realize() {
+        auto shader=[](GLenum kind,const char* text){auto s=glCreateShader(kind);glShaderSource(s,1,&text,nullptr);glCompileShader(s);return s;};
+        auto vs=shader(GL_VERTEX_SHADER,"#version 150\nin vec3 position;in vec3 normal;in vec2 uv;uniform mat4 mvp;uniform mat3 rotation;out vec3 n;out vec2 t;\n"
+            "void main(){gl_Position=mvp*vec4(position,1.0);n=rotation*normal;t=uv;}\n");
+        auto fs=shader(GL_FRAGMENT_SHADER,"#version 150\nin vec3 n;in vec2 t;uniform sampler2D image;uniform vec4 color;uniform float cutoff;out vec4 result;\n"
+            "void main(){vec4 c=texture(image,t)*color;if(c.a<cutoff)discard;float l=abs(dot(normalize(n),normalize(vec3(0.3,0.5,1.0))));result=vec4(c.rgb*(0.3+0.7*l),1.0);}\n");
+        program=glCreateProgram();glAttachShader(program,vs);glAttachShader(program,fs);
+        glBindAttribLocation(program,0,"position");glBindAttribLocation(program,1,"normal");glBindAttribLocation(program,2,"uv");glLinkProgram(program);glDeleteShader(vs);glDeleteShader(fs);
+        const unsigned char pixel[4]{255,255,255,255};glGenTextures(1,&white);glBindTexture(GL_TEXTURE_2D,white);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);upload=dirty=true;
+    }
+    void unrealize() {release();glDeleteProgram(program);glDeleteTextures(1,&white);program=white=0;}
+    void vertexData(Part& p) {
+        const auto count=p.rest.size()/3;std::vector<float> pos=p.rest,normal(count*3,0.f),out(count*8);
+        if(frame>=0)for(std::size_t i=0;i<pos.size();++i)pos[i]+=p.deltas[frame][i];
+        for(std::size_t t=0;t<p.index.size();t+=3){
+            const float *a=&pos[p.index[t]*3],*b=&pos[p.index[t+1]*3],*c=&pos[p.index[t+2]*3];float u[3],v[3];for(int k=0;k<3;++k){u[k]=b[k]-a[k];v[k]=c[k]-a[k];}
+            const float n[3]{u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]};for(int j=0;j<3;++j)for(int k=0;k<3;++k)normal[p.index[t+j]*3+k]+=n[k];
+        }
+        for(std::size_t v=0;v<count;++v){float* n=&normal[v*3];float l=std::hypot(n[0],n[1],n[2]);if(l<=0)l=1;
+            for(int k=0;k<3;++k){out[v*8+k]=pos[v*3+k];out[v*8+3+k]=n[k]/l;}out[v*8+6]=p.uv[v*2];out[v*8+7]=p.uv[v*2+1];}
+        glBindBuffer(GL_ARRAY_BUFFER,p.vbo);glBufferData(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(out.size()*sizeof(float)),out.data(),GL_DYNAMIC_DRAW);
+    }
+    void render(int width,int height) {
+        glViewport(0,0,width,height);glClearColor(0.16f,0.17f,0.19f,1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);if(parts.empty()||!program)return;
+        if(upload)for(auto& p:parts){
+            glGenVertexArrays(1,&p.vao);glGenBuffers(1,&p.vbo);glGenBuffers(1,&p.ebo);glBindVertexArray(p.vao);glBindBuffer(GL_ARRAY_BUFFER,p.vbo);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,p.ebo);glBufferData(GL_ELEMENT_ARRAY_BUFFER,static_cast<GLsizeiptr>(p.index.size()*sizeof(unsigned)),p.index.data(),GL_STATIC_DRAW);
+            for(GLuint a=0;a<3;++a){glEnableVertexAttribArray(a);glVertexAttribPointer(a,a==2?2:3,GL_FLOAT,GL_FALSE,8*sizeof(float),reinterpret_cast<const void*>(std::size_t(a==0?0:a==1?3:6)*sizeof(float)));}
+            if(p.image){glGenTextures(1,&p.tex);glBindTexture(GL_TEXTURE_2D,p.tex);glPixelStorei(GL_UNPACK_ALIGNMENT,1);glPixelStorei(GL_UNPACK_ROW_LENGTH,gdk_pixbuf_get_rowstride(p.image)/4);
+                glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,gdk_pixbuf_get_width(p.image),gdk_pixbuf_get_height(p.image),0,GL_RGBA,GL_UNSIGNED_BYTE,gdk_pixbuf_get_pixels(p.image));glPixelStorei(GL_UNPACK_ROW_LENGTH,0);
+                glGenerateMipmap(GL_TEXTURE_2D);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR_MIPMAP_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);}
+        }
+        if(upload||dirty)for(auto& p:parts)vertexData(p);
+        upload=dirty=false;
+        // Column-major: view = translate(0,0,-distance) · rotateX(pitch) · rotateY(yaw) · translate(-center).
+        const float cy=std::cos(float(yaw)),sy=std::sin(float(yaw)),cp=std::cos(float(pitch)),sp=std::sin(float(pitch));
+        const float r[9]{cy,sp*sy,-cp*sy, 0,cp,sp, sy,-sp*cy,cp*cy};
+        const float distance=radius/std::tan(0.4f)*float(zoom),nearZ=std::max(distance-radius*2,distance*0.01f),farZ=distance+radius*2,f=1/std::tan(0.4f),aspect=float(width)/float(std::max(height,1));
+        float t[3];for(int k=0;k<3;++k)t[k]=-(r[k]*center[0]+r[3+k]*center[1]+r[6+k]*center[2]);t[2]-=distance;
+        const float view[16]{r[0],r[1],r[2],0,r[3],r[4],r[5],0,r[6],r[7],r[8],0,t[0],t[1],t[2],1};
+        const float proj[16]{f/aspect,0,0,0, 0,f,0,0, 0,0,(farZ+nearZ)/(nearZ-farZ),-1, 0,0,2*farZ*nearZ/(nearZ-farZ),0};
+        float mvp[16];for(int c=0;c<4;++c)for(int row=0;row<4;++row){mvp[c*4+row]=0;for(int k=0;k<4;++k)mvp[c*4+row]+=proj[k*4+row]*view[c*4+k];}
+        glEnable(GL_DEPTH_TEST);glDisable(GL_CULL_FACE);glUseProgram(program);
+        glUniformMatrix4fv(glGetUniformLocation(program,"mvp"),1,GL_FALSE,mvp);glUniformMatrix3fv(glGetUniformLocation(program,"rotation"),1,GL_FALSE,r);glUniform1i(glGetUniformLocation(program,"image"),0);
+        for(auto& p:parts){glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,p.tex?p.tex:white);glUniform4fv(glGetUniformLocation(program,"color"),1,p.color.data());glUniform1f(glGetUniformLocation(program,"cutoff"),p.cutoff);
+            glBindVertexArray(p.vao);glDrawElements(GL_TRIANGLES,static_cast<GLsizei>(p.index.size()),GL_UNSIGNED_INT,nullptr);}
+        glBindVertexArray(0);
+    }
+};
 struct UI;
 // One child at a time: argv only (no shell), stdout/stderr drained by IO watches, optional private log file.
 struct Job {
@@ -93,6 +216,10 @@ struct UI {
     std::vector<std::pair<Option,GtkWidget*>> optionWidgets;std::string capsNote="Load an installation to query engine capabilities.";
     // Mods (contract: one --mod ID per checked row, list order = priority)
     GtkWidget *modsPage=nullptr,*modView=nullptr,*modDetails=nullptr;GtkListStore* modStore=nullptr;std::vector<Mod> mods;
+    // Mods 3-D viewer (docs/MODDING.md "Model viewer"); model rows: 0 shown text, 1 model key, 2 mod id ("" = original)
+    GtkWidget *modelView=nullptr,*showOriginals=nullptr,*glArea=nullptr,*frameScale=nullptr,*viewInfo=nullptr;GtkListStore* modelStore=nullptr;
+    Viewer viewer;std::map<std::string,std::vector<std::string>> originals; // per data root and mode: `kabus22 --list-models`
+    fs::path shown;std::string shownKey;GSubprocess* exporting=nullptr;unsigned viewGeneration=0;bool listing=false;
     // Controller (Contract F)
     GtkWidget *padMode=nullptr,*deadzone=nullptr,*sensitivity=nullptr,*vibration=nullptr;std::vector<GtkWidget*> padButtons;
     // Installation (Contract C)
@@ -401,11 +528,22 @@ struct UI {
             auto args=undo?updater({"--rollback"}):updater({"--apply","--version",latest.c_str(),"--channel",u.channel.c_str(),"--repository",u.repository.c_str()});
             start("updater",args,settings->root,false,0,[undo](Job& j){
                 auto& ui=*j.ui;ui.latest.clear();
+                if(j.ok())ui.restart(); // returns only when the installed launcher cannot be started
                 auto text=j.ok()?std::string(undo?"Rolled back to the previous version.":"Update installed.")+" The game uses it on next Play; restart the launcher to use its new version.":std::string(undo?"Rollback ":"Update ")+j.failure()+"\nNothing was changed on failure.";
                 gtk_label_set_text(GTK_LABEL(ui.latestInfo),valid(text).c_str());ui.loadRoot();ui.message(text+"\nLog: "+j.logPath.string());
             });
             message(std::string(undo?"Rolling back":"Downloading and verifying update")+"… Log: "+job->logPath.string());
         }catch(const std::exception& e){message(std::string("Update failed: ")+e.what());availability();}
+    }
+    // After an update or rollback root/bin follows root/current, so this execs the now-active version's launcher in place.
+    void restart() {
+        const auto next=settings->root/"bin/kabus22-launcher";
+        std::vector<std::string> args{next.string(),"--install-dir",settings->root.string()};
+        if(!options.engine.empty())args.insert(args.end(),{"--engine",options.engine.string()});
+        if(!options.renderer.empty())args.insert(args.end(),{"--renderer",options.renderer});
+        std::vector<char*> argv;for(auto& a:args)argv.push_back(a.data());argv.push_back(nullptr);
+        ::execv(next.c_str(),argv.data());
+        std::cerr<<"kabus22-launcher: cannot restart into "<<next<<": "<<std::strerror(errno)<<'\n';
     }
     // ---- logs ----
     void refreshLogs() {
@@ -462,17 +600,17 @@ struct UI {
         if(!clashes.empty()){text+="\n\nConflicts among enabled mods:";for(std::size_t i=0;i<clashes.size()&&i<20;++i)text+="\n  "+clashes[i];if(clashes.size()>20)text+="\n  … "+std::to_string(clashes.size()-20)+" more";}
         gtk_label_set_text(GTK_LABEL(modDetails),valid(text).c_str());
     }
-    void newMod() {
+    std::string newMod() {
         auto* dialog=gtk_dialog_new_with_buttons("New mod",GTK_WINDOW(window),GTK_DIALOG_MODAL,"_Cancel",GTK_RESPONSE_CANCEL,"C_reate",GTK_RESPONSE_ACCEPT,nullptr);
         auto* grid=gtk_grid_new();gtk_grid_set_row_spacing(GTK_GRID(grid),9);gtk_grid_set_column_spacing(GTK_GRID(grid),18);gtk_container_set_border_width(GTK_CONTAINER(grid),18);
         auto* id=gtk_entry_new();auto* name=gtk_entry_new();gtk_entry_set_placeholder_text(GTK_ENTRY(id),"folder name, e.g. my-mod");gtk_entry_set_placeholder_text(GTK_ENTRY(name),"shown in the list");for(auto* e:{id,name})gtk_entry_set_width_chars(GTK_ENTRY(e),32);
         row(grid,0,"Mod _id",id);row(grid,1,"_Name",name);gtk_container_add(GTK_CONTAINER(gtk_dialog_get_content_area(GTK_DIALOG(dialog))),grid);gtk_widget_show_all(dialog);
         if(gtk_dialog_run(GTK_DIALOG(dialog))==GTK_RESPONSE_ACCEPT){
             const std::string folder=gtk_entry_get_text(GTK_ENTRY(id));
-            try{createMod(modsRoot(),folder,gtk_entry_get_text(GTK_ENTRY(name)));refreshMods();message("Created "+(modsRoot()/folder).string()+". Put replacement files under its data/ folder with their game names (Export game files… gives you the originals), then enable it.");}
+            try{createMod(modsRoot(),folder,gtk_entry_get_text(GTK_ENTRY(name)));refreshMods();selectMod(folder);message("Created "+(modsRoot()/folder).string()+". Put replacement files under its data/ folder with their game names (Export game files… gives you the originals), then enable it.");gtk_widget_destroy(dialog);return folder;}
             catch(const std::exception& e){message(std::string("New mod failed: ")+e.what());}
         }
-        gtk_widget_destroy(dialog);
+        gtk_widget_destroy(dialog);return {};
     }
     void installZip() {
         auto* dialog=gtk_file_chooser_dialog_new("Install mod from .zip",GTK_WINDOW(window),GTK_FILE_CHOOSER_ACTION_OPEN,"_Cancel",GTK_RESPONSE_CANCEL,"_Install",GTK_RESPONSE_ACCEPT,nullptr);
@@ -510,6 +648,190 @@ struct UI {
             message("Exporting "+std::string(bonus?"Bonus":"campaign")+" game files to "+dir+"… Log: "+job->logPath.string());
         }catch(const std::exception& e){message(std::string("Export failed: ")+e.what());availability();}
     }
+    // ---- mods: 3-D viewer (docs/MODDING.md "Model viewer") ----
+    void selectMod(const std::string& id) {
+        GtkTreeIter it;for(bool more=gtk_tree_model_get_iter_first(GTK_TREE_MODEL(modStore),&it);more;more=gtk_tree_model_iter_next(GTK_TREE_MODEL(modStore),&it)){
+            gchar* each=nullptr;gtk_tree_model_get(GTK_TREE_MODEL(modStore),&it,6,&each,-1);bool hit=id==each;g_free(each);if(hit){gtk_tree_selection_select_iter(gtk_tree_view_get_selection(GTK_TREE_VIEW(modView)),&it);return;}
+        }
+    }
+    std::pair<std::string,std::string> selectedModel() {
+        GtkTreeIter it;GtkTreeModel* model=nullptr;if(!gtk_tree_selection_get_selected(gtk_tree_view_get_selection(GTK_TREE_VIEW(modelView)),&model,&it))return {};
+        gchar *key=nullptr,*id=nullptr;gtk_tree_model_get(model,&it,1,&key,2,&id,-1);std::pair<std::string,std::string> r{key,id};g_free(key);g_free(id);return r;
+    }
+    bool bonusMode() {return gtk_combo_box_get_active_id(GTK_COMBO_BOX(mode))&&selected(mode)=="bonus";}
+    std::string dataKey() {return settings->root.string()+(bonusMode()?"#bonus":"");}
+    std::vector<std::string> engineArgs(std::initializer_list<std::string> first) {
+        const bool bonus=bonusMode();std::vector<std::string> args{settings->engine.string()};args.insert(args.end(),first);
+        args.insert(args.end(),{"--data",(settings->root/"game"/(bonus?"Kabus 22 Mode":"")).string()});if(bonus)args.insert(args.end(),{"--mode","bonus"});return args;
+    }
+    static std::string tail(std::string text) {while(!text.empty()&&(text.back()=='\n'||text.back()=='\r'))text.pop_back();return text.size()>600?"…"+text.substr(text.size()-600):text;}
+    static std::string bullets(const std::vector<std::string>& lines) {std::string s;for(std::size_t i=0;i<lines.size()&&i<30;++i)s+="\n  "+lines[i];if(lines.size()>30)s+="\n  … "+std::to_string(lines.size()-30)+" more";return s;}
+    bool confirm(const std::string& title,const std::string& text,const char* action) {
+        auto* ask=gtk_message_dialog_new(GTK_WINDOW(window),GTK_DIALOG_MODAL,GTK_MESSAGE_QUESTION,GTK_BUTTONS_NONE,"%s",valid(title).c_str());
+        gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(ask),"%s",valid(text).c_str());gtk_dialog_add_buttons(GTK_DIALOG(ask),"_Cancel",GTK_RESPONSE_CANCEL,action,GTK_RESPONSE_ACCEPT,nullptr);
+        const bool yes=gtk_dialog_run(GTK_DIALOG(ask))==GTK_RESPONSE_ACCEPT;gtk_widget_destroy(ask);return yes;
+    }
+    void viewNote(const std::string& text) {gtk_label_set_text(GTK_LABEL(viewInfo),valid(text).c_str());}
+    // Viewer engine runs go beside the single Job so the page stays usable; argv only, cwd = installation.
+    using Done=std::function<void(bool,const std::string&,const std::string&)>;
+    GSubprocess* spawn(const std::vector<std::string>& args,Done done) {
+        binary(args.front());std::vector<const gchar*> argv;for(const auto& a:args)argv.push_back(a.c_str());argv.push_back(nullptr);
+        auto* launcher=g_subprocess_launcher_new(static_cast<GSubprocessFlags>(G_SUBPROCESS_FLAGS_STDOUT_PIPE|G_SUBPROCESS_FLAGS_STDERR_PIPE));g_subprocess_launcher_set_cwd(launcher,settings->root.c_str());
+        GError* error=nullptr;auto* process=g_subprocess_launcher_spawnv(launcher,argv.data(),&error);g_object_unref(launcher);
+        if(!process){std::string why=error->message;g_error_free(error);throw std::runtime_error(why);}
+        g_subprocess_communicate_async(process,nullptr,nullptr,+[](GObject* source,GAsyncResult* result,gpointer data){
+            std::unique_ptr<Done> done(static_cast<Done*>(data));auto* process=G_SUBPROCESS(source);GBytes *out=nullptr,*err=nullptr;
+            const bool ok=g_subprocess_communicate_finish(process,result,&out,&err,nullptr)&&g_subprocess_get_if_exited(process)&&g_subprocess_get_exit_status(process)==0;
+            auto text=[](GBytes* b){gsize n=0;const auto* p=b?static_cast<const char*>(g_bytes_get_data(b,&n)):nullptr;std::string s(p?p:"",p?n:0);if(b)g_bytes_unref(b);return s;};
+            const auto o=text(out),e=text(err);g_object_unref(process);(*done)(ok,o,e);
+        },new Done(std::move(done)));
+        return process;
+    }
+    // Rows: the selected mod's model files, then (Show originals) every game model; key/id reselects a row (default: the current one).
+    void refreshModels(std::string key={},std::string id={}) {
+        if(!modelStore)return;
+        if(key.empty())std::tie(key,id)=selectedModel();
+        gtk_list_store_clear(modelStore);if(!settings)return;
+        const auto mod=selectedMod();std::set<std::string> replaced;GtkTreeIter it,chosen;bool found=false;
+        auto add=[&](const std::string& text,const std::string& k,const std::string& source){gtk_list_store_append(modelStore,&it);gtk_list_store_set(modelStore,&it,0,valid(text).c_str(),1,k.c_str(),2,source.c_str(),-1);if(k==key&&source==id){chosen=it;found=true;}};
+        for(const auto& m:mods)if(m.id==mod)for(const auto& f:m.files)if(auto k=modelKey(f);!k.empty()){replaced.insert(k);add(f+"   (mod "+mod+")",k,mod);}
+        if(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(showOriginals))){
+            auto list=originals.find(dataKey());
+            if(list==originals.end())listModels();
+            else for(const auto& name:list->second)add(name+(replaced.count(name)?"   ← replaced by "+mod:""),name,"");
+        }
+        if(found){gtk_tree_selection_select_iter(gtk_tree_view_get_selection(GTK_TREE_VIEW(modelView)),&chosen);auto* path=gtk_tree_model_get_path(GTK_TREE_MODEL(modelStore),&chosen);gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(modelView),path,nullptr,true,0.5f,0);gtk_tree_path_free(path);}
+    }
+    void listModels() {
+        if(listing)return;
+        listing=true;const auto data=dataKey();viewNote("Listing the game's models…");
+        try{spawn(engineArgs({"--list-models"}),[this,data](bool ok,const std::string& out,const std::string& err){
+            listing=false;
+            if(!ok){viewNote("Cannot list the game's models: "+tail(err.empty()?out:err));gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(showOriginals),false);return;}
+            auto& names=originals[data];names.clear();
+            for(std::size_t start=0;start<out.size();){auto end=std::min(out.find('\n',start),out.size());auto line=out.substr(start,end-start);start=end+1;if(auto tab=line.find('\t');tab&&!line.empty())names.push_back(line.substr(0,tab));}
+            viewNote(std::to_string(names.size())+" game models. Select one to view it.");refreshModels();
+        });}catch(const std::exception& e){listing=false;viewNote(std::string("Cannot list the game's models: ")+e.what());}
+    }
+    // Reuses the cached export when it is newer than the engine and every file of the mod; otherwise exports into a
+    // private .part folder and renames it into place, so an interrupted export is never reused.
+    void showModel() {
+        auto [key,id]=selectedModel();if(key.empty()||!settings)return;
+        if(exporting){g_subprocess_force_exit(exporting);g_clear_object(&exporting);}
+        const unsigned generation=++viewGeneration;const auto cache=viewerCache(id,key,bonusMode());const auto gltf=cache/(fs::path(key).stem().string()+".gltf");
+        auto stamp=[](const fs::path& p){std::error_code ec;auto t=fs::last_write_time(p,ec);return ec?fs::file_time_type::min():t;};
+        auto newest=stamp(settings->engine);
+        if(!id.empty()){std::error_code ec;for(fs::recursive_directory_iterator it(modsRoot()/id/"data",ec),end;!ec&&it!=end;it.increment(ec))newest=std::max(newest,stamp(it->path()));}
+        if(fs::is_regular_file(gltf)&&stamp(gltf)>=newest){showGltf(gltf,key);return;}
+        const auto part=cache.parent_path()/(".part-"+std::to_string(::getpid())+"-"+std::to_string(generation));
+        std::error_code ec;fs::remove_all(part,ec);fs::create_directories(part,ec);
+        auto args=engineArgs({"--export-model",key,part.string()});if(!id.empty())args.insert(args.end(),{"--mod",id});
+        viewNote("Exporting "+key+(id.empty()?"":" with mod "+id)+"…");
+        try{exporting=G_SUBPROCESS(g_object_ref(spawn(args,[this,generation,part,cache,gltf,key](bool ok,const std::string& out,const std::string& err){
+            std::error_code ec;if(generation!=viewGeneration){fs::remove_all(part,ec);return;}
+            g_clear_object(&exporting);std::string why=ok?std::string():tail(err.empty()?out:err);
+            if(ok){fs::remove_all(cache,ec);fs::rename(part,cache,ec);if(ec)why=ec.message();}
+            if(!why.empty()){fs::remove_all(part,ec);viewer.clear();shown.clear();gtk_gl_area_queue_render(GTK_GL_AREA(glArea));viewNote("Export of "+key+" failed: "+why);return;}
+            showGltf(gltf,key);
+        })));}catch(const std::exception& e){fs::remove_all(part,ec);viewNote(std::string("Export failed: ")+e.what());}
+    }
+    void showGltf(const fs::path& gltf,const std::string& key) {
+        try{viewer.load(gltf);}catch(const std::exception& e){viewer.clear();shown.clear();gtk_gl_area_queue_render(GTK_GL_AREA(glArea));viewNote(e.what());return;}
+        shown=gltf.parent_path();shownKey=key;viewer.reset();
+        const int frames=static_cast<int>(viewer.frames.size());gtk_range_set_range(GTK_RANGE(frameScale),0,std::max(frames-1,1));gtk_range_set_value(GTK_RANGE(frameScale),0);gtk_widget_set_sensitive(frameScale,frames>1);
+        describeView();gtk_gl_area_queue_render(GTK_GL_AREA(glArea));
+    }
+    void describeView() {
+        std::string text=shownKey+": "+std::to_string(viewer.vertices)+" vertices, "+std::to_string(viewer.triangles)+" triangles, "+std::to_string(viewer.frames.size())+" frames";
+        text+=viewer.frame>=0?"\nFrame "+std::to_string(viewer.frame)+": "+viewer.frames[viewer.frame]:std::string("\nRest pose (no animation frames)");
+        viewNote(text+"\nDrag to orbit, wheel to zoom, double-click to reset the view.");
+    }
+    void exportForBlender() {
+        if(shown.empty()){message("Select a model in the 3-D viewer first.");return;}
+        auto* dialog=gtk_file_chooser_dialog_new("Export model for Blender into a folder",GTK_WINDOW(window),GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER,"_Cancel",GTK_RESPONSE_CANCEL,"_Export",GTK_RESPONSE_ACCEPT,nullptr);
+        gtk_file_chooser_set_create_folders(GTK_FILE_CHOOSER(dialog),true);
+        std::string dir;if(gtk_dialog_run(GTK_DIALOG(dialog))==GTK_RESPONSE_ACCEPT){gchar* path=gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));dir=path?path:"";g_free(path);}
+        gtk_widget_destroy(dialog);if(dir.empty())return;
+        try{
+            std::vector<fs::path> files;std::vector<std::string> clash;
+            for(const auto& e:fs::directory_iterator(shown))if(e.is_regular_file()){files.push_back(e.path());if(fs::exists(fs::path(dir)/e.path().filename()))clash.push_back(e.path().filename().string());}
+            if(!clash.empty()&&!confirm("Overwrite files in "+dir+"?","These files already exist there:"+bullets(clash),"_Overwrite"))return;
+            for(const auto& f:files)fs::copy_file(f,fs::path(dir)/f.filename(),fs::copy_options::overwrite_existing);
+            message("Exported "+shownKey+" to "+dir+". In Blender: File ▸ Import ▸ glTF 2.0, open "+fs::path(shownKey).stem().string()+".gltf; animation frames are its shape keys.");
+        }catch(const std::exception& e){message(std::string("Export for Blender failed: ")+e.what());}
+    }
+    void replaceModel() {
+        const auto [key,source]=selectedModel();if(key.empty()){message("Select the model to replace in the 3-D viewer list.");return;}
+        auto id=selectedMod();
+        if(id.empty()){if(!confirm("Replace "+key,"Replacements are stored in a mod and no mod is selected. Create a new mod?","_New mod…")||(id=newMod()).empty())return;}
+        auto* dialog=gtk_file_chooser_dialog_new(("Replacement for "+key).c_str(),GTK_WINDOW(window),GTK_FILE_CHOOSER_ACTION_OPEN,"_Cancel",GTK_RESPONSE_CANCEL,"_Choose",GTK_RESPONSE_ACCEPT,nullptr);
+        auto* filter=gtk_file_filter_new();gtk_file_filter_set_name(filter,"glTF or A6 model (.gltf, .glb, .mdl)");for(auto* p:{"*.[gG][lL][tT][fF]","*.[gG][lL][bB]","*.[mM][dD][lL]"})gtk_file_filter_add_pattern(filter,p);gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog),filter);
+        std::string pick;if(gtk_dialog_run(GTK_DIALOG(dialog))==GTK_RESPONSE_ACCEPT){gchar* path=gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));pick=path?path:"";g_free(path);}
+        gtk_widget_destroy(dialog);if(pick.empty())return;
+        const auto modDir=modsRoot()/id;ModelPlan plan;
+        try{plan=planReplacement(modDir,key,pick);}catch(const std::exception& e){message("Cannot use "+pick+": "+e.what());return;}
+        if(plan.copies.empty()){message("That file already is mod "+id+"'s replacement for "+key+".");return;}
+        auto rel=[&](const std::vector<fs::path>& paths){std::vector<std::string> r;for(const auto& p:paths)r.push_back(p.lexically_relative(modDir).generic_string());return r;};
+        std::vector<fs::path> targets;for(const auto& c:plan.copies)targets.push_back(c.second);
+        std::string text="Copy into "+modDir.string()+":"+bullets(rel(targets));
+        if(!plan.overwritten.empty())text+="\n\nOverwrites:"+bullets(rel(plan.overwritten));
+        if(!plan.removed.empty())text+="\n\nRemoves (one file per model):"+bullets(rel(plan.removed));
+        if(!plan.warnings.empty())text+="\n\nWarnings:"+bullets(plan.warnings);
+        if(!confirm("Replace "+key+" in mod “"+id+"”?",text,"_Replace"))return;
+        text="Replaced "+key+" in mod "+id+". The viewer shows it as the engine loads it; enable the mod and Apply / Play to use it.";
+        try{for(const auto& [from,to]:plan.copies){fs::create_directories(to.parent_path());fs::copy_file(from,to,fs::copy_options::overwrite_existing);}for(const auto& p:plan.removed)fs::remove(p);}
+        catch(const std::exception& e){text=std::string("Replace model failed: ")+e.what();}
+        refreshMods();selectMod(id);refreshModels(key,id);message(text);
+    }
+    void removeReplacement() {
+        const auto [key,source]=selectedModel();const auto id=selectedMod();
+        if(key.empty()||id.empty()){message("Select a mod and one of its models (or an original it replaces) in the 3-D viewer.");return;}
+        const auto modDir=modsRoot()/id;const auto files=replacementFiles(modDir,key);
+        if(files.empty()){message("Mod "+id+" has no file for "+key+".");return;}
+        std::vector<std::string> names;for(const auto& f:files)names.push_back(f.lexically_relative(modDir).generic_string());
+        if(!confirm("Remove the replacement of "+key+" from mod “"+id+"”?","These files are deleted:"+bullets(names),"_Remove"))return;
+        std::string text="Removed mod "+id+"'s replacement of "+key+".";
+        try{for(const auto& f:files){fs::remove(f);std::error_code ec;for(auto p=f.parent_path();p!=modDir/"data"&&fs::is_empty(p,ec)&&!ec;p=p.parent_path())fs::remove(p,ec);}}
+        catch(const std::exception& e){text=std::string("Remove replacement failed: ")+e.what();}
+        refreshMods();selectMod(id);refreshModels(key,"");message(text);
+    }
+    GtkWidget* viewerPage() {
+        auto* paned=gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);gtk_container_set_border_width(GTK_CONTAINER(paned),8);
+        auto* left=gtk_box_new(GTK_ORIENTATION_VERTICAL,6);showOriginals=gtk_check_button_new_with_mnemonic("Show _originals");
+        gtk_widget_set_tooltip_text(showOriginals,"Also list every game model. Originals the selected mod replaces are marked.");gtk_box_pack_start(GTK_BOX(left),showOriginals,false,false,0);
+        g_signal_connect(showOriginals,"toggled",G_CALLBACK(+[](GtkToggleButton*,gpointer d){static_cast<UI*>(d)->refreshModels();}),this);
+        modelStore=gtk_list_store_new(3,G_TYPE_STRING,G_TYPE_STRING,G_TYPE_STRING);modelView=gtk_tree_view_new_with_model(GTK_TREE_MODEL(modelStore));g_object_unref(modelStore);
+        gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(modelView),-1,"Model (type to search)",gtk_cell_renderer_text_new(),"text",0,nullptr);gtk_tree_view_set_search_column(GTK_TREE_VIEW(modelView),1);
+        g_signal_connect(gtk_tree_view_get_selection(GTK_TREE_VIEW(modelView)),"changed",G_CALLBACK(+[](GtkTreeSelection*,gpointer d){static_cast<UI*>(d)->showModel();}),this);
+        auto* scroll=gtk_scrolled_window_new(nullptr,nullptr);gtk_widget_set_size_request(scroll,280,-1);gtk_container_add(GTK_CONTAINER(scroll),modelView);gtk_box_pack_start(GTK_BOX(left),scroll,true,true,0);
+        gtk_paned_pack1(GTK_PANED(paned),left,false,false);
+        auto* right=gtk_box_new(GTK_ORIENTATION_VERTICAL,6);
+        glArea=gtk_gl_area_new();viewer.area=glArea;gtk_gl_area_set_has_depth_buffer(GTK_GL_AREA(glArea),true);gtk_gl_area_set_required_version(GTK_GL_AREA(glArea),3,2);gtk_widget_set_size_request(glArea,420,380);gtk_widget_set_hexpand(glArea,true);
+        gtk_widget_add_events(glArea,GDK_BUTTON_PRESS_MASK|GDK_BUTTON_RELEASE_MASK|GDK_BUTTON1_MOTION_MASK|GDK_SCROLL_MASK|GDK_SMOOTH_SCROLL_MASK);
+        g_signal_connect(glArea,"realize",G_CALLBACK(+[](GtkWidget* w,gpointer d){auto& ui=*static_cast<UI*>(d);gtk_gl_area_make_current(GTK_GL_AREA(w));
+            if(auto* e=gtk_gl_area_get_error(GTK_GL_AREA(w))){ui.viewNote(std::string("3-D view unavailable: ")+e->message);return;}ui.viewer.realize();}),this);
+        g_signal_connect(glArea,"unrealize",G_CALLBACK(+[](GtkWidget* w,gpointer d){gtk_gl_area_make_current(GTK_GL_AREA(w));if(!gtk_gl_area_get_error(GTK_GL_AREA(w)))static_cast<UI*>(d)->viewer.unrealize();}),this);
+        g_signal_connect(glArea,"render",G_CALLBACK(+[](GtkGLArea* a,GdkGLContext*,gpointer d)->gboolean{const int s=gtk_widget_get_scale_factor(GTK_WIDGET(a));
+            static_cast<UI*>(d)->viewer.render(gtk_widget_get_allocated_width(GTK_WIDGET(a))*s,gtk_widget_get_allocated_height(GTK_WIDGET(a))*s);return TRUE;}),this);
+        g_signal_connect(glArea,"button-press-event",G_CALLBACK(+[](GtkWidget* w,GdkEventButton* e,gpointer d)->gboolean{auto& v=static_cast<UI*>(d)->viewer;if(e->button!=1)return FALSE;
+            if(e->type==GDK_2BUTTON_PRESS){v.reset();gtk_gl_area_queue_render(GTK_GL_AREA(w));}else{v.drag=true;v.x=e->x;v.y=e->y;}return TRUE;}),this);
+        g_signal_connect(glArea,"button-release-event",G_CALLBACK(+[](GtkWidget*,GdkEventButton*,gpointer d)->gboolean{static_cast<UI*>(d)->viewer.drag=false;return TRUE;}),this);
+        g_signal_connect(glArea,"motion-notify-event",G_CALLBACK(+[](GtkWidget* w,GdkEventMotion* e,gpointer d)->gboolean{auto& v=static_cast<UI*>(d)->viewer;if(!v.drag)return FALSE;
+            v.yaw+=(e->x-v.x)*0.01;v.pitch=std::clamp(v.pitch+(e->y-v.y)*0.01,-1.5,1.5);v.x=e->x;v.y=e->y;gtk_gl_area_queue_render(GTK_GL_AREA(w));return TRUE;}),this);
+        g_signal_connect(glArea,"scroll-event",G_CALLBACK(+[](GtkWidget* w,GdkEventScroll* e,gpointer d)->gboolean{auto& v=static_cast<UI*>(d)->viewer;
+            const double step=e->direction==GDK_SCROLL_UP?-1:e->direction==GDK_SCROLL_DOWN?1:e->direction==GDK_SCROLL_SMOOTH?e->delta_y:0;
+            v.zoom=std::clamp(v.zoom*std::pow(1.15,step),0.05,20.0);gtk_gl_area_queue_render(GTK_GL_AREA(w));return TRUE;}),this);
+        gtk_box_pack_start(GTK_BOX(right),glArea,true,true,0);
+        frameScale=gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,0,1,1);gtk_scale_set_digits(GTK_SCALE(frameScale),0);gtk_widget_set_sensitive(frameScale,false);gtk_widget_set_tooltip_text(frameScale,"Animation frame (the model's per-frame vertex animation)");
+        g_signal_connect(frameScale,"value-changed",G_CALLBACK(+[](GtkRange* r,gpointer d){auto& ui=*static_cast<UI*>(d);if(ui.viewer.frames.empty())return;
+            ui.viewer.frame=std::clamp(static_cast<int>(std::lround(gtk_range_get_value(r))),0,static_cast<int>(ui.viewer.frames.size())-1);ui.viewer.dirty=true;ui.describeView();gtk_gl_area_queue_render(GTK_GL_AREA(ui.glArea));}),this);
+        gtk_box_pack_start(GTK_BOX(right),frameScale,false,false,0);
+        auto* actions=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);gtk_box_pack_start(GTK_BOX(right),actions,false,false,0);
+        for(auto* w:{button("Export for _Blender…",this,[](gpointer d){static_cast<UI*>(d)->exportForBlender();}),button("Re_place model…",this,[](gpointer d){static_cast<UI*>(d)->replaceModel();}),
+            button("Remove repla_cement",this,[](gpointer d){static_cast<UI*>(d)->removeReplacement();})})gtk_box_pack_start(GTK_BOX(actions),w,false,false,0);
+        viewInfo=note("Select a model. The selected mod's models are listed; Show originals adds every game model.");gtk_label_set_selectable(GTK_LABEL(viewInfo),true);gtk_box_pack_start(GTK_BOX(right),viewInfo,false,false,0);
+        gtk_paned_pack2(GTK_PANED(paned),right,true,false);return paned;
+    }
     // ---- construction ----
     void build() {
         window=gtk_window_new(GTK_WINDOW_TOPLEVEL);gtk_window_set_title(GTK_WINDOW(window),"Kabus 22 — Native Settings");gtk_window_set_default_size(GTK_WINDOW(window),900,780);
@@ -535,6 +857,7 @@ struct UI {
         gtk_widget_set_tooltip_text(language,"Saved patch locale wins on load. Play leaves its byte unchanged unless you intentionally select another language. Spanish, Russian and Polish appear only when the community patch and its language data are installed.");
         gtk_grid_attach(GTK_GRID(grid),note("Patch/custom display stays game-owned. Campaign difficulty belongs to New Game and saves, not this launcher. No speculative sensitivity, software-light or stencil-shadow switches."),0,9,2,1);
         for(auto* w:{mode,display,windowMode})g_signal_connect(w,"changed",G_CALLBACK(+[](GtkComboBox*,gpointer data){auto& ui=*static_cast<UI*>(data);if(ui.settings&&!ui.populating)ui.availability();}),this);
+        g_signal_connect(mode,"changed",G_CALLBACK(+[](GtkComboBox*,gpointer data){auto& ui=*static_cast<UI*>(data);if(ui.settings&&!ui.populating)ui.refreshModels();}),this);
         campaignPage=page(book,"Graphics",grid);
         const char* graphics[]={"Authored resolution","Legacy color depth","Lighting quality","Completion buffering","Mipmapping","Anisotropy","Reflections","Blood color","Blood amount","Brightness","Contrast","Gamma"};
         campaign[0]=combo({{"0","640 × 480"},{"1","800 × 600"},{"2","1024 × 768"},{"3","1280 × 1024"}});
@@ -571,7 +894,7 @@ struct UI {
             const char* titles[]={"Mod (id)","Version","Author","Status"};
             for(int c=1;c<=4;++c){auto* text=gtk_cell_renderer_text_new();g_object_set(text,"ellipsize",PANGO_ELLIPSIZE_END,nullptr);auto* column=gtk_tree_view_column_new_with_attributes(titles[c-1],text,"text",c,nullptr);
                 gtk_tree_view_column_set_resizable(column,true);gtk_tree_view_column_set_expand(column,c==1||c==4);gtk_tree_view_append_column(GTK_TREE_VIEW(modView),column);}}
-        g_signal_connect(gtk_tree_view_get_selection(GTK_TREE_VIEW(modView)),"changed",G_CALLBACK(+[](GtkTreeSelection*,gpointer data){static_cast<UI*>(data)->describeMod();}),this);
+        g_signal_connect(gtk_tree_view_get_selection(GTK_TREE_VIEW(modView)),"changed",G_CALLBACK(+[](GtkTreeSelection*,gpointer data){auto& ui=*static_cast<UI*>(data);ui.describeMod();ui.refreshModels();}),this);
         {auto* scroll=gtk_scrolled_window_new(nullptr,nullptr);gtk_widget_set_size_request(scroll,-1,140);gtk_container_add(GTK_CONTAINER(scroll),modView);gtk_widget_set_hexpand(scroll,true);gtk_grid_attach(GTK_GRID(grid),scroll,0,1,2,1);}
         auto moveMod=[](UI& ui,bool up){GtkTreeIter it,other;GtkTreeModel* model=nullptr;if(!gtk_tree_selection_get_selected(gtk_tree_view_get_selection(GTK_TREE_VIEW(ui.modView)),&model,&it))return;other=it;if(up?gtk_tree_model_iter_previous(model,&other):gtk_tree_model_iter_next(model,&other))gtk_list_store_swap(ui.modStore,&it,&other);ui.describeMod();};
         auto* modButtons=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);gtk_grid_attach(GTK_GRID(grid),modButtons,0,2,2,1);
@@ -580,8 +903,10 @@ struct UI {
         auto* modActions=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);gtk_grid_attach(GTK_GRID(grid),modActions,0,3,2,1);
         for(auto* w:{button("_New mod…",this,[](gpointer d){static_cast<UI*>(d)->newMod();}),button("_Install from .zip…",this,[](gpointer d){static_cast<UI*>(d)->installZip();}),
             button("_Export game files…",this,[](gpointer d){static_cast<UI*>(d)->exportFiles();}),button("_Remove",this,[](gpointer d){static_cast<UI*>(d)->removeMod();})})gtk_box_pack_start(GTK_BOX(modActions),w,false,false,0);
-        modDetails=note("");gtk_label_set_selectable(GTK_LABEL(modDetails),true);gtk_grid_attach(GTK_GRID(grid),modDetails,0,4,2,1);
-        gtk_grid_attach(GTK_GRID(grid),note("A mod is a folder in ~/.local/share/kabus22/mods/<id>/ with mod.txt and data/. Files under data/ use the game's own names (letter case does not matter), e.g. data/demir_2007.mdl. Export game files… writes every original resource with those names into an empty folder so you can edit copies. Changes apply on Apply / Play; the original game files are never modified."),0,5,2,1);
+        {auto* tabs=gtk_notebook_new();gtk_grid_attach(GTK_GRID(grid),tabs,0,4,2,1);auto* details=gtk_box_new(GTK_ORIENTATION_VERTICAL,0);gtk_container_set_border_width(GTK_CONTAINER(details),8);
+            modDetails=note("");gtk_label_set_selectable(GTK_LABEL(modDetails),true);gtk_box_pack_start(GTK_BOX(details),modDetails,false,false,0);
+            gtk_box_pack_start(GTK_BOX(details),note("A mod is a folder in ~/.local/share/kabus22/mods/<id>/ with mod.txt and data/. Files under data/ use the game's own names (letter case does not matter), e.g. data/demir_2007.mdl. Export game files… writes every original resource with those names into an empty folder so you can edit copies. Changes apply on Apply / Play; the original game files are never modified."),false,false,0);
+            gtk_notebook_append_page(GTK_NOTEBOOK(tabs),details,gtk_label_new("Details"));gtk_notebook_append_page(GTK_NOTEBOOK(tabs),viewerPage(),gtk_label_new("3-D viewer"));}
         audioPage=page(book,"Audio",grid);const char* volumes[]={"Effects volume","Music volume","Dialogue volume"};for(int i=12;i<=14;++i){campaign[i]=gtk_spin_button_new_with_range(0,100,5);row(grid,i-12,volumes[i-12],campaign[i]);}
         gtk_grid_attach(GTK_GRID(grid),note("Original scripts floor some gains above zero; 0 is not a guaranteed exact mute. Playback uses the system's current SDL audio output; this launcher does not change system routing."),0,3,2,1);
         keysPage=page(book,"Keyboard",grid);const char* actions[]={"Forward","Backward","Right","Left","Raise weapon","Fire","Run","Menu","Map","Spell"};

@@ -41,6 +41,17 @@ std::vector<Mod> listMods(const fs::path& root);
 void createMod(const fs::path& root, const std::string& id, const std::string& name);
 // Extracts a .zip (mod.txt at its root or inside exactly one top folder) and atomically renames it into root; returns the id.
 std::string installMod(const fs::path& root, const fs::path& zip);
+// Model viewer (docs/MODDING.md "Model viewer"). A model is a .mdl; a mod's .gltf/.glb replaces the .mdl of the same name.
+std::string modelKey(std::string_view name); // normalized "dir/stem.mdl" for a .mdl/.gltf/.glb name, else empty
+// ${XDG_CACHE_HOME:-~/.cache}/kabus22/viewer/<mod id or _original>[/@bonus]/<key>/
+fs::path viewerCache(const std::string& mod, const std::string& key, bool bonus);
+struct GltfSummary { std::size_t meshes = 0, triangles = 0; std::vector<std::string> uris; }; // uris: external buffers/images, percent-decoded
+GltfSummary readGltf(const fs::path& file);
+// Copies (source first) of a .gltf/.glb/.mdl and the files its relative URIs name; throws listing absolute or escaping URIs.
+struct ModelPlan { std::vector<std::pair<fs::path, fs::path>> copies; std::vector<fs::path> overwritten, removed; std::vector<std::string> warnings; };
+ModelPlan planReplacement(const fs::path& mod, const std::string& key, const fs::path& source);
+// The mod's files for key plus the side files of its glTFs that no other glTF in the mod names.
+std::vector<fs::path> replacementFiles(const fs::path& mod, const std::string& key);
 struct Controller {
     std::string mode = "original";
     double deadzone = 0.15, sensitivity = 1.0;

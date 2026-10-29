@@ -1,5 +1,7 @@
 #include "assets.hpp"
 #include "mods.hpp"
+#include "model_gltf.hpp"
+#include <memory>
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -148,6 +150,65 @@ int main(int argc,char** argv) {
         ::setenv("XDG_DATA_HOME","/xdg",1);if(k22::mods_root()!="/xdg/kabus22/mods")throw std::runtime_error("mods root");
         ::setenv("XDG_DATA_HOME","relative",1);if(k22::mods_root().string().starts_with("relative"))throw std::runtime_error("relative XDG_DATA_HOME used");
         if(xdg)::setenv("XDG_DATA_HOME",saved.c_str(),1);else ::unsetenv("XDG_DATA_HOME");
+    }
+    {   // Mod glTF model replacement (model_gltf.hpp): round trip, custom morph targets, wrap deform, .mdl+.gltf rejection.
+        const auto game=std::filesystem::path(root.string()+"-gltf");if(!std::filesystem::create_directory(game))throw std::runtime_error("cannot create glTF check directory");
+        Cleanup gltfCleanup{game};const auto data=game/"root";std::filesystem::create_directories(data);
+        // MDL5 quad, 2x2 BGR skin, two byte-packed frames: frame 1 moves vertex 1 (triangle 0,1,2 only).
+        std::vector<uint8_t> mdl;auto word=[&](uint32_t v){for(unsigned s=0;s<32;s+=8)mdl.push_back(uint8_t(v>>s));};
+        mdl.insert(mdl.end(),{'M','D','L','5'});word(5);
+        for(float v:{1.f,1.f,1.f,0.f,0.f,0.f,0.f,0.f,0.f,0.f})word(std::bit_cast<uint32_t>(v));
+        for(uint32_t v:{1u,2u,2u,4u,2u,2u,4u,0u,0u})word(v);
+        word(4);word(2);word(2);for(uint8_t p=0;p<4;++p)mdl.insert(mdl.end(),{uint8_t(10+p),uint8_t(20+p),uint8_t(30+p)});
+        for(int16_t v:{0,0,2,0,2,2,0,2})mdl.insert(mdl.end(),{uint8_t(v),uint8_t(uint16_t(v)>>8)});
+        for(uint16_t v:{0,1,2,0,1,2,0,2,3,0,2,3})mdl.insert(mdl.end(),{uint8_t(v),uint8_t(v>>8)});
+        for(int f=0;f<2;++f){
+            word(0);mdl.insert(mdl.end(),{0,0,0,0,20,10,3,0});mdl.push_back('a');mdl.push_back(uint8_t('0'+f));mdl.resize(mdl.size()+14);
+            const std::array<std::array<uint8_t,3>,4> v{{{0,0,0},{uint8_t(f?20:10),uint8_t(f?5:0),uint8_t(f?3:0)},{10,10,0},{0,10,0}}};
+            for(const auto& p:v)mdl.insert(mdl.end(),{p[0],p[1],p[2],0});
+        }
+        {std::ofstream(data/"quad.mdl",std::ios::binary).write(reinterpret_cast<const char*>(mdl.data()),std::streamsize(mdl.size()));}
+        Assets plain(data);const auto& original=plain.model("quad.mdl");
+        if(original.frames.size()!=2||original.vertices.size()!=4||!original.materials[0].texture)throw std::runtime_error("glTF check MDL5 fixture");
+        auto close=[](k22::Vec3 a,k22::Vec3 b,float e){return std::abs(a.x-b.x)<=e&&std::abs(a.y-b.y)<=e&&std::abs(a.z-b.z)<=e;};
+        std::vector<std::unique_ptr<Assets>> keep;
+        auto replaced=[&](std::string_view mod,const k22::Model& model)->const k22::Model&{
+            k22::export_gltf(model,game/mod/"data","quad");
+            keep.push_back(std::make_unique<Assets>(data));keep.back()->add_mod(game/mod/"data");
+            const auto& result=keep.back()->model("quad.mdl");
+            if(result.frames.size()!=2||result.frameNames!=original.frameNames||result.resourceMin.x!=original.resourceMin.x||result.resourceMax.z!=original.resourceMax.z||result.formatVersion!=5)
+                throw std::runtime_error("glTF replacement must keep the original's frames, names and collision box");
+            return result;
+        };
+        // Unmodified export imports as the original: positions per frame, triangles, UVs, skin pixels.
+        const auto& back=replaced("rt",original);
+        if(back.vertices.size()!=4||back.triangles.size()!=2||back.materials.size()!=1||back.materials[0].texture->rgba!=original.materials[0].texture->rgba)throw std::runtime_error("glTF round trip mesh/material");
+        for(size_t t=0;t<2;++t)if(back.triangles[t].indices!=original.triangles[t].indices)throw std::runtime_error("glTF round trip triangles");
+        for(size_t f=0;f<2;++f)for(size_t i=0;i<4;++i)if(!close(back.frames[f].positions[i],original.frames[f].positions[i],1e-4f))throw std::runtime_error("glTF round trip frame positions");
+        for(size_t i=0;i<4;++i)if(std::abs(back.vertices[i].uv.x-original.vertices[i].uv.x)>1e-5f||std::abs(back.vertices[i].uv.y-original.vertices[i].uv.y)>1e-5f)throw std::runtime_error("glTF round trip UVs");
+        // Same frame count as morph targets: the glTF's own animation is used.
+        k22::Model moved=original;
+        for(size_t f=0;f<2;++f)for(size_t i=0;i<4;++i)moved.frames[f].positions[i].z+=1+float(f)+float(i);
+        for(size_t i=0;i<4;++i)moved.vertices[i].position=moved.frames[0].positions[i];
+        const auto& custom=replaced("targets",moved);
+        for(size_t f=0;f<2;++f)for(size_t i=0;i<4;++i)if(!close(custom.frames[f].positions[i],moved.frames[f].positions[i],1e-4f))throw std::runtime_error("glTF morph targets not used as the animation");
+        // Different topology (centroid split of triangle 0), one morph target: wrap deform onto the original's frames.
+        k22::Model split=original;split.frames.resize(1);
+        const auto tri=original.triangles[0].indices;k22::Vertex centre{};
+        for(auto i:tri){const auto& v=original.vertices[i];centre.position={centre.position.x+v.position.x/3,centre.position.y+v.position.y/3,centre.position.z+v.position.z/3};centre.uv={centre.uv.x+v.uv.x/3,centre.uv.y+v.uv.y/3};centre.normal=v.normal;}
+        split.vertices.push_back(centre);split.frames[0].positions.push_back(centre.position);
+        split.triangles[0].indices={tri[0],tri[1],4};split.triangles.push_back(split.triangles[0]);split.triangles.back().indices={tri[1],tri[2],4};
+        split.triangles.push_back(split.triangles[0]);split.triangles.back().indices={tri[2],tri[0],4};
+        const auto& wrapped=replaced("wrap",split);
+        if(wrapped.triangles.size()!=4||wrapped.vertices.size()!=5)throw std::runtime_error("glTF wrap mesh");
+        k22::Vec3 expected{};for(auto i:tri){const auto p=original.frames[1].positions[i];expected={expected.x+p.x/3,expected.y+p.y/3,expected.z+p.z/3};}
+        bool followed=false;for(size_t i=0;i<5;++i)if(close(wrapped.vertices[i].position,centre.position,1e-4f))followed=close(wrapped.frames[1].positions[i],expected,1e-2f);
+        if(!followed)throw std::runtime_error("wrap-deformed vertex does not follow its original triangle");
+        for(size_t i=0;i<4;++i)if(!close(wrapped.frames[1].positions[i],original.frames[1].positions[i],1e-2f))throw std::runtime_error("wrap moved original corners");
+        // A mod with both quad.mdl and quad.gltf (or .gltf and .glb) is invalid.
+        auto put=[](const std::filesystem::path& p){std::filesystem::create_directories(p.parent_path());std::ofstream(p)<<'x';};
+        put(game/"both/data/sub/quad.mdl");put(game/"both/data/Sub/QUAD.gltf");put(game/"forms/data/quad.gltf");put(game/"forms/data/quad.glb");
+        rejects([&]{Assets(data).add_mod(game/"both/data");});rejects([&]{Assets(data).add_mod(game/"forms/data");});
     }
     {
         constexpr std::string_view first="var source=1;",second="var source=2;",loose="var source=3;";

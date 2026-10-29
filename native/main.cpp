@@ -4,6 +4,7 @@
 #include "scenario.hpp"
 #include "graphics_cli.hpp"
 #include "mods.hpp"
+#include "model_gltf.hpp"
 #include <algorithm>
 #include <charconv>
 #include <chrono>
@@ -59,7 +60,8 @@ void help(){std::cout<<"kabus22 native engine\nUsage: kabus22 --data GAME_ROOT [
  "  --preset original|enhanced|ultra|custom (absent = original), --graphics KEY=VALUE (repeatable; backend, pbr, anisotropy, msaa, texture_packs, fps_limit=original|30..240|unlimited, ... see --list-capabilities), --texture-pack NAME (repeatable, priority order; ${XDG_DATA_HOME:-~/.local/share}/kabus22/packs/NAME). Preset backends degrade with a notice; explicit --renderer/--ray-tracing/--graphics backend fail hard.\n"
  "Seamless doors: --graphics seamless_doors=on|off (default on). kabus22 --door-table LEVELS.tsv --data GAME_ROOT prints every LY_Kapi doorway and whether it is seamless (docs/SEAMLESS_DOORS.md).\n"
  "Controller: ${XDG_CONFIG_HOME:-~/.config}/kabus22/controller.ini mode=original|modern (absent = original).\n"
- "Mods (docs/MODDING.md): --mod ID (repeatable, priority order; ${XDG_DATA_HOME:-~/.local/share}/kabus22/mods/ID) replaces or adds game files by name. kabus22 --export-files OUT --data GAME_ROOT [--mode campaign|bonus] writes every original game file as OUT/<name>, the layout of a mod's data/.\n";}
+ "Mods (docs/MODDING.md): --mod ID (repeatable, priority order; ${XDG_DATA_HOME:-~/.local/share}/kabus22/mods/ID) replaces or adds game files by name. kabus22 --export-files OUT --data GAME_ROOT [--mode campaign|bonus] writes every original game file as OUT/<name>, the layout of a mod's data/.\n"
+ "  kabus22 --list-models --data GAME_ROOT [--mode campaign|bonus] [--mod ID ...] prints <model>\\t<original|mod id>. kabus22 --export-model NAME OUT_DIR --data GAME_ROOT [--mode ...] [--mod ID ...] writes the model as the engine loads it as OUT_DIR/<stem>.gltf (+ .bin, skin PNGs); a mod's <stem>.gltf/.glb replaces <stem>.mdl.\n";}
 // Start-up archive first, then RESOURCE order: patch exe K22Widescreen.wrs -> k22.wrs -> kaynak.k22; ISO K22.wrs -> kaynak.k22.
 std::vector<std::string> mount_archives(k22::Assets& assets,bool bonus){
  std::vector<std::string> mounted;if(bonus)mounted.push_back("K22_mode.wrs");else for(auto name:{"K22Widescreen.wrs","K22.wrs","Kaynak.k22"})if(assets.contains(name))mounted.push_back(name);
@@ -81,6 +83,28 @@ int export_files(int argc,char** argv){
  }
  std::cout<<"Exported "<<count<<" game files to "<<out.string()<<'\n';return 0;
 }
+void add_mods(k22::Assets& assets,const std::vector<std::string>& mods){
+ for(const auto& id:mods){
+  auto mod=k22::load_mod(k22::mods_root()/id);if(!mod.valid)throw std::runtime_error("mod "+id+" is invalid: "+mod.detail);
+  std::size_t files=0;try{files=assets.add_mod(mod.path/"data");}catch(const std::exception& e){throw std::runtime_error("mod "+id+" is invalid: "+e.what());}
+  std::cerr<<"kabus22: mod "<<id<<": "<<files<<" files\n";
+ }
+}
+// --list-models / --export-model NAME OUT_DIR (docs/MODDING.md "Models (Blender)"): models as the engine loads them with these mods.
+int models(int argc,char** argv){
+ std::filesystem::path data,out;std::string mode="campaign",name;std::vector<std::string> mods;bool list=false;
+ for(int i=1;i<argc;++i){std::string_view a=argv[i];if(a=="--list-models"){list=true;continue;}if(i+1>=argc)throw std::runtime_error("missing value for "+std::string(a));
+  if(a=="--export-model"){if(i+2>=argc)throw std::runtime_error("--export-model requires NAME OUT_DIR");name=argv[++i];out=argv[++i];}
+  else if(a=="--data")data=argv[++i];else if(a=="--mode")mode=argv[++i];
+  else if(a=="--mod"){std::string id=argv[++i];if(!k22::mod_id(id))throw std::runtime_error("--mod requires a mod directory name");mods.push_back(std::move(id));}
+  else throw std::runtime_error("--list-models/--export-model accept only --data GAME_ROOT, --mode campaign|bonus and --mod ID");}
+ if(list==!name.empty())throw std::runtime_error("use either --list-models or --export-model NAME OUT_DIR");
+ if(data.empty())throw std::runtime_error("--data GAME_ROOT is required");if(mode!="campaign"&&mode!="bonus")throw std::runtime_error("unsupported mode; choose campaign or bonus");
+ k22::Assets assets(data,mode=="bonus");add_mods(assets,mods);mount_archives(assets,mode=="bonus");
+ if(list){for(const auto& n:assets.names())if(n.ends_with(".mdl")){auto* m=assets.mod_file(n);std::cout<<n<<'\t'<<(m?m->first.parent_path().filename().string():"original")<<'\n';}return 0;}
+ if(!assets.contains(name))throw std::runtime_error("unknown model "+name);
+ std::cout<<k22::export_gltf(assets.model(name),out,std::filesystem::path(lower(name)).stem().string()).string()<<'\n';return 0;
+}
 int import_saves(int argc,char** argv){
  std::filesystem::path source,data;
  for(int i=1;i<argc;++i){std::string_view a=argv[i];if(i+1>=argc)throw std::runtime_error("missing value for "+std::string(a));if(a=="--import-saves")source=argv[++i];else if(a=="--data")data=argv[++i];else throw std::runtime_error("--import-saves accepts only --data GAME_ROOT");}
@@ -97,7 +121,7 @@ int main(int argc,char** argv){try{
  av_log_set_level(AV_LOG_ERROR); // FFmpeg warnings about the original media (vorbis timestamps, wmv3 extra data) flood the logs; keep errors.
  std::filesystem::path data,entry,capture;bool headless=false;std::uint64_t frames=0;bool frameLimit=false;std::string mode="campaign",language,audioLanguage,rendererName="opengl",rayTracing,display="native";std::vector<std::string> defines;int displayWidth=0,displayHeight=0;k22::WindowMode windowMode=k22::WindowMode::Borderless;bool displayDimensions=false,displayMode=false;
  for(int i=1;i<argc;++i)if(std::string_view(argv[i])=="--import-saves")return import_saves(argc,argv);
- for(int i=1;i<argc;++i){std::string_view a=argv[i];if(a=="--list-capabilities"){if(argc!=2)throw std::runtime_error("--list-capabilities takes no other options");return k22::graphics_cli::list_capabilities();}if(a=="--dump-textures")return k22::graphics_cli::dump(argc,argv);if(a=="--door-table")return k22::door_table(argc,argv);if(a=="--export-files")return export_files(argc,argv);}
+ for(int i=1;i<argc;++i){std::string_view a=argv[i];if(a=="--list-capabilities"){if(argc!=2)throw std::runtime_error("--list-capabilities takes no other options");return k22::graphics_cli::list_capabilities();}if(a=="--dump-textures")return k22::graphics_cli::dump(argc,argv);if(a=="--door-table")return k22::door_table(argc,argv);if(a=="--export-files")return export_files(argc,argv);if(a=="--list-models"||a=="--export-model")return models(argc,argv);}
  auto graphics=k22::graphics_cli::extract(argc,argv);
  std::filesystem::path scenarioFile,scenarioOut=".";{int kept=1;for(int i=1;i<argc;++i){std::string_view a=argv[i];if(a=="--scenario"||a=="--scenario-out"){if(i+1>=argc)throw std::runtime_error("missing value for "+std::string(a));(a=="--scenario"?scenarioFile:scenarioOut)=argv[++i];continue;}argv[kept++]=argv[i];}argc=kept;}
  int character=-1;{int kept=1;for(int i=1;i<argc;++i){if(std::string_view(argv[i])=="--character"){if(i+1>=argc)throw std::runtime_error("missing value for --character");const std::string_view c=argv[++i];character=c=="demir"?0:c=="ebru"?1:c=="inzar"?2:c=="original"?-1:-2;if(character<-1)throw std::runtime_error("--character requires original, demir, ebru or inzar");continue;}argv[kept++]=argv[i];}argc=kept;}
@@ -112,11 +136,7 @@ int main(int argc,char** argv){try{
  if(mode!="campaign"&&mode!="bonus")throw std::runtime_error("unsupported mode; choose campaign or bonus");const bool bonus=mode=="bonus";
  const bool explicitLanguage=!language.empty();
  k22::Assets assets(data,bonus);
- for(const auto& id:mods){
-  auto mod=k22::load_mod(k22::mods_root()/id);if(!mod.valid)throw std::runtime_error("mod "+id+" is invalid: "+mod.detail);
-  std::size_t files=0;try{files=assets.add_mod(mod.path/"data");}catch(const std::exception& e){throw std::runtime_error("mod "+id+" is invalid: "+e.what());}
-  std::cerr<<"kabus22: mod "<<id<<": "<<files<<" files\n";
- }
+ add_mods(assets,mods);
  if(language.empty()&&bonus){language="en";auto marker=private_bonus_locale();if(!marker&&assets.contains("ygm.k22"))marker=assets.text("ygm.k22");if(marker){auto remembered=std::string_view(*marker).substr(0,marker->find_first_of("\r\n"));if(remembered=="111")language="tr";else if(remembered=="222")language="de";}}
  if(language.empty()){const char* locale=std::getenv("LC_ALL");if(!locale||!*locale)locale=std::getenv("LC_MESSAGES");if(!locale||!*locale)locale=std::getenv("LANG");auto name=locale?lower(locale):std::string{};language=name.starts_with("tr")?"tr":name.starts_with("de")?"de":"en";}if(audioLanguage.empty())audioLanguage=language=="tr"?"tr":"en";
  // Patch DilMenu adds es/ru/pl (DD_Dil 3-5); they exist only with its scripts and _data/language/<folder> files.

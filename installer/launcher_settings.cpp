@@ -1,6 +1,8 @@
 #include "launcher_settings.hpp"
 #include "layout.hpp"
 #include <glib.h>
+#define CGLTF_IMPLEMENTATION
+#include "cgltf.h"
 #include <archive.h>
 #include <archive_entry.h>
 #include <nlohmann/json.hpp>
@@ -454,6 +456,10 @@ Mod readMod(const fs::path& folder) {
         for(const auto& e:fs::recursive_directory_iterator(data))if(e.symlink_status().type()==fs::file_type::regular)m.files.push_back(assetName(e.path().lexically_relative(data).generic_string()));
         std::sort(m.files.begin(),m.files.end());
         auto twice=std::adjacent_find(m.files.begin(),m.files.end());require(twice==m.files.end(),"Two files under data/ both name "+(twice==m.files.end()?std::string():*twice));
+        // Engine rule: one file per model — x.mdl, x.gltf and x.glb in one mod conflict.
+        std::vector<std::string> models;for(const auto& f:m.files)if(auto k=modelKey(f);!k.empty())models.push_back(k);
+        std::sort(models.begin(),models.end());auto clash=std::adjacent_find(models.begin(),models.end());
+        require(clash==models.end(),"Two model files under data/ both provide "+(clash==models.end()?std::string():*clash)+" (keep one of .mdl, .gltf, .glb)");
         m.valid=true;m.detail=std::to_string(m.files.size())+(m.files.size()==1?" file":" files");
     } catch(const std::exception& e){m.detail=e.what();}
     return m;
@@ -516,6 +522,76 @@ std::string installMod(const fs::path& root, const fs::path& zip) {
             throw std::runtime_error(errno==EEXIST?"A mod named "+id+" already exists; remove it first":"Cannot install mod "+id+": "+std::strerror(errno));
         fs::remove_all(stage);return id;
     } catch(...) {std::error_code ec;fs::remove_all(stage,ec);throw;}
+}
+std::string modelKey(std::string_view name) {
+    auto n=assetName(name);auto dot=n.rfind('.');if(dot==std::string::npos||n.find('/',dot)!=std::string::npos)return {};
+    auto ext=n.substr(dot);return ext==".mdl"||ext==".gltf"||ext==".glb"?n.substr(0,dot)+".mdl":std::string();
+}
+fs::path viewerCache(const std::string& mod, const std::string& key, bool bonus) {
+    auto dir=fs::path(g_get_user_cache_dir())/"kabus22/viewer"/(mod.empty()?"_original":mod);return (bonus?dir/"@bonus":dir)/key;
+}
+GltfSummary readGltf(const fs::path& file) {
+    cgltf_options options{};cgltf_data* data=nullptr;
+    require(cgltf_parse_file(&options,file.c_str(),&data)==cgltf_result_success,"Not a readable glTF file: "+file.string());
+    std::unique_ptr<cgltf_data,decltype(&cgltf_free)> owned(data,cgltf_free);
+    require(cgltf_validate(data)==cgltf_result_success,"Invalid glTF (accessor, view or buffer out of range): "+file.string());
+    GltfSummary s;s.meshes=data->meshes_count;
+    for(std::size_t m=0;m<data->meshes_count;++m)for(std::size_t p=0;p<data->meshes[m].primitives_count;++p){
+        const auto& prim=data->meshes[m].primitives[p];if(prim.type!=cgltf_primitive_type_triangles)continue;
+        const cgltf_accessor* position=nullptr;for(std::size_t a=0;a<prim.attributes_count;++a)if(prim.attributes[a].type==cgltf_attribute_type_position)position=prim.attributes[a].data;
+        s.triangles+=(prim.indices?prim.indices->count:position?position->count:0)/3;
+    }
+    auto uri=[&](const char* u){if(u&&!std::string_view(u).starts_with("data:")){std::string d=u;d.resize(cgltf_decode_uri(d.data()));s.uris.push_back(d);}};
+    for(std::size_t i=0;i<data->buffers_count;++i)uri(data->buffers[i].uri);
+    for(std::size_t i=0;i<data->images_count;++i)uri(data->images[i].uri);
+    return s;
+}
+namespace {
+std::vector<std::pair<fs::path,std::string>> dataFiles(const fs::path& mod) {
+    std::vector<std::pair<fs::path,std::string>> files;std::error_code ec;const auto data=mod/"data";
+    for(fs::recursive_directory_iterator it(data,ec),end;!ec&&it!=end;it.increment(ec))if(it->symlink_status().type()==fs::file_type::regular)files.emplace_back(it->path(),assetName(it->path().lexically_relative(data).generic_string()));
+    return files;
+}
+// A side file URI relative to its glTF; empty for schemes ("x:"), absolute paths and paths leaving the glTF's folder.
+fs::path sideFile(const std::string& uri) {
+    auto colon=uri.find(':');if(colon!=std::string::npos&&uri.find('/')>colon)return {};
+    auto rel=fs::path(uri).lexically_normal();return rel.empty()||rel.is_absolute()||*rel.begin()==".."||rel==fs::path(".")?fs::path():rel;
+}
+std::string lowerExtension(const fs::path& p) {return assetName(p.extension().string());}
+}
+ModelPlan planReplacement(const fs::path& mod, const std::string& key, const fs::path& source) {
+    require(modelKey(key)==key,"Not a model name: "+key);
+    const auto ext=lowerExtension(source);require(ext==".mdl"||ext==".gltf"||ext==".glb","Pick a .gltf, .glb or .mdl file");
+    const auto files=dataFiles(mod);ModelPlan plan;
+    // An existing file with the same normalized name is overwritten in place (letter case does not matter).
+    auto place=[&](const fs::path& wanted){auto name=assetName(wanted.lexically_relative(mod/"data").generic_string());for(const auto& [p,n]:files)if(n==name)return p;return wanted;};
+    const auto destination=place(mod/"data"/(key.substr(0,key.size()-4)+ext));plan.copies.emplace_back(source,destination);
+    for(const auto& [p,n]:files)if(modelKey(n)==key&&p!=destination)plan.removed.push_back(p);
+    if(ext!=".mdl"){
+        auto g=readGltf(source);std::string refused;
+        if(!g.meshes)plan.warnings.push_back("the file has no mesh");
+        if(g.triangles>20000)plan.warnings.push_back(std::to_string(g.triangles)+" triangles: above the 20 000 the engine is tuned for");
+        for(const auto& uri:g.uris){
+            auto rel=sideFile(uri);if(rel.empty()){refused+="\n  "+uri;continue;}
+            if(!fs::is_regular_file(source.parent_path()/rel)){plan.warnings.push_back("missing next to the model: "+uri);continue;}
+            plan.copies.emplace_back(source.parent_path()/rel,place(destination.parent_path()/rel));
+        }
+        require(refused.empty(),"The glTF names files outside its folder (absolute or ../ URIs); copy them next to it and use relative URIs:"+refused);
+    }
+    std::error_code ec;std::erase_if(plan.copies,[&](const auto& c){return fs::equivalent(c.first,c.second,ec);});
+    for(const auto& [from,to]:plan.copies)if(fs::exists(to))plan.overwritten.push_back(to);
+    return plan;
+}
+std::vector<fs::path> replacementFiles(const fs::path& mod, const std::string& key) {
+    const auto files=dataFiles(mod);std::vector<fs::path> out,kept;
+    auto sides=[&](const fs::path& model){std::vector<fs::path> r;auto e=lowerExtension(model);if(e==".gltf"||e==".glb")try{for(const auto& uri:readGltf(model).uris)if(auto rel=sideFile(uri);!rel.empty())r.push_back((model.parent_path()/rel).lexically_normal());}catch(const std::exception&){}return r;};
+    for(const auto& [p,n]:files)if(auto k=modelKey(n);!k.empty())for(auto& s:k==key?std::vector<fs::path>{}:sides(p))kept.push_back(s);
+    for(const auto& [p,n]:files)if(modelKey(n)==key)out.push_back(p);
+    for(std::size_t i=0,models=out.size();i<models;++i)for(const auto& s:sides(out[i])){
+        bool known=std::any_of(files.begin(),files.end(),[&](const auto& f){return f.first.lexically_normal()==s;});
+        if(known&&!std::count(kept.begin(),kept.end(),s)&&!std::count(out.begin(),out.end(),s))out.push_back(s);
+    }
+    return out;
 }
 // Versioned installs run from versions/<active>/bin; never follow the compat bin link for executable admission.
 fs::path binDirectory(const fs::path& root) { auto active=layout::active_version(root); return active.empty()?root/"bin":root/"versions"/active/"bin"; }
@@ -762,6 +838,28 @@ void selfCheck() {
             rejects([&]{installMod(modRoot,zip(file,entries));});
         require(!fs::exists(scratch/"escaped")&&!fs::exists(modRoot/"dotdot")&&!fs::exists(modRoot/"symlink")&&!fs::exists(modRoot/"a"),"Refused zip left files behind");
         for(const auto& e:fs::directory_iterator(modRoot))require(!e.path().filename().string().starts_with(".install-"),"Zip staging folder left behind");
+        // Model viewer: keys, case-insensitive destination, side-file copies, escaping URIs refused, shared side files kept.
+        require(modelKey("Sub\\Demir.GLTF")=="sub/demir.mdl"&&modelKey("a.glb")=="a.mdl"&&modelKey("a.MDL")=="a.mdl"&&modelKey("a.wav").empty()&&modelKey("x.mdl/b").empty(),"Model key regression");
+        require(viewerCache("","a/b.mdl",true).generic_string().ends_with("kabus22/viewer/_original/@bonus/a/b.mdl")&&viewerCache("m","b.mdl",false).generic_string().ends_with("kabus22/viewer/m/b.mdl"),"Viewer cache path regression");
+        {auto gltf=[](const fs::path& p,const std::string& buffers,const std::string& images){fs::create_directories(p.parent_path());std::ofstream(p)<<R"({"asset":{"version":"2.0"},"buffers":)"<<buffers<<R"(,"images":)"<<images<<"}";};
+            auto touch=[](const fs::path& p){fs::create_directories(p.parent_path());std::ofstream(p)<<"x";};
+            const auto mod=modRoot/"models",src=scratch/"src";fs::create_directories(mod/"data/sub");std::ofstream(mod/"mod.txt")<<"kabus22-mod 1\nname\tModels\n";
+            gltf(mod/"data/Sub/Demir.GLTF",R"([{"uri":"shared.bin","byteLength":1}])",R"([{"uri":"own.png"}])");gltf(mod/"data/Sub/other.gltf",R"([{"uri":"shared.bin","byteLength":1}])","[]");
+            for(auto f:{"data/Sub/shared.bin","data/Sub/own.png","data/sub/demir.mdl","data/Sub/keep.png"})touch(mod/f);
+            gltf(src/"new.gltf",R"([{"uri":"b.bin","byteLength":1}])",R"([{"uri":"tex/a%20b.png"},{"uri":"data:image/png;base64,AA=="}])");touch(src/"b.bin");touch(src/"tex/a b.png");
+            auto plan=planReplacement(mod,"sub/demir.mdl",src/"new.gltf");
+            require(plan.copies==std::vector<std::pair<fs::path,fs::path>>{{src/"new.gltf",mod/"data/Sub/Demir.GLTF"},{src/"b.bin",mod/"data/Sub/b.bin"},{src/"tex/a b.png",mod/"data/Sub/tex/a b.png"}},"Replacement copies / case-insensitive destination regression");
+            require(plan.removed==std::vector<fs::path>{mod/"data/sub/demir.mdl"}&&plan.overwritten==std::vector<fs::path>{mod/"data/Sub/Demir.GLTF"}&&plan.warnings==Args{"the file has no mesh"},"Replacement removal / overwrite / warning regression");
+            require(planReplacement(mod,"sub/demir.mdl",mod/"data/sub/demir.mdl").copies.empty(),"Replacing a model with itself copies");
+            require(planReplacement(mod,"x/y.mdl",src/"new.gltf").copies[0].second==mod/"data/x/y.gltf","New replacement destination regression");
+            gltf(src/"bad.gltf","[]",R"([{"uri":"../x.png"},{"uri":"/etc/passwd"},{"uri":"file:///etc/passwd"},{"uri":"tex/../../y.png"},{"uri":"tex/a%20b.png"}])");
+            try{planReplacement(mod,"sub/demir.mdl",src/"bad.gltf");throw std::logic_error("Escaping glTF URIs accepted");}
+            catch(const std::runtime_error& e){std::string w=e.what();for(auto u:{"../x.png","/etc/passwd","file:///etc/passwd","tex/../../y.png"})require(w.find(u)!=std::string::npos,"Refused URI not listed: "+std::string(u));require(w.find("a b.png")==std::string::npos,"Safe URI refused");}
+            rejects([&]{planReplacement(mod,"sub/demir.mdl",src/"b.bin");});touch(src/"broken.gltf");rejects([&]{planReplacement(mod,"sub/demir.mdl",src/"broken.gltf");});
+            auto gone=replacementFiles(mod,"sub/demir.mdl");std::sort(gone.begin(),gone.end());
+            require(gone==std::vector<fs::path>{mod/"data/Sub/Demir.GLTF",mod/"data/Sub/own.png",mod/"data/sub/demir.mdl"},"Removal set regression (shared side file must stay)");
+            {auto both=readMod(mod);require(!both.valid&&both.detail.find("sub/demir.mdl")!=std::string::npos,"Mod with x.mdl and x.gltf accepted");}
+            require(replacementFiles(mod,"nothing.mdl").empty(),"Removal set for an absent model is not empty");}
         // Contract F controller.ini: exact roundtrip, engine-equivalent lenient reading, strict writing.
         std::vector<std::string> warnings;auto pad=defaultController();require(parseController(encodeController(pad),warnings)==pad&&warnings.empty(),"Default controller roundtrip regression");
         pad.mode="modern";pad.deadzone=0.25;pad.sensitivity=1.5;pad.vibration=false;pad.buttons[0].second=0;pad.buttons[13].second=4;

@@ -88,8 +88,11 @@ install(FILES "${K22_FFX}/LICENSE.txt" DESTINATION share/doc/kabus22/third_party
 add_library(kabus22_core native/engine.cpp native/wdl.cpp native/assets.cpp native/render.cpp
   native/render_gl.cpp native/render_vulkan.cpp native/render_vulkan_raster.cpp native/render_vulkan_rt.cpp native/vulkan_loader.cpp
   native/media.cpp native/physics.cpp native/texture_pack.cpp native/controller.cpp native/saves.cpp native/console.cpp native/seamless_doors.cpp
-  native/character.cpp native/coop_menu.cpp native/coop.cpp native/mods.cpp "${K22_SHADER_HEADER}")
+  native/character.cpp native/coop_menu.cpp native/coop.cpp native/mods.cpp native/model_gltf.cpp "${K22_SHADER_HEADER}")
 target_include_directories(kabus22_core PUBLIC native PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${Vulkan_INCLUDE_DIRS})
+# cgltf v1.15 (MIT): mod glTF model import (native/model_gltf.cpp).
+target_include_directories(kabus22_core SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cgltf")
+install(FILES third_party/cgltf/LICENSE DESTINATION share/doc/kabus22/third_party RENAME cgltf-LICENSE)
 target_link_libraries(kabus22_core PUBLIC PkgConfig::SDL2 PkgConfig::EPOXY PkgConfig::AV PkgConfig::FREETYPE PkgConfig::FONTCONFIG Threads::Threads ODE ${CMAKE_DL_LIBS} PRIVATE kabus22_fsr3)
 target_compile_options(kabus22_core PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(kabus22 native/main.cpp native/scenario.cpp)
@@ -103,8 +106,9 @@ if(BUILD_TESTING)
   add_executable(check_assets native/check_assets.cpp)
   target_link_libraries(check_assets PRIVATE kabus22_core)
   add_test(NAME asset_boundaries COMMAND check_assets)
-  add_executable(check_media native/media.cpp native/assets.cpp)
+  add_executable(check_media native/media.cpp native/assets.cpp native/model_gltf.cpp native/texture_pack.cpp)
   target_include_directories(check_media PRIVATE native)
+  target_include_directories(check_media SYSTEM PRIVATE third_party/cgltf)
   target_compile_definitions(check_media PRIVATE K22_MEDIA_SELF_CHECK=1)
   target_link_libraries(check_media PRIVATE PkgConfig::SDL2 PkgConfig::AV Threads::Threads)
   set(K22_TEST_MEDIA "${CMAKE_SOURCE_DIR}/reverse/decompiled/runtime/campaign-media/riff-vorbis/v_tacikos_kapi-wrapped.bin")

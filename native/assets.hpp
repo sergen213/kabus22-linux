@@ -111,7 +111,10 @@ public:
     uint8_t native_lightmap_mono(uint16_t word) const;
     void mount(std::string_view resource);
     // Mod overlay (docs/MODDING.md): call in priority order, first call wins; mod files precede loose files and archives. Returns file count.
+    // A mod's <dir>/<stem>.gltf or .glb also provides <dir>/<stem>.mdl (model() imports it, model_gltf.hpp).
     size_t add_mod(const std::filesystem::path& dataDir);
+    // {mod data root, file} providing name, or null when it is the game's own.
+    const std::pair<std::filesystem::path,std::filesystem::path>* mod_file(std::string_view name) const;
     bool contains(std::string_view name) const;
     std::vector<std::string> names() const; // Sorted normalized names of loose files and mounted archive entries.
     std::vector<uint8_t> read(std::string_view name) const;
@@ -138,6 +141,7 @@ public:
 private:
     struct Entry { std::filesystem::path archive; uint64_t offset{}; uint32_t packed{}, size{}; };
     std::vector<uint8_t> read_entry(const Entry&) const;
+    std::vector<uint8_t> read_original(std::string_view name) const; // loose file or archive member, ignoring mods
     std::filesystem::path resolve(std::string_view name) const;
     std::shared_ptr<const Image> embedded_image(std::span<const uint8_t>,size_t&,uint32_t,uint32_t,uint32_t);
     const Model* load_model(std::string_view name,bool initializeShadowResources);

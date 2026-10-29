@@ -19,6 +19,7 @@ SOFTWARE.
 */
 #include "assets.hpp"
 #include "media.hpp"
+#include "model_gltf.hpp"
 #include "pe_font.hpp"
 #include <algorithm>
 #include <bit>
@@ -254,8 +255,19 @@ size_t Assets::add_mod(const std::filesystem::path& dataDir) {
         auto name=safe_name(entry.path().lexically_relative(root).generic_string());
         if(!files.emplace(name,entry.path()).second)malformed("case-insensitive mod resource collision: "+name);
     }
+    // <stem>.gltf/.glb replaces <stem>.mdl; a mod shipping both (or both glTF forms) is ambiguous.
+    auto replaced=[](const std::string& name)->std::string{for(std::string_view ext:{".gltf",".glb"})if(name.ends_with(ext))return name.substr(0,name.size()-ext.size())+".mdl";return {};};
+    std::unordered_map<std::string,std::string> models;
+    for(const auto&[name,path]:files)if(auto mdl=replaced(name);!mdl.empty()){
+        if(files.contains(mdl))malformed("mod has both "+mdl+" and its glTF replacement "+name);
+        if(!models.emplace(mdl,name).second)malformed("mod has two glTF replacements for "+mdl);
+    }
+    for(const auto&[mdl,name]:models)mods_.try_emplace(mdl,root,files.at(name));
     for(auto&[name,path]:files)mods_.try_emplace(name,root,std::move(path));
     return files.size();
+}
+const std::pair<std::filesystem::path,std::filesystem::path>* Assets::mod_file(std::string_view name) const {
+    auto it=mods_.find(safe_name(name));return it==mods_.end()?nullptr:&it->second;
 }
 std::filesystem::path Assets::resolve(std::string_view name) const {
     auto normalized=safe_name(name);auto it=loose_.find(normalized);
@@ -307,6 +319,10 @@ std::vector<uint8_t> Assets::read(std::string_view name) const {
     if(auto it=mods_.find(normalized);it!=mods_.end()) {
         File file(it->second.first,it->second.second);return file.bytes(0,std::filesystem::file_size(it->second.second));
     }
+    return read_original(normalized);
+}
+std::vector<uint8_t> Assets::read_original(std::string_view name) const {
+    auto normalized=safe_name(name);
     if(auto it=loose_.find(normalized);it!=loose_.end()) {
         File file(root_,it->second);return file.bytes(0,std::filesystem::file_size(it->second));
     }
@@ -371,7 +387,15 @@ const Model* Assets::load_model(std::string_view name,bool initializeShadowResou
     const auto before=cachedBytes_,imageBefore=image_cache_bytes(images_);
     Model* loaded;
     try {
-        auto value=decode_model(bytes,name);source_render_links(value);
+        Model value;
+        const auto* mod=mods_.contains(normalized)?&mods_.at(normalized):nullptr;
+        if(auto ext=mod?key(mod->second.extension().string()):std::string{};ext==".gltf"||ext==".glb") {
+            // Mod glTF replacement (model_gltf.hpp): animated from the game's own model of that name.
+            const auto resource=safe_name(mod->second.lexically_relative(mod->first).generic_string());
+            if(!loose_.contains(normalized)&&!entries_.contains(normalized))malformed(resource+" replaces no original model "+normalized);
+            value=import_gltf(bytes,resource,decode_model(read_original(normalized),name),[this](std::string_view file){return read(file);});
+        } else value=decode_model(bytes,name);
+        source_render_links(value);
         charge(cachedBytes_,model_bytes(value));loaded=&models_.emplace(normalized,std::move(value)).first->second;
     } catch(...) {cachedBytes_=before+image_cache_bytes(images_)-imageBefore;throw;}
     // A6 004561c0 and A7 10059dc0 birth three actual self aliases.
