@@ -238,13 +238,24 @@ uint8_t Assets::native_lightmap_mono(uint16_t word) const {
     return nativeMonoRamp_[index];
 }
 bool Assets::contains(std::string_view name) const {
-    auto normalized=safe_name(name);return loose_.contains(normalized)||entries_.contains(normalized);
+    auto normalized=safe_name(name);return mods_.contains(normalized)||loose_.contains(normalized)||entries_.contains(normalized);
 }
 std::vector<std::string> Assets::names() const {
-    std::vector<std::string> result;result.reserve(loose_.size()+entries_.size());
-    for(const auto&[name,path]:loose_)result.push_back(name);
-    for(const auto&[name,entry]:entries_)if(!loose_.contains(name))result.push_back(name);
+    std::vector<std::string> result;result.reserve(mods_.size()+loose_.size()+entries_.size());
+    for(const auto&[name,file]:mods_)result.push_back(name);
+    for(const auto&[name,path]:loose_)if(!mods_.contains(name))result.push_back(name);
+    for(const auto&[name,entry]:entries_)if(!mods_.contains(name)&&!loose_.contains(name))result.push_back(name);
     std::sort(result.begin(),result.end());return result;
+}
+size_t Assets::add_mod(const std::filesystem::path& dataDir) {
+    auto root=std::filesystem::canonical(dataDir);std::unordered_map<std::string,std::filesystem::path> files;
+    for(auto& entry:std::filesystem::recursive_directory_iterator(root)) {
+        if(entry.is_symlink()||!entry.is_regular_file())continue;
+        auto name=safe_name(entry.path().lexically_relative(root).generic_string());
+        if(!files.emplace(name,entry.path()).second)malformed("case-insensitive mod resource collision: "+name);
+    }
+    for(auto&[name,path]:files)mods_.try_emplace(name,root,std::move(path));
+    return files.size();
 }
 std::filesystem::path Assets::resolve(std::string_view name) const {
     auto normalized=safe_name(name);auto it=loose_.find(normalized);
@@ -293,6 +304,9 @@ std::vector<uint8_t> Assets::decompress(std::span<const uint8_t> bytes,size_t ex
 }
 std::vector<uint8_t> Assets::read(std::string_view name) const {
     auto normalized=safe_name(name);
+    if(auto it=mods_.find(normalized);it!=mods_.end()) {
+        File file(it->second.first,it->second.second);return file.bytes(0,std::filesystem::file_size(it->second.second));
+    }
     if(auto it=loose_.find(normalized);it!=loose_.end()) {
         File file(root_,it->second);return file.bytes(0,std::filesystem::file_size(it->second));
     }
@@ -304,14 +318,17 @@ std::vector<uint8_t> Assets::read_entry(const Entry& entry) const {
     File file(root_,entry.archive);auto packed=file.bytes(entry.offset,entry.packed);return decompress(packed,entry.size);
 }
 std::string Assets::archive_text(std::string_view name) const {
-    auto it=entries_.find(safe_name(name));if(it==entries_.end())malformed("missing archived resource: "+std::string(name));
+    auto normalized=safe_name(name);
+    if(!bonusProfile_&&mods_.contains(normalized))return text(normalized); // campaign scripts are moddable; Bonus stays archive-only
+    auto it=entries_.find(normalized);if(it==entries_.end())malformed("missing archived resource: "+std::string(name));
     auto data=read_entry(it->second);return {reinterpret_cast<const char*>(data.data()),data.size()};
 }
 std::shared_ptr<const Image> Assets::image_ptr(std::string_view name) {
     auto normalized=safe_name(name);if(auto it=images_.find(normalized);it!=images_.end())return it->second;
     std::vector<uint8_t> bytes;
     if(normalized=="engine/_a4font.pcx") {
-        if(auto it=loose_.find(normalized);it!=loose_.end()) {
+        if(mods_.contains(normalized)) {bytes=read(normalized);validate_engine_font(bytes);}
+        else if(auto it=loose_.find(normalized);it!=loose_.end()) {
             File file(root_,it->second,true);bytes=file.stable_bytes(fontPeLimit);
             validate_engine_font(bytes);
         } else if(entries_.contains(normalized)) {

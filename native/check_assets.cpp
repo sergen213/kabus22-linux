@@ -1,6 +1,8 @@
 #include "assets.hpp"
+#include "mods.hpp"
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <bit>
 #include <iostream>
 #include <stdexcept>
@@ -106,6 +108,46 @@ int main(int argc,char** argv) {
         Assets incomplete(root);rejects([&]{incomplete.mount("turkce.k22");});
         {std::ofstream broken(root/"ses_tr.k22",std::ios::binary);broken.write("RIFF",4);}
         Assets corrupt(root);rejects([&]{corrupt.mount("ses_tr.k22");});
+    }
+    {   // Mods (docs/MODDING.md): data/ files precede loose files and archives; the first added mod wins.
+        const auto game=std::filesystem::path(root.string()+"-mods");if(!std::filesystem::create_directory(game))throw std::runtime_error("cannot create mod check directory");
+        Cleanup modCleanup{game};const auto data=game/"root";std::filesystem::create_directories(data);
+        auto put=[](const std::filesystem::path& p,std::string_view v){std::filesystem::create_directories(p.parent_path());std::ofstream(p,std::ios::binary)<<v;};
+        tiny_archive(data/"a.wrs","packed.txt","archive",3);put(data/"Loose.txt","loose");
+        put(game/"one/mod.txt","kabus22-mod 1\r\nname\tOne\r\nversion\t1.0\n\nauthor\tme\ndescription\td\n");put(game/"one/readme.txt","r");
+        put(game/"one/data/PACKED.txt","one");put(game/"one/data/loose.txt","one-loose");put(game/"one/data/Sub/New.txt","new");
+        put(game/"two/mod.txt","kabus22-mod 1\nname\tTwo");put(game/"two/data/packed.txt","two");put(game/"two/data/only2.txt","2");
+        std::filesystem::create_symlink(data/"Loose.txt",game/"two/data/link.txt");
+        Assets plain(data);plain.mount("a.wrs");const auto before=plain.names();
+        if(plain.text("packed.txt")!="archive"||plain.text("loose.txt")!="loose"||before.size()!=3)throw std::runtime_error("no-mod resources changed");
+        auto one=k22::load_mod(game/"one");
+        if(!one.valid||one.id!="one"||one.name!="One"||one.version!="1.0"||one.author!="me"||one.description!="d"||!k22::load_mod(game/"two").valid)throw std::runtime_error("valid mod.txt rejected: "+one.detail);
+        Assets modded(data);
+        if(modded.add_mod(game/"one/data")!=3||modded.add_mod(game/"two/data")!=2)throw std::runtime_error("mod file count (symlink counted?)");
+        modded.mount("a.wrs");
+        if(modded.text("packed.txt")!="one"||modded.text("LOOSE.TXT")!="one-loose"||modded.text("sub\\new.txt")!="new"||modded.text("only2.txt")!="2"||modded.archive_text("packed.txt")!="one")throw std::runtime_error("mod overlay priority");
+        if(modded.contains("link.txt")||modded.contains("readme.txt")||modded.contains("mod.txt")||!modded.contains("Sub/New.txt"))throw std::runtime_error("mod data/ visibility");
+        auto names=modded.names();
+        if(names.size()!=before.size()+2||!std::binary_search(names.begin(),names.end(),std::string("sub/new.txt"))||!std::binary_search(names.begin(),names.end(),std::string("only2.txt")))throw std::runtime_error("mod names");
+        Assets bonus(data,true);bonus.add_mod(game/"one/data");bonus.mount("a.wrs");
+        if(bonus.archive_text("packed.txt")!="archive"||bonus.text("packed.txt")!="one")throw std::runtime_error("Bonus scripts must stay archive-only");
+        put(game/"dup/data/A.txt","a");put(game/"dup/data/a.TXT","b");
+        rejects([&]{Assets(data).add_mod(game/"dup/data");});
+        std::filesystem::create_directories(game/"bad/data");
+        auto invalid=[&](std::string_view manifest,std::string_view detail){
+            put(game/"bad/mod.txt",manifest);auto m=k22::load_mod(game/"bad");
+            if(m.valid||m.detail.find(detail)==std::string::npos)throw std::runtime_error("invalid mod.txt accepted or misreported: "+std::string(manifest)+" -> "+m.detail);
+        };
+        invalid("kabus22-mod 2\nname\tx\n","header");invalid("","header");invalid("kabus22-mod 1\n","name");invalid("kabus22-mod 1\nname\t\n","name");
+        invalid("kabus22-mod 1\nname\ta\nname\tb\n","duplicate name");invalid("kabus22-mod 1\nname\ta\nlicense\tb\n","unknown key");invalid("kabus22-mod 1\nname a\n","key<TAB>value");
+        put(game/"bad/mod.txt","kabus22-mod 1\nname\tok\n");if(!k22::load_mod(game/"bad").valid)throw std::runtime_error("minimal mod rejected");
+        std::filesystem::remove(game/"bad/data");if(k22::load_mod(game/"bad").detail!="missing data/ directory")throw std::runtime_error("mod without data/ accepted");
+        std::filesystem::create_directories(game/"link/data");std::filesystem::create_symlink(game/"bad/mod.txt",game/"link/mod.txt");
+        if(k22::load_mod(game/"link").valid||k22::load_mod(game/"missing").valid||k22::load_mod(game/"-x").valid)throw std::runtime_error("symlinked/missing/invalid-id mod accepted");
+        const char* xdg=std::getenv("XDG_DATA_HOME");const std::string saved=xdg?xdg:"";
+        ::setenv("XDG_DATA_HOME","/xdg",1);if(k22::mods_root()!="/xdg/kabus22/mods")throw std::runtime_error("mods root");
+        ::setenv("XDG_DATA_HOME","relative",1);if(k22::mods_root().string().starts_with("relative"))throw std::runtime_error("relative XDG_DATA_HOME used");
+        if(xdg)::setenv("XDG_DATA_HOME",saved.c_str(),1);else ::unsetenv("XDG_DATA_HOME");
     }
     {
         constexpr std::string_view first="var source=1;",second="var source=2;",loose="var source=3;";

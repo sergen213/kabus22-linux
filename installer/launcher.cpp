@@ -10,6 +10,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -90,6 +91,8 @@ struct UI {
     // Rendering (Contract D)
     GtkWidget *preset=nullptr,*backends=nullptr,*customGrid=nullptr,*packView=nullptr,*packUp=nullptr,*packDown=nullptr,*fpsLimit=nullptr;GtkListStore* packs=nullptr;
     std::vector<std::pair<Option,GtkWidget*>> optionWidgets;std::string capsNote="Load an installation to query engine capabilities.";
+    // Mods (contract: one --mod ID per checked row, list order = priority)
+    GtkWidget *modsPage=nullptr,*modView=nullptr,*modDetails=nullptr;GtkListStore* modStore=nullptr;std::vector<Mod> mods;
     // Controller (Contract F)
     GtkWidget *padMode=nullptr,*deadzone=nullptr,*sensitivity=nullptr,*vibration=nullptr;std::vector<GtkWidget*> padButtons;
     // Installation (Contract C)
@@ -107,7 +110,7 @@ struct UI {
         bool loaded=settings.has_value(), idle=!job, hasRoot=!rootText().empty();
         gtk_widget_set_sensitive(apply,loaded&&idle);gtk_widget_set_sensitive(play,loaded&&idle);gtk_widget_set_sensitive(restore,loaded&&idle);
         gtk_widget_set_sensitive(reload,idle);gtk_widget_set_sensitive(root,idle);gtk_widget_set_sensitive(browse,idle);
-        for(auto* w:{launchPage,campaignPage,renderPage,audioPage,keysPage,joyPage,padPage,bonusPage})gtk_widget_set_sensitive(w,loaded&&idle);
+        for(auto* w:{launchPage,campaignPage,renderPage,modsPage,audioPage,keysPage,joyPage,padPage,bonusPage})gtk_widget_set_sensitive(w,loaded&&idle);
         for(auto* w:{install,chooseFile,chooseFolder,source})gtk_widget_set_sensitive(w,idle);
         gtk_widget_set_sensitive(verify,idle&&hasRoot);gtk_widget_set_sensitive(repair,idle&&hasRoot&&gtk_entry_get_text_length(GTK_ENTRY(source))>0);
         for(auto* w:{repository,channel,checkUpdates})gtk_widget_set_sensitive(w,loaded&&idle);
@@ -144,7 +147,7 @@ struct UI {
         for(std::size_t i=0;i<padButtons.size();++i)gtk_spin_button_set_value(GTK_SPIN_BUTTON(padButtons[i]),c.buttons[i].second);
         gtk_entry_set_text(GTK_ENTRY(repository),s.updates.repository.c_str());select(channel,s.updates.channel);
         populating=false;
-        populateRendering();
+        populateMods(p.mods,p.mods);populateRendering();
     }
     void populateRendering() {
         populating=true;
@@ -199,6 +202,7 @@ struct UI {
         auto& c=s.controller;c.mode=selected(padMode);c.vibration=gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(vibration));
         c.deadzone=std::round(gtk_spin_button_get_value(GTK_SPIN_BUTTON(deadzone))*100)/100;c.sensitivity=std::round(gtk_spin_button_get_value(GTK_SPIN_BUTTON(sensitivity))*100)/100;
         for(std::size_t i=0;i<padButtons.size();++i)c.buttons[i].second=gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(padButtons[i]));
+        p.mods=modIds(true);
         readUpdates();
     }
     void readUpdates() {settings->updates.repository=gtk_entry_get_text(GTK_ENTRY(repository));settings->updates.channel=selected(channel);}
@@ -417,6 +421,95 @@ struct UI {
         std::streamoff size=file.tellg(),start=std::max<std::streamoff>(0,size-262144);file.seekg(start);std::string bytes(static_cast<std::size_t>(size-start),'\0');file.read(bytes.data(),static_cast<std::streamsize>(bytes.size()));
         setText(logText,(start?"[… earlier output omitted]\n":"")+bytes);
     }
+    void openFolder(const fs::path& dir) {
+        g_mkdir_with_parents(dir.c_str(),0700);gchar* uri=g_filename_to_uri(dir.c_str(),nullptr,nullptr);GError* error=nullptr;
+        if(!uri||!gtk_show_uri_on_window(GTK_WINDOW(window),uri,GDK_CURRENT_TIME,&error)){message(std::string("Cannot open ")+dir.string()+(error?std::string(": ")+error->message:""));if(error)g_error_free(error);}g_free(uri);
+    }
+    // ---- mods ----
+    std::vector<std::string> modIds(bool enabledOnly) {
+        std::vector<std::string> ids;GtkTreeIter it;
+        for(bool more=gtk_tree_model_get_iter_first(GTK_TREE_MODEL(modStore),&it);more;more=gtk_tree_model_iter_next(GTK_TREE_MODEL(modStore),&it)){
+            gboolean on=false;gchar* id=nullptr;gtk_tree_model_get(GTK_TREE_MODEL(modStore),&it,0,&on,6,&id,-1);if(on||!enabledOnly)ids.emplace_back(id);g_free(id);
+        }
+        return ids;
+    }
+    std::string selectedMod() {
+        GtkTreeIter it;GtkTreeModel* model=nullptr;if(!gtk_tree_selection_get_selected(gtk_tree_view_get_selection(GTK_TREE_VIEW(modView)),&model,&it))return {};
+        gchar* id=nullptr;gtk_tree_model_get(model,&it,6,&id,-1);std::string result=id;g_free(id);return result;
+    }
+    // Listed order: `order` first, then newly found mods by id; only valid mods can be checked.
+    void populateMods(const std::vector<std::string>& order,const std::vector<std::string>& enabled) {
+        mods=listMods(modsRoot());
+        auto rank=[&](const Mod& m){return std::find(order.begin(),order.end(),m.id)-order.begin();};
+        std::stable_sort(mods.begin(),mods.end(),[&](const Mod& a,const Mod& b){return rank(a)<rank(b);});
+        gtk_list_store_clear(modStore);
+        for(const auto& m:mods){
+            GtkTreeIter it;gtk_list_store_append(modStore,&it);
+            gtk_list_store_set(modStore,&it,0,m.valid&&std::count(enabled.begin(),enabled.end(),m.id),1,valid((m.name.empty()?m.id:m.name)+" ("+m.id+")").c_str(),2,valid(m.version).c_str(),3,valid(m.author).c_str(),
+                4,valid(m.valid?"OK — "+m.detail:"INVALID: "+m.detail).c_str(),5,m.valid,6,m.id.c_str(),-1);
+        }
+        describeMod();
+    }
+    void refreshMods() {populateMods(modIds(false),modIds(true));}
+    void describeMod() {
+        const auto id=selectedMod();std::string text="Select a mod for its details. Mods folder: "+modsRoot().string();
+        for(const auto& m:mods)if(m.id==id){
+            text=(m.name.empty()?m.id:m.name)+(m.version.empty()?"":" "+m.version)+(m.author.empty()?"":" — by "+m.author)+(m.description.empty()?"":"\n"+m.description);
+            text+=(m.valid?"\n"+m.detail+" under data/":"\nInvalid: "+m.detail)+"\nFolder: "+(modsRoot()/m.id).string();
+        }
+        std::map<std::string,std::string> owner;std::vector<std::string> clashes;
+        for(const auto& on:modIds(true))for(const auto& m:mods)if(m.id==on)for(const auto& file:m.files){auto [at,fresh]=owner.emplace(file,on);if(!fresh)clashes.push_back(file+" provided by "+at->second+" and "+on+" — "+at->second+" wins");}
+        if(!clashes.empty()){text+="\n\nConflicts among enabled mods:";for(std::size_t i=0;i<clashes.size()&&i<20;++i)text+="\n  "+clashes[i];if(clashes.size()>20)text+="\n  … "+std::to_string(clashes.size()-20)+" more";}
+        gtk_label_set_text(GTK_LABEL(modDetails),valid(text).c_str());
+    }
+    void newMod() {
+        auto* dialog=gtk_dialog_new_with_buttons("New mod",GTK_WINDOW(window),GTK_DIALOG_MODAL,"_Cancel",GTK_RESPONSE_CANCEL,"C_reate",GTK_RESPONSE_ACCEPT,nullptr);
+        auto* grid=gtk_grid_new();gtk_grid_set_row_spacing(GTK_GRID(grid),9);gtk_grid_set_column_spacing(GTK_GRID(grid),18);gtk_container_set_border_width(GTK_CONTAINER(grid),18);
+        auto* id=gtk_entry_new();auto* name=gtk_entry_new();gtk_entry_set_placeholder_text(GTK_ENTRY(id),"folder name, e.g. my-mod");gtk_entry_set_placeholder_text(GTK_ENTRY(name),"shown in the list");for(auto* e:{id,name})gtk_entry_set_width_chars(GTK_ENTRY(e),32);
+        row(grid,0,"Mod _id",id);row(grid,1,"_Name",name);gtk_container_add(GTK_CONTAINER(gtk_dialog_get_content_area(GTK_DIALOG(dialog))),grid);gtk_widget_show_all(dialog);
+        if(gtk_dialog_run(GTK_DIALOG(dialog))==GTK_RESPONSE_ACCEPT){
+            const std::string folder=gtk_entry_get_text(GTK_ENTRY(id));
+            try{createMod(modsRoot(),folder,gtk_entry_get_text(GTK_ENTRY(name)));refreshMods();message("Created "+(modsRoot()/folder).string()+". Put replacement files under its data/ folder with their game names (Export game files… gives you the originals), then enable it.");}
+            catch(const std::exception& e){message(std::string("New mod failed: ")+e.what());}
+        }
+        gtk_widget_destroy(dialog);
+    }
+    void installZip() {
+        auto* dialog=gtk_file_chooser_dialog_new("Install mod from .zip",GTK_WINDOW(window),GTK_FILE_CHOOSER_ACTION_OPEN,"_Cancel",GTK_RESPONSE_CANCEL,"_Install",GTK_RESPONSE_ACCEPT,nullptr);
+        auto* filter=gtk_file_filter_new();gtk_file_filter_set_name(filter,"Zip archive");gtk_file_filter_add_pattern(filter,"*.[zZ][iI][pP]");gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog),filter);
+        if(gtk_dialog_run(GTK_DIALOG(dialog))==GTK_RESPONSE_ACCEPT){
+            gchar* path=gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+            try{auto id=installMod(modsRoot(),path);refreshMods();message("Installed mod "+id+". Check it in the list, then Apply or Play.");}catch(const std::exception& e){message(std::string("Mod install failed: ")+e.what());}
+            g_free(path);
+        }
+        gtk_widget_destroy(dialog);
+    }
+    void removeMod() {
+        const auto id=selectedMod();if(id.empty()){message("Select the mod to remove.");return;}
+        auto* ask=gtk_message_dialog_new(GTK_WINDOW(window),GTK_DIALOG_MODAL,GTK_MESSAGE_QUESTION,GTK_BUTTONS_NONE,"Remove mod “%s”?",id.c_str());
+        gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(ask),"This permanently deletes %s and everything in it.",(modsRoot()/id).c_str());
+        gtk_dialog_add_buttons(GTK_DIALOG(ask),"_Cancel",GTK_RESPONSE_CANCEL,"_Remove",GTK_RESPONSE_ACCEPT,nullptr);
+        if(gtk_dialog_run(GTK_DIALOG(ask))==GTK_RESPONSE_ACCEPT){
+            try{fs::remove_all(modsRoot()/id);refreshMods();message("Removed mod "+id+".");}catch(const std::exception& e){message(std::string("Remove failed: ")+e.what());}
+        }
+        gtk_widget_destroy(ask);
+    }
+    void exportFiles() {
+        auto* dialog=gtk_file_chooser_dialog_new("Export game files to a new or empty folder",GTK_WINDOW(window),GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER,"_Cancel",GTK_RESPONSE_CANCEL,"_Export",GTK_RESPONSE_ACCEPT,nullptr);
+        gtk_file_chooser_set_create_folders(GTK_FILE_CHOOSER(dialog),true);
+        std::string dir;if(gtk_dialog_run(GTK_DIALOG(dialog))==GTK_RESPONSE_ACCEPT){gchar* path=gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));dir=path?path:"";g_free(path);}
+        gtk_widget_destroy(dialog);if(dir.empty()||!settings)return;
+        try{
+            const bool bonus=selected(mode)=="bonus";if(bonus&&!settings->bonusAvailable)throw std::runtime_error("Bonus data is not installed");
+            std::vector<std::string> args{settings->engine.string(),"--export-files",dir,"--data",(settings->root/"game"/(bonus?"Kabus 22 Mode":"")).string()};if(bonus)args.insert(args.end(),{"--mode","bonus"});
+            start("export",args,settings->root,false,0,[dir](Job& j){
+                auto& ui=*j.ui;auto text=j.out.empty()?j.err:j.out;while(!text.empty()&&(text.back()=='\n'||text.back()=='\r'))text.pop_back();
+                if(auto line=text.find_last_of('\n');line!=std::string::npos)text.erase(0,line+1);
+                ui.message(j.ok()?"Exported game files to "+dir+(text.empty()?"":" ("+text+")")+". Copy the files you change into a mod's data/ folder, keeping their paths.":"Export "+j.failure()+"\nLog: "+j.logPath.string());
+            });
+            message("Exporting "+std::string(bonus?"Bonus":"campaign")+" game files to "+dir+"… Log: "+job->logPath.string());
+        }catch(const std::exception& e){message(std::string("Export failed: ")+e.what());availability();}
+    }
     // ---- construction ----
     void build() {
         window=gtk_window_new(GTK_WINDOW_TOPLEVEL);gtk_window_set_title(GTK_WINDOW(window),"Kabus 22 — Native Settings");gtk_window_set_default_size(GTK_WINDOW(window),900,780);
@@ -469,6 +562,26 @@ struct UI {
         gtk_grid_attach(GTK_GRID(grid),note("Packs live in ~/.local/share/kabus22/packs/<name>/pack.txt and never replace original files. Ray tracing is the Launch tab's Vulkan RT API; its availability is listed above."),0,7,2,1);
         fpsLimit=gtk_combo_box_text_new();gtk_grid_insert_row(GTK_GRID(grid),1);row(grid,1,"_FPS limit",fpsLimit,"Applies under every preset. Original keeps the game's own cap (campaign 72, Bonus 60). Game speed stays correct at every listed rate. With vsync the display refresh rate still caps higher values; Unlimited turns vsync off and stops at about 321 FPS, the original engine's game-clock floor.");
         for(auto* w:{preset,renderer})g_signal_connect(w,"changed",G_CALLBACK(+[](GtkComboBox*,gpointer data){auto& ui=*static_cast<UI*>(data);if(ui.settings&&!ui.populating)ui.availability();}),this);
+        modsPage=page(book,"Mods",grid);
+        {auto* head=gtk_label_new(nullptr);gtk_label_set_markup(GTK_LABEL(head),"<b>Mods</b> replace or add game files by name: models, levels, images, sounds, music, movies and campaign scripts. Checked mods load in this order — the <b>first listed wins</b> when two provide the same file. None checked = the original game.");
+            gtk_label_set_xalign(GTK_LABEL(head),0);gtk_label_set_line_wrap(GTK_LABEL(head),true);gtk_grid_attach(GTK_GRID(grid),head,0,0,2,1);}
+        modStore=gtk_list_store_new(7,G_TYPE_BOOLEAN,G_TYPE_STRING,G_TYPE_STRING,G_TYPE_STRING,G_TYPE_STRING,G_TYPE_BOOLEAN,G_TYPE_STRING);modView=gtk_tree_view_new_with_model(GTK_TREE_MODEL(modStore));g_object_unref(modStore);
+        {auto* toggle=gtk_cell_renderer_toggle_new();gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(modView),-1,"Use",toggle,"active",0,"activatable",5,nullptr);
+            g_signal_connect(toggle,"toggled",G_CALLBACK(+[](GtkCellRendererToggle*,gchar* path,gpointer data){auto& ui=*static_cast<UI*>(data);GtkTreeIter it;if(gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(ui.modStore),&it,path)){gboolean on=false;gtk_tree_model_get(GTK_TREE_MODEL(ui.modStore),&it,0,&on,-1);gtk_list_store_set(ui.modStore,&it,0,!on,-1);ui.describeMod();}}),this);
+            const char* titles[]={"Mod (id)","Version","Author","Status"};
+            for(int c=1;c<=4;++c){auto* text=gtk_cell_renderer_text_new();g_object_set(text,"ellipsize",PANGO_ELLIPSIZE_END,nullptr);auto* column=gtk_tree_view_column_new_with_attributes(titles[c-1],text,"text",c,nullptr);
+                gtk_tree_view_column_set_resizable(column,true);gtk_tree_view_column_set_expand(column,c==1||c==4);gtk_tree_view_append_column(GTK_TREE_VIEW(modView),column);}}
+        g_signal_connect(gtk_tree_view_get_selection(GTK_TREE_VIEW(modView)),"changed",G_CALLBACK(+[](GtkTreeSelection*,gpointer data){static_cast<UI*>(data)->describeMod();}),this);
+        {auto* scroll=gtk_scrolled_window_new(nullptr,nullptr);gtk_widget_set_size_request(scroll,-1,140);gtk_container_add(GTK_CONTAINER(scroll),modView);gtk_widget_set_hexpand(scroll,true);gtk_grid_attach(GTK_GRID(grid),scroll,0,1,2,1);}
+        auto moveMod=[](UI& ui,bool up){GtkTreeIter it,other;GtkTreeModel* model=nullptr;if(!gtk_tree_selection_get_selected(gtk_tree_view_get_selection(GTK_TREE_VIEW(ui.modView)),&model,&it))return;other=it;if(up?gtk_tree_model_iter_previous(model,&other):gtk_tree_model_iter_next(model,&other))gtk_list_store_swap(ui.modStore,&it,&other);ui.describeMod();};
+        auto* modButtons=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);gtk_grid_attach(GTK_GRID(grid),modButtons,0,2,2,1);
+        auto* modUp=button("▲ _Higher priority",this,[](gpointer d){decltype(moveMod){}(*static_cast<UI*>(d),true);});auto* modDown=button("▼ _Lower priority",this,[](gpointer d){decltype(moveMod){}(*static_cast<UI*>(d),false);});
+        for(auto* w:{modUp,modDown,button("Re_fresh",this,[](gpointer d){static_cast<UI*>(d)->refreshMods();}),button("_Open folder",this,[](gpointer d){auto& ui=*static_cast<UI*>(d);auto id=ui.selectedMod();ui.openFolder(id.empty()?modsRoot():modsRoot()/id);})})gtk_box_pack_start(GTK_BOX(modButtons),w,false,false,0);
+        auto* modActions=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);gtk_grid_attach(GTK_GRID(grid),modActions,0,3,2,1);
+        for(auto* w:{button("_New mod…",this,[](gpointer d){static_cast<UI*>(d)->newMod();}),button("_Install from .zip…",this,[](gpointer d){static_cast<UI*>(d)->installZip();}),
+            button("_Export game files…",this,[](gpointer d){static_cast<UI*>(d)->exportFiles();}),button("_Remove",this,[](gpointer d){static_cast<UI*>(d)->removeMod();})})gtk_box_pack_start(GTK_BOX(modActions),w,false,false,0);
+        modDetails=note("");gtk_label_set_selectable(GTK_LABEL(modDetails),true);gtk_grid_attach(GTK_GRID(grid),modDetails,0,4,2,1);
+        gtk_grid_attach(GTK_GRID(grid),note("A mod is a folder in ~/.local/share/kabus22/mods/<id>/ with mod.txt and data/. Files under data/ use the game's own names (letter case does not matter), e.g. data/demir_2007.mdl. Export game files… writes every original resource with those names into an empty folder so you can edit copies. Changes apply on Apply / Play; the original game files are never modified."),0,5,2,1);
         audioPage=page(book,"Audio",grid);const char* volumes[]={"Effects volume","Music volume","Dialogue volume"};for(int i=12;i<=14;++i){campaign[i]=gtk_spin_button_new_with_range(0,100,5);row(grid,i-12,volumes[i-12],campaign[i]);}
         gtk_grid_attach(GTK_GRID(grid),note("Original scripts floor some gains above zero; 0 is not a guaranteed exact mute. Playback uses the system's current SDL audio output; this launcher does not change system routing."),0,3,2,1);
         keysPage=page(book,"Keyboard",grid);const char* actions[]={"Forward","Backward","Right","Left","Raise weapon","Fire","Run","Menu","Map","Spell"};
@@ -512,8 +625,7 @@ struct UI {
         logsPage=page(book,"Logs",grid);
         auto* logButtons=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);gtk_grid_attach(GTK_GRID(grid),logButtons,0,0,1,1);
         gtk_box_pack_start(GTK_BOX(logButtons),button("_Refresh",this,[](gpointer d){static_cast<UI*>(d)->refreshLogs();}),false,false,0);
-        gtk_box_pack_start(GTK_BOX(logButtons),button("_Open folder",this,[](gpointer d){auto& ui=*static_cast<UI*>(d);const auto dir=logDirectory();g_mkdir_with_parents(dir.c_str(),0700);gchar* uri=g_filename_to_uri(dir.c_str(),nullptr,nullptr);GError* error=nullptr;
-            if(!uri||!gtk_show_uri_on_window(GTK_WINDOW(ui.window),uri,GDK_CURRENT_TIME,&error)){ui.message(std::string("Cannot open ")+dir.string()+(error?std::string(": ")+error->message:""));if(error)g_error_free(error);}g_free(uri);}),false,false,0);
+        gtk_box_pack_start(GTK_BOX(logButtons),button("_Open folder",this,[](gpointer d){static_cast<UI*>(d)->openFolder(logDirectory());}),false,false,0);
         gtk_grid_attach(GTK_GRID(grid),note("Engine, setup and updater runs started here are logged privately (newest ten of each kind kept)."),0,1,1,1);
         auto* listScroll=gtk_scrolled_window_new(nullptr,nullptr);gtk_widget_set_size_request(listScroll,-1,150);gtk_widget_set_hexpand(listScroll,true);logList=gtk_list_box_new();gtk_container_add(GTK_CONTAINER(listScroll),logList);gtk_grid_attach(GTK_GRID(grid),listScroll,0,2,1,1);
         g_signal_connect(logList,"row-selected",G_CALLBACK(+[](GtkListBox*,GtkListBoxRow* r,gpointer data){if(r)static_cast<UI*>(data)->showLog(gtk_list_box_row_get_index(r));}),this);

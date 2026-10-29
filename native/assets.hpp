@@ -110,6 +110,8 @@ public:
     uint16_t native_lightmap_color(uint16_t word) const;
     uint8_t native_lightmap_mono(uint16_t word) const;
     void mount(std::string_view resource);
+    // Mod overlay (docs/MODDING.md): call in priority order, first call wins; mod files precede loose files and archives. Returns file count.
+    size_t add_mod(const std::filesystem::path& dataDir);
     bool contains(std::string_view name) const;
     std::vector<std::string> names() const; // Sorted normalized names of loose files and mounted archive entries.
     std::vector<uint8_t> read(std::string_view name) const;
@@ -148,6 +150,7 @@ private:
     std::array<uint8_t,256> nativeLightmapRamp_{},nativeMonoRamp_{};
     bool nativeLightmapTablesInitialized_{},nativeLightmapMonochrome_{};
     std::unordered_map<std::string,std::filesystem::path> loose_;
+    std::unordered_map<std::string,std::pair<std::filesystem::path,std::filesystem::path>> mods_; // name -> {mod data root, file}
     std::unordered_map<std::string,Entry> entries_;
     std::unordered_set<std::string> mounted_;
     std::unordered_map<std::string,std::shared_ptr<const Image>> images_;

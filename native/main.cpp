@@ -3,6 +3,7 @@
 #include "saves.hpp"
 #include "scenario.hpp"
 #include "graphics_cli.hpp"
+#include "mods.hpp"
 #include <algorithm>
 #include <charconv>
 #include <chrono>
@@ -20,6 +21,9 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+extern "C" {
+#include <libavutil/log.h>
+}
 namespace {
 std::string lower(std::string_view text){std::string out;out.reserve(text.size());for(unsigned char c:text)out.push_back(c=='\\'?'/':c>='A'&&c<='Z'?char(c+32):char(c));return out;}
 std::optional<std::string> private_bonus_locale(){
@@ -54,7 +58,29 @@ void help(){std::cout<<"kabus22 native engine\nUsage: kabus22 --data GAME_ROOT [
  "Graphics: kabus22 --list-capabilities prints backend/option/texture-pack JSON without game data. kabus22 --dump-textures DIR --data GAME_ROOT [--mode campaign|bonus] writes every decodable original texture as DIR/<key>.png plus DIR/index.tsv.\n"
  "  --preset original|enhanced|ultra|custom (absent = original), --graphics KEY=VALUE (repeatable; backend, pbr, anisotropy, msaa, texture_packs, fps_limit=original|30..240|unlimited, ... see --list-capabilities), --texture-pack NAME (repeatable, priority order; ${XDG_DATA_HOME:-~/.local/share}/kabus22/packs/NAME). Preset backends degrade with a notice; explicit --renderer/--ray-tracing/--graphics backend fail hard.\n"
  "Seamless doors: --graphics seamless_doors=on|off (default on). kabus22 --door-table LEVELS.tsv --data GAME_ROOT prints every LY_Kapi doorway and whether it is seamless (docs/SEAMLESS_DOORS.md).\n"
- "Controller: ${XDG_CONFIG_HOME:-~/.config}/kabus22/controller.ini mode=original|modern (absent = original).\n";}
+ "Controller: ${XDG_CONFIG_HOME:-~/.config}/kabus22/controller.ini mode=original|modern (absent = original).\n"
+ "Mods (docs/MODDING.md): --mod ID (repeatable, priority order; ${XDG_DATA_HOME:-~/.local/share}/kabus22/mods/ID) replaces or adds game files by name. kabus22 --export-files OUT --data GAME_ROOT [--mode campaign|bonus] writes every original game file as OUT/<name>, the layout of a mod's data/.\n";}
+// Start-up archive first, then RESOURCE order: patch exe K22Widescreen.wrs -> k22.wrs -> kaynak.k22; ISO K22.wrs -> kaynak.k22.
+std::vector<std::string> mount_archives(k22::Assets& assets,bool bonus){
+ std::vector<std::string> mounted;if(bonus)mounted.push_back("K22_mode.wrs");else for(auto name:{"K22Widescreen.wrs","K22.wrs","Kaynak.k22"})if(assets.contains(name))mounted.push_back(name);
+ for(auto& name:mounted)assets.mount(name);return mounted;
+}
+int export_files(int argc,char** argv){
+ std::filesystem::path out,data;std::string mode="campaign";
+ for(int i=1;i<argc;++i){std::string_view a=argv[i];if(i+1>=argc)throw std::runtime_error("missing value for "+std::string(a));if(a=="--export-files")out=argv[++i];else if(a=="--data")data=argv[++i];else if(a=="--mode")mode=argv[++i];else throw std::runtime_error("--export-files accepts only --data GAME_ROOT and --mode campaign|bonus");}
+ if(data.empty())throw std::runtime_error("--data GAME_ROOT is required");if(mode!="campaign"&&mode!="bonus")throw std::runtime_error("unsupported mode; choose campaign or bonus");
+ k22::Assets assets(data,mode=="bonus");auto archives=mount_archives(assets,mode=="bonus");
+ out=std::filesystem::weakly_canonical(std::filesystem::absolute(out));auto inside=out.lexically_relative(assets.root());
+ if(!inside.empty()&&*inside.begin()!="..")throw std::runtime_error("--export-files OUT must not be inside GAME_ROOT");
+ if(std::filesystem::exists(out)&&!(std::filesystem::is_directory(out)&&std::filesystem::is_empty(out)))throw std::runtime_error("--export-files OUT must not exist or be an empty directory");
+ std::size_t count=0;
+ for(const auto& name:assets.names()){
+  if(std::any_of(archives.begin(),archives.end(),[&](auto& a){return lower(a)==name;}))continue; // the mounted archives themselves are not replaceable files
+  auto bytes=assets.read(name);auto path=out/name;std::filesystem::create_directories(path.parent_path());
+  std::ofstream file(path,std::ios::binary);if(!file.write(reinterpret_cast<const char*>(bytes.data()),std::streamsize(bytes.size())))throw std::runtime_error("cannot write "+path.string());++count;
+ }
+ std::cout<<"Exported "<<count<<" game files to "<<out.string()<<'\n';return 0;
+}
 int import_saves(int argc,char** argv){
  std::filesystem::path source,data;
  for(int i=1;i<argc;++i){std::string_view a=argv[i];if(i+1>=argc)throw std::runtime_error("missing value for "+std::string(a));if(a=="--import-saves")source=argv[++i];else if(a=="--data")data=argv[++i];else throw std::runtime_error("--import-saves accepts only --data GAME_ROOT");}
@@ -68,13 +94,15 @@ int import_saves(int argc,char** argv){
 }
 }
 int main(int argc,char** argv){try{
+ av_log_set_level(AV_LOG_ERROR); // FFmpeg warnings about the original media (vorbis timestamps, wmv3 extra data) flood the logs; keep errors.
  std::filesystem::path data,entry,capture;bool headless=false;std::uint64_t frames=0;bool frameLimit=false;std::string mode="campaign",language,audioLanguage,rendererName="opengl",rayTracing,display="native";std::vector<std::string> defines;int displayWidth=0,displayHeight=0;k22::WindowMode windowMode=k22::WindowMode::Borderless;bool displayDimensions=false,displayMode=false;
  for(int i=1;i<argc;++i)if(std::string_view(argv[i])=="--import-saves")return import_saves(argc,argv);
- for(int i=1;i<argc;++i){std::string_view a=argv[i];if(a=="--list-capabilities"){if(argc!=2)throw std::runtime_error("--list-capabilities takes no other options");return k22::graphics_cli::list_capabilities();}if(a=="--dump-textures")return k22::graphics_cli::dump(argc,argv);if(a=="--door-table")return k22::door_table(argc,argv);}
+ for(int i=1;i<argc;++i){std::string_view a=argv[i];if(a=="--list-capabilities"){if(argc!=2)throw std::runtime_error("--list-capabilities takes no other options");return k22::graphics_cli::list_capabilities();}if(a=="--dump-textures")return k22::graphics_cli::dump(argc,argv);if(a=="--door-table")return k22::door_table(argc,argv);if(a=="--export-files")return export_files(argc,argv);}
  auto graphics=k22::graphics_cli::extract(argc,argv);
  std::filesystem::path scenarioFile,scenarioOut=".";{int kept=1;for(int i=1;i<argc;++i){std::string_view a=argv[i];if(a=="--scenario"||a=="--scenario-out"){if(i+1>=argc)throw std::runtime_error("missing value for "+std::string(a));(a=="--scenario"?scenarioFile:scenarioOut)=argv[++i];continue;}argv[kept++]=argv[i];}argc=kept;}
  int character=-1;{int kept=1;for(int i=1;i<argc;++i){if(std::string_view(argv[i])=="--character"){if(i+1>=argc)throw std::runtime_error("missing value for --character");const std::string_view c=argv[++i];character=c=="demir"?0:c=="ebru"?1:c=="inzar"?2:c=="original"?-1:-2;if(character<-1)throw std::runtime_error("--character requires original, demir, ebru or inzar");continue;}argv[kept++]=argv[i];}argc=kept;}
  std::string cameraName="original";{int kept=1;for(int i=1;i<argc;++i){if(std::string_view(argv[i])=="--camera"){if(i+1>=argc)throw std::runtime_error("missing value for --camera");cameraName=argv[++i];if(cameraName!="original"&&cameraName!="first-person")throw std::runtime_error("--camera requires original or first-person");continue;}argv[kept++]=argv[i];}argc=kept;}
+ std::vector<std::string> mods;{int kept=1;for(int i=1;i<argc;++i){if(std::string_view(argv[i])=="--mod"){if(i+1>=argc)throw std::runtime_error("missing value for --mod");std::string id=argv[++i];if(!k22::mod_id(id))throw std::runtime_error("--mod requires a mod directory name");if(std::find(mods.begin(),mods.end(),id)!=mods.end())throw std::runtime_error("--mod "+id+" given twice");mods.push_back(std::move(id));continue;}argv[kept++]=argv[i];}argc=kept;}
  for(int i=1;i<argc;++i){std::string_view a=argv[i];auto value=[&](){if(i+1>=argc)throw std::runtime_error("missing value for "+std::string(a));return std::string(argv[++i]);};if(a=="--help"||a=="-h"){help();return 0;}if(a=="--version"){std::cout<<"kabus22 native engine " K22_VERSION "\n";return 0;}if(a=="--data")data=value();else if(a=="--mode")mode=value();else if(a=="--script")entry=value();else if(a=="--display"){display=value();if(display!="native"&&display!="authored")throw std::runtime_error("--display requires native or authored");}else if(a=="--resolution"){auto [w,h]=resolution(value());displayWidth=w;displayHeight=h;displayDimensions=true;}else if(a=="--window-mode"){auto name=value();if(name=="windowed")windowMode=k22::WindowMode::Windowed;else if(name=="fullscreen")windowMode=k22::WindowMode::Fullscreen;else if(name=="borderless")windowMode=k22::WindowMode::Borderless;else throw std::runtime_error("--window-mode requires windowed, fullscreen or borderless");displayMode=true;}else if(a=="--language")language=value();else if(a=="--audio-language")audioLanguage=value();else if(a=="--define")defines.push_back(value());else if(a=="--renderer")rendererName=value();else if(a=="--ray-tracing"){rayTracing=value();if(rayTracing!="on"&&rayTracing!="off")throw std::runtime_error("--ray-tracing requires on or off");}else if(a=="--capture")capture=value();else if(a=="--headless")headless=true;else if(a=="--frames"){auto n=value();auto [p,e]=std::from_chars(n.data(),n.data()+n.size(),frames);if(e!=std::errc{}||p!=n.data()+n.size())throw std::runtime_error("invalid frame limit");frameLimit=true;}else throw std::runtime_error("unknown option "+std::string(a));}
  if(display=="authored"&&(displayDimensions||displayMode))throw std::runtime_error("--resolution and --window-mode require --display native");
  if(data.empty())throw std::runtime_error("--data GAME_ROOT is required");if(headless&&!capture.empty())throw std::runtime_error("--capture requires actual renderer output, not --headless");
@@ -84,6 +112,11 @@ int main(int argc,char** argv){try{
  if(mode!="campaign"&&mode!="bonus")throw std::runtime_error("unsupported mode; choose campaign or bonus");const bool bonus=mode=="bonus";
  const bool explicitLanguage=!language.empty();
  k22::Assets assets(data,bonus);
+ for(const auto& id:mods){
+  auto mod=k22::load_mod(k22::mods_root()/id);if(!mod.valid)throw std::runtime_error("mod "+id+" is invalid: "+mod.detail);
+  std::size_t files=0;try{files=assets.add_mod(mod.path/"data");}catch(const std::exception& e){throw std::runtime_error("mod "+id+" is invalid: "+e.what());}
+  std::cerr<<"kabus22: mod "<<id<<": "<<files<<" files\n";
+ }
  if(language.empty()&&bonus){language="en";auto marker=private_bonus_locale();if(!marker&&assets.contains("ygm.k22"))marker=assets.text("ygm.k22");if(marker){auto remembered=std::string_view(*marker).substr(0,marker->find_first_of("\r\n"));if(remembered=="111")language="tr";else if(remembered=="222")language="de";}}
  if(language.empty()){const char* locale=std::getenv("LC_ALL");if(!locale||!*locale)locale=std::getenv("LC_MESSAGES");if(!locale||!*locale)locale=std::getenv("LANG");auto name=locale?lower(locale):std::string{};language=name.starts_with("tr")?"tr":name.starts_with("de")?"de":"en";}if(audioLanguage.empty())audioLanguage=language=="tr"?"tr":"en";
  // Patch DilMenu adds es/ru/pl (DD_Dil 3-5); they exist only with its scripts and _data/language/<folder> files.
@@ -98,8 +131,7 @@ int main(int argc,char** argv){try{
  int bonusAnti=-1;
  for(auto& d:defines){if(d.empty()||d.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")!=std::string::npos)throw std::runtime_error("invalid compiler definition");if(!bonus)continue;d=lower(d);if(d=="defskor_d3d")throw std::runtime_error("Bonus native mode is offline; defskor_d3d is not supported");if(d.starts_with("defdil_")&&d!="defdil_"+language)throw std::runtime_error("Bonus locale define conflicts with selected language");if(d.starts_with("defanti_")){if(d.size()!=9||d.back()<'0'||d.back()>'3')throw std::runtime_error("Bonus AA define must be defanti_0, defanti_1, defanti_2 or defanti_3");int option=d.back()-'0';if(bonusAnti>=0&&bonusAnti!=option)throw std::runtime_error("conflicting Bonus AA defines");bonusAnti=option;}}
  if(bonusAnti<0)bonusAnti=0;
- // Start-up archive first, then RESOURCE order: patch exe K22Widescreen.wrs -> k22.wrs -> kaynak.k22; ISO K22.wrs -> kaynak.k22.
- if(bonus)assets.mount("K22_mode.wrs");else for(auto name:{"K22Widescreen.wrs","K22.wrs","Kaynak.k22"})if(assets.contains(name))assets.mount(name);
+ mount_archives(assets,bonus);
  std::unordered_map<std::string,std::filesystem::path> sourceFiles;std::string entryName;
  if(!entry.empty()&&(!bonus||entry.is_absolute())&&std::filesystem::is_regular_file(entry)){entry=std::filesystem::canonical(entry);auto sourceRoot=entry.parent_path();for(const auto& f:std::filesystem::recursive_directory_iterator(sourceRoot)){if(f.is_symlink())continue;if(f.is_regular_file()&&lower(f.path().extension().string())==".wdl")sourceFiles.emplace(lower(f.path().lexically_relative(sourceRoot).generic_string()),f.path());}entryName=entry.filename().string();}
  else if(bonus)entryName=entry.empty()?"K22_mode.wdl":entry.generic_string();

@@ -20,6 +20,7 @@ struct Preferences {
     std::string preset = "original"; // Contract D presets; graphics overrides apply to "custom" only.
     Pairs graphics;
     std::vector<std::string> packs;  // enabled texture packs, priority order
+    std::vector<std::string> mods;   // enabled mods, priority order (first wins)
 };
 // Contract D: `kabus22 --list-capabilities`.
 struct Option { std::string key, label, fallback; std::vector<std::string> values, backends; };
@@ -32,6 +33,14 @@ struct Capabilities {
     std::vector<Pack> packs;
     bool available(std::string_view backend) const;
 };
+// ${XDG_DATA_HOME:-~/.local/share}/kabus22/mods/<id>/{mod.txt,data/**}; files are normalized data/ names (ASCII lowercase).
+struct Mod { std::string id, name, version, author, description, detail; bool valid = false; std::vector<std::string> files; };
+fs::path modsRoot();
+Mod readMod(const fs::path& directory);
+std::vector<Mod> listMods(const fs::path& root);
+void createMod(const fs::path& root, const std::string& id, const std::string& name);
+// Extracts a .zip (mod.txt at its root or inside exactly one top folder) and atomically renames it into root; returns the id.
+std::string installMod(const fs::path& root, const fs::path& zip);
 struct Controller {
     std::string mode = "original";
     double deadzone = 0.15, sensitivity = 1.0;

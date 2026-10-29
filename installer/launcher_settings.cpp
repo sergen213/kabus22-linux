@@ -1,12 +1,19 @@
 #include "launcher_settings.hpp"
 #include "layout.hpp"
 #include <glib.h>
+#include <archive.h>
+#include <archive_entry.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cerrno>
 #include <charconv>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <iterator>
+#include <tuple>
 #include <dirent.h>
 #include <elf.h>
 #include <fcntl.h>
@@ -145,11 +152,13 @@ Preferences parsePreferences(const std::string& bytes, Preferences p = Preferenc
         p.bonusAA = g_key_file_get_integer(key.get(), "Launcher", "bonus-aa", &error);
         if (error) raise(error, "Invalid Bonus AA");
     }
-    if (g_key_file_has_key(key.get(), "Launcher", "texture-packs", nullptr)) {
-        gsize count = 0; gchar** list = g_key_file_get_string_list(key.get(), "Launcher", "texture-packs", &count, &error);
-        if (error) raise(error, "Invalid texture pack list");
-        p.packs.assign(list, list + count); g_strfreev(list);
-    }
+    auto list = [&](const char* name, std::vector<std::string>& destination) {
+        if (!g_key_file_has_key(key.get(), "Launcher", name, nullptr)) return;
+        gsize count = 0; gchar** values = g_key_file_get_string_list(key.get(), "Launcher", name, &count, &error);
+        if (error) raise(error, "Invalid launcher list");
+        destination.assign(values, values + count); g_strfreev(values);
+    };
+    list("texture-packs", p.packs); list("mods", p.mods);
     p.graphics.clear();
     if (g_key_file_has_group(key.get(), "Graphics")) {
         gchar** names = g_key_file_get_keys(key.get(), "Graphics", nullptr, nullptr);
@@ -164,8 +173,11 @@ std::string encodePreferences(const Preferences& p) {
     for (const auto& [name,value] : fields)
         g_key_file_set_string(key.get(), "Launcher", name, value->c_str());
     g_key_file_set_integer(key.get(), "Launcher", "bonus-aa", p.bonusAA);
-    std::vector<const char*> packs; for (const auto& pack : p.packs) packs.push_back(pack.c_str());
-    if (!packs.empty()) g_key_file_set_string_list(key.get(), "Launcher", "texture-packs", packs.data(), packs.size());
+    auto list = [&](const char* name, const std::vector<std::string>& values) {
+        std::vector<const char*> items; for (const auto& value : values) items.push_back(value.c_str());
+        if (!items.empty()) g_key_file_set_string_list(key.get(), "Launcher", name, items.data(), items.size());
+    };
+    list("texture-packs", p.packs); list("mods", p.mods);
     for (const auto& [name,value] : p.graphics) g_key_file_set_string(key.get(), "Graphics", name.c_str(), value.c_str());
     return keyData(key.get());
 }
@@ -175,6 +187,33 @@ template<class F> auto parsedJson(const std::string& text, const char* what, F&&
 }
 std::string optionalText(const json& j, const char* name) { return j.contains(name) && !j[name].is_null() ? j[name].get<std::string>() : std::string(); }
 std::vector<std::string> texts(const json& j) { return j.get<std::vector<std::string>>(); }
+// mod.txt: line 1 "kabus22-mod 1", then key<TAB>value lines (name required), blank lines ignored; one trailing CR per line is dropped like the engine.
+void parseModText(std::string_view text, Mod& m) {
+    std::vector<std::string> seen;bool first=true;
+    for(std::size_t start=0;start<=text.size();) {
+        auto end=text.find('\n',start);if(end==std::string_view::npos)end=text.size();
+        auto line=text.substr(start,end-start);start=end+1;if(!line.empty()&&line.back()=='\r')line.remove_suffix(1);
+        if(first){require(line=="kabus22-mod 1","mod.txt must start with the line \"kabus22-mod 1\"");first=false;continue;}
+        if(line.empty())continue;
+        auto tab=line.find('\t');require(tab!=std::string_view::npos,"mod.txt line is not key<TAB>value: "+std::string(line));
+        std::string key(line.substr(0,tab));
+        std::string* slot=key=="name"?&m.name:key=="version"?&m.version:key=="author"?&m.author:key=="description"?&m.description:nullptr;
+        require(slot,"mod.txt has an unknown key: "+key);require(!std::count(seen.begin(),seen.end(),key),"mod.txt repeats the key "+key);
+        seen.push_back(key);*slot=line.substr(tab+1);
+    }
+    require(!m.name.empty(),"mod.txt has no name");
+}
+// Engine Assets::safe_name: ASCII lowercase, '\' -> '/', '//' collapsed, terminal '.'/' ' dropped.
+std::string assetName(std::string_view value) {
+    std::string r;for(char c:value){c=c=='\\'?'/':g_ascii_tolower(c);if(c=='/'&&!r.empty()&&r.back()=='/')continue;r.push_back(c);}
+    while(!r.empty()&&(r.back()=='.'||r.back()==' '))r.pop_back();
+    return r;
+}
+bool safeRelative(const fs::path& path) {
+    if(path.empty()||path.is_absolute())return false;
+    for(const auto& part:path)if(part==".."||part=="."||part.empty())return false;
+    return true;
+}
 }
 void binary(const fs::path& path) {
     Fd parent(directory(path.parent_path())); Fd file(::openat(parent.value,path.filename().c_str(),O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC));
@@ -266,6 +305,7 @@ void validatePreferences(const Preferences& p) {
     for(auto it=p.graphics.begin();it!=p.graphics.end();++it)
         require(token(it->first)&&token(it->second)&&std::none_of(p.graphics.begin(),it,[&](const auto& o){return o.first==it->first;}),"Invalid or duplicate custom graphics option");
     for(auto it=p.packs.begin();it!=p.packs.end();++it) require(packName(*it)&&std::find(p.packs.begin(),it,*it)==it,"Invalid or duplicate texture pack name");
+    for(auto it=p.mods.begin();it!=p.mods.end();++it) require(packName(*it)&&std::find(p.mods.begin(),it,*it)==it,"Invalid or duplicate mod id");
 }
 bool Capabilities::available(std::string_view backend) const {
     auto found=std::find_if(backends.begin(),backends.end(),[&](const auto& b){return b.first==backend;});return found!=backends.end()&&found->second.first;
@@ -397,6 +437,86 @@ std::pair<fs::path,int> openLog(const fs::path& folder, std::string_view kind, s
     return {folder/name,fd};
 }
 fs::path defaultRoot() { return fs::path(g_get_user_data_dir())/"kabus22"; }
+fs::path modsRoot() {
+    // Same XDG rule as the engine's texture_pack_root(): a relative or empty XDG_DATA_HOME is ignored.
+    const char* xdg=std::getenv("XDG_DATA_HOME");if(xdg&&*xdg&&fs::path(xdg).is_absolute())return fs::path(xdg)/"kabus22/mods";
+    const char* home=std::getenv("HOME");return fs::path(home&&*home?home:g_get_home_dir())/".local/share/kabus22/mods";
+}
+Mod readMod(const fs::path& folder) {
+    Mod m;m.id=folder.filename().string();
+    try {
+        require(packName(m.id),"Invalid mod folder name");
+        const auto txt=folder/"mod.txt";std::error_code ec;
+        require(fs::is_regular_file(fs::symlink_status(txt))&&fs::file_size(txt,ec)<=65536&&!ec,"mod.txt is missing, not a regular file or larger than 64 KiB");
+        std::ifstream in(txt,std::ios::binary);std::string text{std::istreambuf_iterator<char>(in),{}};require(!in.bad(),"Cannot read mod.txt");
+        parseModText(text,m);
+        const auto data=folder/"data";require(fs::is_directory(fs::symlink_status(data)),"missing data/ directory");
+        for(const auto& e:fs::recursive_directory_iterator(data))if(e.symlink_status().type()==fs::file_type::regular)m.files.push_back(assetName(e.path().lexically_relative(data).generic_string()));
+        std::sort(m.files.begin(),m.files.end());
+        auto twice=std::adjacent_find(m.files.begin(),m.files.end());require(twice==m.files.end(),"Two files under data/ both name "+(twice==m.files.end()?std::string():*twice));
+        m.valid=true;m.detail=std::to_string(m.files.size())+(m.files.size()==1?" file":" files");
+    } catch(const std::exception& e){m.detail=e.what();}
+    return m;
+}
+std::vector<Mod> listMods(const fs::path& root) {
+    std::vector<Mod> mods;std::error_code ec;
+    // Hidden entries (including interrupted .install-* stages) are not mods; symlinked folders are ignored.
+    for(const auto& e:fs::directory_iterator(root,ec))if(!e.path().filename().string().starts_with(".")&&e.symlink_status().type()==fs::file_type::directory)mods.push_back(readMod(e.path()));
+    std::sort(mods.begin(),mods.end(),[](const Mod& a,const Mod& b){return a.id<b.id;});
+    return mods;
+}
+void createMod(const fs::path& root, const std::string& id, const std::string& name) {
+    require(packName(id)&&!id.starts_with("."),"Invalid mod id: "+id);
+    require(!name.empty()&&name.find_first_of("\t\r\n")==std::string::npos,"Mod name must be one non-empty line");
+    fs::create_directories(root);require(::mkdir((root/id).c_str(),0755)==0,"Cannot create mod "+id+": "+std::strerror(errno));
+    try {
+        std::ofstream out(root/id/"mod.txt",std::ios::binary);out<<"kabus22-mod 1\nname\t"<<name<<"\n";out.close();require(out.good(),"Cannot write mod.txt");
+        fs::create_directory(root/id/"data");
+    } catch(...) {fs::remove_all(root/id);throw;}
+}
+std::string installMod(const fs::path& root, const fs::path& zip) {
+    fs::create_directories(root);
+    std::string temporary=(root/".install-XXXXXX").string();require(g_mkdtemp(temporary.data()),"Cannot create a staging folder in "+root.string());
+    const fs::path stage=temporary;
+    try {
+        std::unique_ptr<archive,decltype(&archive_read_free)> in(archive_read_new(),archive_read_free);
+        std::unique_ptr<archive,decltype(&archive_write_free)> out(archive_write_disk_new(),archive_write_free);
+        require(in&&out,"Cannot initialize zip extraction");
+        auto why=[](archive* a){const char* s=archive_error_string(a);return std::string(s?s:"");};
+        archive_read_support_format_zip(in.get());
+        // Entry names are checked to be relative below; only the staged destination is absolute.
+        archive_write_disk_set_options(out.get(),ARCHIVE_EXTRACT_SECURE_SYMLINKS|ARCHIVE_EXTRACT_SECURE_NODOTDOT|ARCHIVE_EXTRACT_NO_OVERWRITE);
+        require(archive_read_open_filename(in.get(),zip.c_str(),1<<16)==ARCHIVE_OK,"Cannot open "+zip.string()+": "+why(in.get()));
+        archive_entry* entry=nullptr;
+        for(int status;(status=archive_read_next_header(in.get(),&entry))!=ARCHIVE_EOF;) {
+            require(status==ARCHIVE_OK||status==ARCHIVE_WARN,"Corrupt zip: "+why(in.get()));
+            std::string name=archive_entry_pathname(entry)?archive_entry_pathname(entry):"";
+            while(name.starts_with("./"))name.erase(0,2);
+            while(name.ends_with('/'))name.pop_back();
+            require(safeRelative(name)&&std::none_of(name.begin(),name.end(),[](unsigned char c){return c<32||c==127||c=='\\';}),"Unsafe path in zip: "+name);
+            const auto type=archive_entry_filetype(entry);
+            require(!archive_entry_hardlink(entry)&&(type==AE_IFREG||type==AE_IFDIR),"Zip entry is not a plain file or folder: "+name);
+            archive_entry_set_pathname(entry,(stage/"content"/name).c_str());archive_entry_set_perm(entry,type==AE_IFDIR?0755:0644);
+            require(archive_write_header(out.get(),entry)==ARCHIVE_OK,"Cannot extract "+name+": "+why(out.get()));
+            if(type==AE_IFREG){const void* block;std::size_t length;la_int64_t offset;
+                for(int read;(read=archive_read_data_block(in.get(),&block,&length,&offset))!=ARCHIVE_EOF;)
+                    require(read==ARCHIVE_OK&&archive_write_data_block(out.get(),block,length,offset)==ARCHIVE_OK,"Cannot extract "+name+": "+why(in.get()));}
+            require(archive_write_finish_entry(out.get())==ARCHIVE_OK,"Cannot extract "+name+": "+why(out.get()));
+        }
+        const auto content=stage/"content";fs::path top=content;std::string id=zip.stem().string();
+        if(!fs::is_regular_file(fs::symlink_status(content/"mod.txt"))) {
+            std::vector<fs::path> entries;std::error_code ec;for(const auto& e:fs::directory_iterator(content,ec))entries.push_back(e.path());
+            require(entries.size()==1&&fs::is_directory(fs::symlink_status(entries[0]))&&fs::is_regular_file(fs::symlink_status(entries[0]/"mod.txt")),"The zip has no mod.txt at its root or inside exactly one top folder");
+            top=entries[0];id=top.filename().string();
+        }
+        require(packName(id)&&!id.starts_with("."),"Invalid mod id from the zip: "+id);
+        require(!fs::exists(fs::symlink_status(root/id)),"A mod named "+id+" already exists; remove it first");
+        auto mod=readMod(top);require(mod.valid,"Invalid mod "+id+": "+mod.detail);
+        if(::renameat2(AT_FDCWD,top.c_str(),AT_FDCWD,(root/id).c_str(),RENAME_NOREPLACE)!=0)
+            throw std::runtime_error(errno==EEXIST?"A mod named "+id+" already exists; remove it first":"Cannot install mod "+id+": "+std::strerror(errno));
+        fs::remove_all(stage);return id;
+    } catch(...) {std::error_code ec;fs::remove_all(stage,ec);throw;}
+}
 // Versioned installs run from versions/<active>/bin; never follow the compat bin link for executable admission.
 fs::path binDirectory(const fs::path& root) { auto active=layout::active_version(root); return active.empty()?root/"bin":root/"versions"/active/"bin"; }
 Settings load(const fs::path& root, const fs::path& executable) {
@@ -493,6 +613,7 @@ std::vector<std::string> command(const Settings& s, const std::optional<unsigned
         // Explicit packs imply texture_packs=1; with none checked, keep enhanced/ultra from auto-loading every installed pack.
         if(!packs&&(p.preset=="enhanced"||p.preset=="ultra")&&std::any_of(c.options.begin(),c.options.end(),[](const Option& o){return o.key=="texture_packs";}))args.insert(args.end(),{"--graphics","texture_packs=0"});
     }
+    for(const auto& mod:p.mods)args.insert(args.end(),{"--mod",mod});
     if(frames) args.insert(args.end(),{"--frames",std::to_string(*frames)});
     return args;
 }
@@ -593,6 +714,54 @@ void selfCheck() {
         Preferences graphics;graphics.preset="custom";graphics.graphics={{"pbr","1"},{"msaa","8"},{"fps_limit","unlimited"}};graphics.packs={"hd pack","semi;colon"};
         auto back=parsePreferences(encodePreferences(graphics));require(back.preset==graphics.preset&&back.graphics==graphics.graphics&&back.packs==graphics.packs,"Graphics preference roundtrip regression");
         rejects([&]{parsePreferences("[Launcher]\npreset=extreme\n");});rejects([&]{parsePreferences("[Launcher]\ntexture-packs=../x;\n");});rejects([&]{parsePreferences("[Graphics]\npbr=1 2\n");});
+        // Mods: launcher.ini list order, id validation, --mod arguments in priority order.
+        {Preferences mods;mods.mods={"zeta","alpha mod","semi;colon"};require(parsePreferences(encodePreferences(mods)).mods==mods.mods,"Mod preference roundtrip/order regression");
+            require(encodePreferences(mods).find("mods=zeta;alpha mod;semi\\;colon;")!=std::string::npos,"Mod list is not a GKeyFile string list");}
+        for(auto bad:{"[Launcher]\nmods=../x;\n","[Launcher]\nmods=a;a;\n","[Launcher]\nmods=-x;\n","[Launcher]\nmods=..;\n"})rejects([&]{parsePreferences(bad);});
+        launch.preferences.mods={"b","a"};require(tail()==Args{"--renderer","opengl","--mod","b","--mod","a"},"--mod arguments missing or out of priority order");
+        launch.preferences.mods.clear();require(tail()==Args{"--renderer","opengl"},"No mods changed the command line");
+        // mod.txt parsing (shared contract with the engine).
+        {Mod m;parseModText("kabus22-mod 1\nname\tMy mod\nversion\t1.0\r\n\nauthor\tMe\ndescription\tA\tB",m);require(m.name=="My mod"&&m.version=="1.0"&&m.author=="Me"&&m.description=="A\tB","mod.txt parsing regression");
+            Mod crlf;parseModText("kabus22-mod 1\r\nname\tX\r\n",crlf);require(crlf.name=="X","CRLF mod.txt rejected");}
+        for(auto bad:{"","kabus22-mod 2\nname\tx\n","kabus22-mod 1\n","kabus22-mod 1\nname\t\n","kabus22-mod 1\nname\tx\nname\ty\n","kabus22-mod 1\nname\tx\ncolour\tred\n","kabus22-mod 1\nname x\n"," kabus22-mod 1\nname\tx\n"})
+            rejects([&]{Mod m;parseModText(bad,m);});
+        const auto modRoot=scratch/"mods";createMod(modRoot,"fresh","Fresh mod");
+        {auto fresh=readMod(modRoot/"fresh");require(fresh.valid&&fresh.name=="Fresh mod"&&fresh.files.empty(),"New mod is not valid");}
+        rejects([&]{createMod(modRoot,"fresh","Again");});rejects([&]{createMod(modRoot,"a/b","x");});rejects([&]{createMod(modRoot,"two","line\nbreak");});
+        for(auto sub:{"Sub","sub"})fs::create_directories(modRoot/"clash/data"/sub);
+        {std::ofstream(modRoot/"clash/mod.txt")<<"kabus22-mod 1\nname\tClash\n";std::ofstream(modRoot/"clash/data/Sub/A.MDL")<<"1";std::ofstream(modRoot/"clash/data/sub/a.mdl")<<"2";}
+        require(::symlink("/etc/hostname",(modRoot/"clash/data/link.wav").c_str())==0,"Cannot create mod link self-check");
+        {auto clash=readMod(modRoot/"clash");require(!clash.valid&&clash.detail.find("sub/a.mdl")!=std::string::npos,"Duplicate normalized mod files accepted");}
+        fs::remove(modRoot/"clash/data/sub/a.mdl");{auto clash=readMod(modRoot/"clash");require(clash.valid&&clash.files==Args{"sub/a.mdl"},"Mod file normalization or symlink skipping regression");}
+        fs::create_directories(modRoot/"nodata");std::ofstream(modRoot/"nodata/mod.txt")<<"kabus22-mod 1\nname\tNo data\n";require(!readMod(modRoot/"nodata").valid,"Mod without data/ accepted");
+        {auto all=listMods(modRoot);require(all.size()==3&&all[0].id=="clash"&&all[1].id=="fresh"&&all[2].id=="nodata","Mod discovery regression");}
+        // Zip install: root and one-top-folder layouts; ../, absolute, symlink, duplicate id and ambiguous layouts refused without leftovers.
+        auto zip=[&](const std::string& file,std::vector<std::tuple<std::string,int,std::string>> entries){
+            auto path=scratch/file;std::unique_ptr<archive,decltype(&archive_write_free)> a(archive_write_new(),archive_write_free);
+            require(archive_write_set_format_zip(a.get())==ARCHIVE_OK&&archive_write_open_filename(a.get(),path.c_str())==ARCHIVE_OK,"Cannot create self-check zip");
+            for(const auto& [name,type,data]:entries){
+                auto* e=archive_entry_new();archive_entry_set_pathname(e,name.c_str());archive_entry_set_filetype(e,type);archive_entry_set_perm(e,type==AE_IFDIR?0755:0644);
+                if(type==AE_IFLNK)archive_entry_set_symlink(e,data.c_str());else archive_entry_set_size(e,type==AE_IFREG?data.size():0);
+                require(archive_write_header(a.get(),e)==ARCHIVE_OK,"Cannot write self-check zip entry");if(type==AE_IFREG)archive_write_data(a.get(),data.data(),data.size());archive_entry_free(e);
+            }
+            require(archive_write_close(a.get())==ARCHIVE_OK,"Cannot finish self-check zip");return path;
+        };
+        const std::string manifest="kabus22-mod 1\nname\tZipped\n";
+        require(installMod(modRoot,zip("rooted.zip",{{"mod.txt",AE_IFREG,manifest},{"data/Demir_2007.MDL",AE_IFREG,"m"}}))=="rooted","Root-layout zip id regression");
+        {auto m=readMod(modRoot/"rooted");require(m.valid&&m.files==Args{"demir_2007.mdl"},"Root-layout zip contents regression");}
+        require(installMod(modRoot,zip("wrapped.zip",{{"folder/",AE_IFDIR,""},{"folder/data/",AE_IFDIR,""},{"folder/mod.txt",AE_IFREG,manifest},{"folder/data/x.wav",AE_IFREG,"w"}}))=="folder","Top-folder zip id regression");
+        require(readMod(modRoot/"folder").files==Args{"x.wav"},"Top-folder zip contents regression");
+        rejects([&]{installMod(modRoot,scratch/"rooted.zip");});
+        for(const auto& [file,entries]:std::vector<std::pair<std::string,std::vector<std::tuple<std::string,int,std::string>>>>{
+            {"dotdot.zip",{{"mod.txt",AE_IFREG,manifest},{"data/",AE_IFDIR,""},{"../escaped",AE_IFREG,"x"}}},
+            {"nested.zip",{{"m/mod.txt",AE_IFREG,manifest},{"m/data/../../escaped",AE_IFREG,"x"}}},
+            {"absolute.zip",{{"mod.txt",AE_IFREG,manifest},{"data/",AE_IFDIR,""},{(scratch/"escaped").string(),AE_IFREG,"x"}}},
+            {"symlink.zip",{{"mod.txt",AE_IFREG,manifest},{"data/",AE_IFDIR,""},{"data/link",AE_IFLNK,"/etc/passwd"}}},
+            {"two.zip",{{"a/mod.txt",AE_IFREG,manifest},{"a/data/",AE_IFDIR,""},{"b/mod.txt",AE_IFREG,manifest},{"b/data/",AE_IFDIR,""}}},
+            {"nomod.zip",{{"data/x.wav",AE_IFREG,"x"}}}})
+            rejects([&]{installMod(modRoot,zip(file,entries));});
+        require(!fs::exists(scratch/"escaped")&&!fs::exists(modRoot/"dotdot")&&!fs::exists(modRoot/"symlink")&&!fs::exists(modRoot/"a"),"Refused zip left files behind");
+        for(const auto& e:fs::directory_iterator(modRoot))require(!e.path().filename().string().starts_with(".install-"),"Zip staging folder left behind");
         // Contract F controller.ini: exact roundtrip, engine-equivalent lenient reading, strict writing.
         std::vector<std::string> warnings;auto pad=defaultController();require(parseController(encodeController(pad),warnings)==pad&&warnings.empty(),"Default controller roundtrip regression");
         pad.mode="modern";pad.deadzone=0.25;pad.sensitivity=1.5;pad.vibration=false;pad.buttons[0].second=0;pad.buttons[13].second=4;

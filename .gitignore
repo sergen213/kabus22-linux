@@ -579,6 +579,7 @@
 !/docs/GRAPHICS_ROADMAP.md
 !/docs/INSTALLER.md
 !/docs/KNOWN_ISSUES.md
+!/docs/MODDING.md
 !/docs/PATCH_BINARY_DIFF.md
 !/docs/PROGRESS.md
 !/docs/RAYTRACING.md
@@ -628,6 +629,8 @@
 !/native/shaders/tonemap.frag
 !/native/texture_pack.cpp
 !/native/texture_pack.hpp
+!/native/mods.cpp
+!/native/mods.hpp
 # AMD FidelityFX SDK v1.1.4 FSR 3.1.4 upscaler subset (MIT, third_party/FidelityFX-SDK/KABUS-PROVENANCE.txt).
 !/native/fsr_vk.cpp
 !/native/fsr_vk.hpp
