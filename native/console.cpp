@@ -80,6 +80,41 @@ std::string Engine::quicksave(Runtime& runtime){
  quickSaving=false;
  return saved?"Game saved (slot "+std::to_string(slot)+")":"Save failed";
 }
+// Pause-menu SAVE item. Smartmenu.wdl has CONTINUE (STM_Cursor 0) over MAIN MENU (1), toggled by Up/Down; SAVE sits one button
+// above CONTINUE. Up (arrow, keypad 8, d-pad) on CONTINUE or Down on MAIN MENU selects it, and that press is hidden from the scripts;
+// Up/Down from SAVE goes back to MAIN MENU/CONTINUE. Hovering selects it; a click, Enter or pad A saves. The menu closes for the save
+// (quicksave refuses freeze_mode, and the slot then records the game rather than the menu) and reopens with SAVE still selected.
+bool Engine::pause_tick(Runtime& runtime,const Input& in){
+ const auto first=global("STMP_Devam");
+ if(number("STM_Acik")==0||first.kind!=Value::Kind::Object||!state.get(first.bits)||!field(first.bits,"visible")){pauseItem_=false;return false;}
+ auto key=[&](std::initializer_list<SDL_Scancode> keys){return std::any_of(keys.begin(),keys.end(),[&](auto k){return bool(in.pressed[k]);});};
+ auto pad=[&](SDL_GameControllerButton b){return legacyPad>=0&&legacyPad<Input::Pads&&in.controllerPressed[legacyPad][b];};
+ auto bitmap=[&](int item,bool selected){auto list=global("DMIL_SmartMenu");auto* o=list.kind==Value::Kind::Object?state.get(list.bits):nullptr;const auto i=std::size_t(int(number("GA_Dil"))*4+item*2+(selected?0:1));
+  if(o&&i<o->array.size())state.require(global(item?"STMP_AnaMenu":"STMP_Devam").bits).field("bmap").value=o->array[i].value;}; // STM_Kernel's own BMAP choice
+ const int cursor=int(number("STM_Cursor"));
+ const bool up=key({SDL_SCANCODE_UP,SDL_SCANCODE_KP_8})||pad(SDL_CONTROLLER_BUTTON_DPAD_UP),down=key({SDL_SCANCODE_DOWN,SDL_SCANCODE_KP_2})||pad(SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+ const auto& r=pauseItemRect_;const bool hover=r.width>0&&in.mouseX>=r.x&&in.mouseX<r.x+r.width&&in.mouseY>=r.y&&in.mouseY<r.y+r.height,click=hover&&in.mousePressed[SDL_BUTTON_LEFT];
+ bool eaten=false;
+ if(!pauseItem_&&((up&&cursor==0)||(down&&cursor==1)||(hover&&(in.mouseDX||in.mouseDY))||click)){pauseItem_=true;eaten=up||down;}
+ else if(pauseItem_&&(up||down)){pauseItem_=false;const int to=up?1:0;set_global("STM_Cursor",Value::from_int(to));bitmap(to,true);bitmap(1-to,false);return true;}
+ else if(pauseItem_&&key({SDL_SCANCODE_ESCAPE})){pauseItem_=false;return false;} // STM_Kernel closes the menu
+ if(pauseItem_&&(click||key({SDL_SCANCODE_RETURN,SDL_SCANCODE_KP_ENTER})||pad(SDL_CONTROLLER_BUTTON_A))){
+  eaten=true;runtime.start("SmartAcKapat");
+  try{notify(quicksave(runtime));}catch(const std::exception& e){notify(std::string("Error: ")+e.what());}
+  runtime.start("SmartAcKapat");
+ }
+ if(pauseItem_){bitmap(0,false);bitmap(1,false);}
+ return eaten;
+}
+void Engine::pause_overlay(){
+ pauseItemRect_={};
+ const auto first=global("STMP_Devam");
+ if(state.profile!=SemanticProfile::CampaignA6||number("STM_Acik")==0||first.kind!=Value::Kind::Object||!state.get(first.bits)||!field(first.bits,"visible"))return;
+ // One button height above CONTINUE, centred on the 172-wide button; the atlas capitals are smaller than its lettering (coop_overlay).
+ const float sx=std::max(0.1f,float(field(first.bits,"scale_x"))),sy=std::max(0.1f,float(field(first.bits,"scale_y")));
+ const float x=float(field(first.bits,"pos_x")),y=float(field(first.bits,"pos_y"))-32*sy,scale=1.15f*sy,width=draw_menu_word("SAVE",0,0,scale,1,true);
+ draw_menu_word("SAVE",x+86*sx-width/2,y-16*(scale-sy),scale,1,false,pauseItem_);pauseItemRect_={x,y,172*sx,32*sy};
+}
 // The original in-game load is Smartmenu "main menu" (Smartmenu.wdl:208-243) -> YukleMenu -> Yukleme_Kontrol. This performs the same
 // teardown without the menu, then hands the slot to Yukleme_Kontrol exactly as YUM_Kernel does (YukleMenu.wdl:241-247).
 std::string Engine::quickload(Runtime& runtime,int slot){

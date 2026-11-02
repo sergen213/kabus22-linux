@@ -9,7 +9,7 @@ Related: [Gameplay systems §10 Save and load](GAMEPLAY_SYSTEMS.md#10-save-and-l
 
 | Key | Action |
 |---|---|
-| F5 | Quicksave. With the community patch scripts (`K22Widescreen.wdl`) F5 belongs to their first-person camera (`cam.wdl` polls `key_f5`), so quicksave is **F8** there. |
+| F5 | Quicksave. With the community patch scripts (`K22Widescreen.wdl`) F5 belongs to their first-person camera (`cam.wdl` polls `key_f5`), so quicksave is **F8** there. The in-game menu (Escape) also has a SAVE item, [below](#save-from-the-in-game-menu). |
 | F9 | Quickload the newest save slot. |
 | `` ` `` (the key left of 1, `SDL_SCANCODE_GRAVE`) or F10 | Open/close the console. F10 is for layouts where the `` ` `` key is awkward (Turkish Q prints `"` there; the key still works by position). |
 | Escape | Close the console. |
@@ -54,6 +54,21 @@ label is `Quicksave` (`Hızlı Kayıt` with the Turkish scripts) with the charac
 or a save point.
 
 Messages ("Game saved (slot 27)", "Game loaded", refusals) appear at the top of the screen for three seconds and in the console.
+
+### Save from the in-game menu
+
+The in-game menu (Escape, `Smartmenu.wdl`: RESUME over MAIN MENU) gets a native SAVE item one button above RESUME, drawn with the
+glyphs of the original menu atlas like the main menu's 2 PLAYER item (`native/console.cpp` `pause_tick`/`pause_overlay`). Campaign
+only: the Bonus game and the main menu have none, and it hides while the menu's own "return to main menu?" question is open.
+
+- **Mouse:** hovering selects it, a left click saves (the original menu has no mouse input, so nothing else changes).
+- **Keyboard / pad:** Up (arrow, keypad 8, d-pad) on RESUME or Down on MAIN MENU selects SAVE; that press is hidden from the
+  scripts, so their cursor (`STM_Cursor`) does not move. Up/Down from SAVE goes to MAIN MENU/RESUME. Return, keypad Enter or pad A
+  saves; Escape closes the menu as usual. The left stick and rebound movement keys still move only between the two original items.
+- **Saving:** the menu is closed for the save (`SmartAcKapat`, which clears `freeze_mode`; a quicksave refuses an open menu) and
+  reopened right after with SAVE still selected, so the slot holds the game, not the menu (`STM_Acik` is `VAR_NSAVE`, and no
+  menu variable is in the `YD_OyunuKaydet` payload). It is the same quicksave as F5, with the same refusals and message. Loading
+  the slot resumes play with no menu open.
 
 ## Console commands
 
@@ -140,6 +155,8 @@ All 101 campaign levels from the original level table (`LevelYonetim.wdl LVSL_Ol
 
 - `tests/scenarios/quicksave1_roundtrip.k22s`: F5 in kizic2, walk away, change ammo, F9: position (±1), pan and ammo restored;
   F5 refused in the inventory menu.
+- `tests/scenarios/pause_save.k22s`: Escape, Up (script cursor stays on RESUME), Return writes the next slot and reopens the
+  menu; Down, Return resumes; F9 loads that slot at the saved spot with `freeze_mode` 0, `STM_Acik` 0 and the player in control.
 - `tests/scenarios/quicksave2_restart.k22s`: after a restart the quicksave loads from the original load menu at its saved spot;
   `load 10` (a save-point slot) keeps the G00 spawn.
 - `tests/scenarios/console_commands.k22s`: every command typed through the real toggle keys, SDL text input and Return, with

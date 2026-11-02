@@ -1,0 +1,42 @@
+# requires: saves
+# Pause-menu SAVE item (docs/CONSOLE.md): Escape opens the original Smartmenu; Up on CONTINUE selects the native SAVE row above it
+# without moving the script cursor, Return saves through Engine::quicksave (menu closed for the save) and reopens the menu.
+# F9 then loads that newest slot: same level and spot, player in control, nothing frozen. Demir, kizic2 (level 37), kayit10.sav.
+realtime off
+load-save 10
+wait until LY_AktifLevelID == 37 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+wait until oyun_ilk_basladi == 0 timeout 600
+store saves aktif_kayit_sayisi
+store slot Aktif_SaveNo
+store x player.x
+store y player.y
+press Escape
+wait until STM_Acik == 1 && freeze_mode == 1 timeout 120
+assert STM_Cursor == 0
+press Up
+frames 2
+assert STM_Cursor == 0
+assert Aktif_SaveNo == @slot
+press Return
+frames 2
+assert aktif_kayit_sayisi == @saves + 1
+assert Aktif_SaveNo == @slot + 1
+assert STM_Acik == 1 && freeze_mode == 1
+# Down from SAVE gives CONTINUE back to the script cursor; Return continues the game.
+press Down
+frames 2
+assert STM_Cursor == 0 && STM_Acik == 1
+press Return
+wait until STM_Acik == 0 && freeze_mode == 0 timeout 120
+assert Aktif_SaveNo == @slot + 1
+walk-to -420 25 12 timeout 1200
+assert player.x < @x - 100
+press F9
+wait until LY_AktifLevelID == 0 timeout 60
+wait until LY_AktifLevelID == 37 && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
+frames 2
+assert player.x > @x - 1 && player.x < @x + 1
+assert player.y > @y - 1 && player.y < @y + 1
+assert freeze_mode == 0 && STM_Acik == 0 && oyuncu_pasif == 0
+# Playable: walk away from the restored spot.
+walk-to -420 25 12 timeout 1200
