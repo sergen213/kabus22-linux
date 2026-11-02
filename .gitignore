@@ -644,3 +644,5 @@
 !/third_party/k22-ffx-posix/
 # cgltf v1.15 (MIT) glTF parser for mod model replacement and the launcher model viewer.
 !/third_party/cgltf/
+!/LICENSE
+!/CONTRIBUTING.md
