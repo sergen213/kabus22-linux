@@ -85,7 +85,14 @@ no hard links, devices or setuid bits; only `bin/ lib/ share/`) into a private s
 
 - Development/project key: `~/.local/share/kabus22-release-keys/update-ed25519.key` on the maintainer
   workstation (mode 0600, outside the repository, never printed or committed). Public key (default
-  `K22_UPDATE_PUBLIC_KEY`): `2mfjUSeWRcSIPa4B3uaLUWxnBFPWulQYvdq1uv4PVVM=`.
+  `K22_UPDATE_PUBLIC_KEY`): `URe7IxdxLLdVgNqaNjzws9uX2fjSurZHmoRBKpFehU8=` (since 0.4.14).
+- Rotated 2026-11-02: 0.4.14 was signed with the previous key `2mfjUSeWRcSIPa4B3uaLUWxnBFPWulQYvdq1uv4PVVM=`
+  (retired, kept as `update-ed25519.key.retired-2026-11-02`) and installs the new key; 0.4.15 onward is
+  signed with the new key only. Installs still on ≤ 0.4.13 must apply 0.4.14 first
+  (`kabus22-updater --apply --version 0.4.14`), since their updater picks the newest release.
+  Rolling back below 0.4.14 restores an updater that trusts only the retired key.
+- `K22_UPDATE_PUBLIC_KEY` is a CMake cache variable: an existing build directory keeps its old value
+  after the default changes; reconfigure with `-U K22_UPDATE_PUBLIC_KEY` (or a fresh build directory).
 - CI signing uses the repository secret `KABUS22_UPDATE_SIGNING_KEY` (same base64 seed). The release
   workflow aborts if the secret's public key differs from the embedded default.
 - Keep an offline backup of the key file. Losing it means no further update can be verified by

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(kabus22_setup VERSION 0.4.13 LANGUAGES CXX)
+project(kabus22_setup VERSION 0.4.14 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -31,7 +31,7 @@ install(TARGETS kabus22-setup kabus22-launcher RUNTIME DESTINATION bin)
 find_package(CURL REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(nlohmann_json 3 REQUIRED)
-set(K22_UPDATE_PUBLIC_KEY "2mfjUSeWRcSIPa4B3uaLUWxnBFPWulQYvdq1uv4PVVM=" CACHE STRING
+set(K22_UPDATE_PUBLIC_KEY "URe7IxdxLLdVgNqaNjzws9uX2fjSurZHmoRBKpFehU8=" CACHE STRING
   "Base64 raw 32-byte Ed25519 public key that verifies kabus22-update.json signatures")
 if(NOT K22_UPDATE_PUBLIC_KEY MATCHES "^[A-Za-z0-9+/]+=?$")
   message(FATAL_ERROR "K22_UPDATE_PUBLIC_KEY must be base64 of a raw 32-byte Ed25519 key")
