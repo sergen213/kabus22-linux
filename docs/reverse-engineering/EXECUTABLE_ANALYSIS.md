@@ -133,7 +133,7 @@ Unlike `K22.exe`, the A7 DLL imports D3DX dynamically from the shipped `d3dx9_30
 
 ## Community patch binaries (not part of the ISO)
 
-Origin: `Kabus22Patch/` and the patched Lutris install `/mnt/1st4TB/Lutris Games/kabus22/drive_c/Program Files (x86)/Merscom/Kabus 22/` (also contains ReShade files and a `d3d9.dll` entry that is not a readable regular file). Tool sources: `reverse/community/iseeeva-kabus22/README.md` ("Kabus 22 Bug Fix and Widescreen Support" mod).
+Origin: `Kabus22Patch/` and a patched Lutris (Wine) install, `drive_c/Program Files (x86)/Merscom/Kabus 22/` (also contains ReShade files and a `d3d9.dll` entry that is not a readable regular file). Tool sources: `reverse/community/iseeeva-kabus22/README.md` ("Kabus 22 Bug Fix and Widescreen Support" mod).
 
 | File | Size | SHA-256 | Facts |
 |---|---|---|---|

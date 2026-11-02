@@ -16,7 +16,7 @@ Evidence lives in the private working tree `reverse/community/` (git-ignored; ho
 | A′ | Native install of A | `~/.local/share/kabus22/game` (read only) | 137 files; `K22.wrs` byte-identical to A | CONFIRMED |
 | B | Community patch v1.8.5 | `Kabus_22_Multi_Version_Patch_1.8.5.7z` (MD5 `bf273ed8…2334` = ModDB published MD5; SHA-256 `9ddb5186…3670`) extracted to `reverse/community/patch-1.8.5/` | 438 files, 1 070 097 081 bytes | CONFIRMED |
 | B′ | `Kabus22Patch/` | repo root | all 438 files byte-identical to B | CONFIRMED |
-| B″ | Lutris Windows install | `/mnt/1st4TB/Lutris Games/kabus22/drive_c/Program Files (x86)/Merscom/Kabus 22/` (read only) | 817 files: ISO files + B overlay + leftovers of an older mod release (`_data/languages/…`, `turkce.k22`, `rmo/rms.k22`, `cutscene_files/`) + ReShade; its `K22.wrs` (`5bae0b5e…`) is **not** the ISO archive | CONFIRMED |
+| B″ | Lutris Windows install | Lutris (Wine) prefix, `drive_c/Program Files (x86)/Merscom/Kabus 22/` (read only) | 817 files: ISO files + B overlay + leftovers of an older mod release (`_data/languages/…`, `turkce.k22`, `rmo/rms.k22`, `cutscene_files/`) + ReShade; its `K22.wrs` (`5bae0b5e…`) is **not** the ISO archive | CONFIRMED |
 | C | Author's repository | `https://github.com/iseeeva/kabus22`, cloned to `reverse/community/iseeeva-kabus22/` at `8d7ac45b9474a2d30c5612d57d101ff76bbba7f1` (2025-12-24, single commit) | 47 files | CONFIRMED |
 
 Inventories (path, size, SHA-256): `reverse/community/reports/inventory-{A-iso-setup,A-installed-native-game,B-patch-1.8.5-7z,B-Kabus22Patch-dir,B-lutris-install,C-iseeeva-repo}.tsv`; A↔B comparison with B′/B″ columns: `reports/inventory-compare.tsv`; generator: `reverse/community/analyze.py`; summary: `reports/summary.json`.

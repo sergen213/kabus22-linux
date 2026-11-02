@@ -5,14 +5,14 @@ Purpose: in-memory and on-disk layouts recovered from K22.exe (A6 6.31.4), the A
 Related: [REVERSE_ENGINEERING.md](../REVERSE_ENGINEERING.md) (index) · [SCRIPT_SYSTEM.md](SCRIPT_SYSTEM.md) · [FUNCTION_MAP.md](FUNCTION_MAP.md) · [RESOURCE_FORMATS.md](RESOURCE_FORMATS.md) · [../ENGINE_ARCHITECTURE.md](../ENGINE_ARCHITECTURE.md) · [../ASSET_FORMATS.md](../ASSET_FORMATS.md)
 
 Conventions:
-- Addresses are VAs in the analysed patched `K22.exe` (image base `0x00400000`, SHA256 `1a6a0dbc…7bed`). See [`CONTRACT.txt:1-10`](../../reverse/decompiled/runtime/CONTRACT.txt).
+- Addresses are VAs in the analysed patched `K22.exe` (image base `0x00400000`, SHA256 `1a6a0dbc…7bed`). See `CONTRACT.txt:1-10`.
 - Decompiled paths are relative to `reverse/decompiled/runtime/` unless they start with `../`.
 - Offsets are hexadecimal bytes.
 - **Native does not reproduce these byte layouts.** `native/value.hpp` stores objects as named field maps (`Object::fields`, `CaseLess` keys). Native columns therefore name the equivalent symbol, not an offset.
 
 ## 1. Archive (WRS) tables
 
-Source: [`RECOVERY.txt:37-67`](../../reverse/decompiled/RECOVERY.txt); [`../loaders/K22.exe.0041fd20.c`](../../reverse/decompiled/loaders/K22.exe.0041fd20.c), [`../loaders/K22.exe.0041ff20.c`](../../reverse/decompiled/loaders/K22.exe.0041ff20.c).
+Source: `RECOVERY.txt:37-67`; `../loaders/K22.exe.0041fd20.c`, `../loaders/K22.exe.0041ff20.c`.
 
 ### 1.1 Entry table `0x00665ea8` (stride 0x30, limit 0x1000 entries)
 | Offset | Size | Type | Meaning | Evidence | Confidence |
@@ -40,10 +40,10 @@ Native: `Assets::Entry { archive, offset, packed, size }` in `native/assets.hpp`
 
 | Structure | Address | Layout | Evidence | Confidence |
 |---|---|---|---|---|
-| API (native function) descriptors | `0x0061c408..0x0061d7d8` (sentinel), 317 rows | 16 bytes: name ptr, handler ptr, argc, encoded arg types. Example WAIT `0061d538 = [005d101c,00404b60,1,1]` | CONTRACT §1 `:18-23`; [`api-descriptors.json`](../../reverse/decompiled/runtime/api-descriptors.json) | CONFIRMED |
+| API (native function) descriptors | `0x0061c408..0x0061d7d8` (sentinel), 317 rows | 16 bytes: name ptr, handler ptr, argc, encoded arg types. Example WAIT `0061d538 = [005d101c,00404b60,1,1]` | CONTRACT §1 `:18-23`; `api-descriptors.json` | CONFIRMED |
 | Legacy command tables | `0x0061b3d8`, `0x0061c298` | 9-word rows used by the statement compiler `00402fe0` | `RECOVERY.txt:72`; §1 `:24-25` | CONFIRMED (stride); fields UNKNOWN |
 | Operator descriptors | `0x0061d7f0..0x0061da0c` | operator → node id (`+`→1 … `\|\|`→0x2a) | §5 `:177-178` | CONFIRMED |
-| Function descriptor | List head `0x0063b9b4`, prepended on creation (`00401bd0`) | +0x0c body, +0x10 next statement (both cleared on redefinition), +0x1c flags (`&2` PROC_LATE, `&4` STARTER), +0x20 local count | §2 `:47-55`, §3 `:138-141`, §9 `:342-346`, §13 `:490-493`; STARTER test `TEST [ESI+0x1c],BL` with `BL=4` at `004146c0` ([`clock-instructions/K22.exe.00414650.asm.txt`](../../reverse/decompiled/runtime/clock-instructions/K22.exe.00414650.asm.txt)) | CONFIRMED |
+| Function descriptor | List head `0x0063b9b4`, prepended on creation (`00401bd0`) | +0x0c body, +0x10 next statement (both cleared on redefinition), +0x1c flags (`&2` PROC_LATE, `&4` STARTER), +0x20 local count | §2 `:47-55`, §3 `:138-141`, §9 `:342-346`, §13 `:490-493`; STARTER test `TEST [ESI+0x1c],BL` with `BL=4` at `004146c0` (`clock-instructions/K22.exe.00414650.asm.txt`) | CONFIRMED |
 | Compile-state bits | `0x006633c0` | `&2` suppresses INCLUDE, `&4` (as written "bit2") suppresses PLUGINDIR, `&0x200` suppresses body compilation | §9 `:333-346`, §17 `:626-628` | CONFIRMED |
 | WINDOW parse state | `0x0066133c` (=2), handler `0x00661330` (=`00419c20`), `0x006633a8` | Discard handler | §15 `:572-575` | CONFIRMED |
 | PLUGINDIR buffer | `0x006c7488` | ≤127 bytes including NUL | §17 `:626-628` | CONFIRMED |
@@ -54,7 +54,7 @@ Native: `Function { name, params, localDefinitions, code, labels, gotos, schedul
 ## 3. Scheduler and continuation records
 
 ### 3.1 Continuation record (created by `00410390`; size `44 + 12·locals`)
-Evidence: [`trace/K22.exe.00410390.c`](../../reverse/decompiled/runtime/trace/K22.exe.00410390.c) (word stores `[1]..[10]`) and CONTRACT §2 `:43-48`.
+Evidence: `trace/K22.exe.00410390.c` (word stores `[1]..[10]`) and CONTRACT §2 `:43-48`.
 
 | Offset | Size | Type | Meaning | Evidence | Confidence |
 |---|---|---|---|---|---|
@@ -66,7 +66,7 @@ Evidence: [`trace/K22.exe.00410390.c`](../../reverse/decompiled/runtime/trace/K2
 | +0x14 | 4 | ptr | MY (checked by freeze mode 1) | `[5]`; `00412080.c:37` `DAT_006445a4[5]` | CONFIRMED |
 | +0x18 | 4 | ptr | YOU | `[6]` | CONFIRMED |
 | +0x1c..+0x28 | 4×4 | var | `_arg1`..`_arg4` | `[7]..[10]` | CONFIRMED |
-| +0x2c… | 12·n | var[3]·n | Snapshot of each local's three words (`00410350`) | [`trace/K22.exe.00410350.c`](../../reverse/decompiled/runtime/trace/K22.exe.00410350.c) | CONFIRMED |
+| +0x2c… | 12·n | var[3]·n | Snapshot of each local's three words (`00410350`) | `trace/K22.exe.00410350.c` | CONFIRMED |
 
 ### 3.2 Scheduler globals
 | Address | Meaning | Evidence | Confidence |
@@ -99,7 +99,7 @@ Native: `Runtime::Impl::local_storage` creates `Object::Kind::Vector` objects wi
 ### 5.1 Global numeric registry
 | Item | Offset | Size | Type | Meaning | Evidence | Confidence |
 |---|---|---|---|---|---|---|
-| Descriptor row | — | 24 | struct | name ptr, pointer-slot VA, 3 initial words, raw flags; 330 rows `0061ec80..00620b70` | §6 `:228-235`; [`global-registry.json`](../../reverse/decompiled/runtime/global-registry.json) | CONFIRMED |
+| Descriptor row | — | 24 | struct | name ptr, pointer-slot VA, 3 initial words, raw flags; 330 rows `0061ec80..00620b70` | §6 `:228-235`; `global-registry.json` | CONFIRMED |
 | Value object | +0x04/+0x08/+0x0c | 3×4 | var | Three value words; the pointer slot receives `object+4` | `registry/K22.exe.0041e180.c:17-34` | CONFIRMED |
 | Value object | +0x14 | 4 | flags | Descriptor flags ORed in. Flag 8 → expression readonly `0x140`; flag 0x10 → `0x200` | §6 `:233,238-240` | CONFIRMED; flags 4/0x20 meaning UNKNOWN |
 | WDL type | — | — | 9 | Registered type for registry variables | `0041e060.c:9-32` | CONFIRMED |
@@ -107,7 +107,7 @@ Native: `Runtime::Impl::local_storage` creates `Object::Kind::Vector` objects wi
 Examples: `TIME` slot `0x00665cf4`, `FREEZE_MODE` `0x00665874`, `TIME_FRAME` `0x0066578c`, `TIME_FACTOR` `0x00665830`, `TIME_SMOOTH` `0x00665d94` (§3 `:103-105`, §3 `:125`). Native: `nativeDefaults[]` (`native/engine.cpp`, 334 rows including 4 Bonus-only) feeds `State::globals` (`Slot{Value,callback}`).
 
 ### 5.2 Member descriptor tables
-`member-descriptors.json` (consumer `004015c0`, stride 20; constructors `005ce400` …) covers 8 kinds. Each row holds a name, byte offset, value type code, flags, and mask or index bound. Type codes seen: 16 numeric member and 17 bit property (mask in last word), both CONFIRMED (§6 `:255-256`). The pointer-typed codes are inferred from member names (HIGH CONFIDENCE): 1 entity, 5 string, 6 function, 7 font, 8 bmap, 11 panel, 18 view, 19 material. Separately, type 3 means local/array values resolving to `+0x10` (§11 `:414`). Full rows are in [`member-descriptors.json`](../../reverse/decompiled/runtime/member-descriptors.json). The JSON preserves offsets as recovery evidence; it is **not** a native ABI (§6 `:257`).
+`member-descriptors.json` (consumer `004015c0`, stride 20; constructors `005ce400` …) covers 8 kinds. Each row holds a name, byte offset, value type code, flags, and mask or index bound. Type codes seen: 16 numeric member and 17 bit property (mask in last word), both CONFIRMED (§6 `:255-256`). The pointer-typed codes are inferred from member names (HIGH CONFIDENCE): 1 entity, 5 string, 6 function, 7 font, 8 bmap, 11 panel, 18 view, 19 material. Separately, type 3 means local/array values resolving to `+0x10` (§11 `:414`). Full rows are in `member-descriptors.json`. The JSON preserves offsets as recovery evidence; it is **not** a native ABI (§6 `:257`).
 
 #### ENTITY (table `0x0061b780`, 141 rows) — selected
 | Offset | Size | Type | Meaning | Evidence | Confidence |
@@ -138,7 +138,7 @@ Native: `Object::Kind::Entity` with `Object::fields`, plus `EntityData` (model, 
 #### TEXT (`0x0061db60`, 28 rows) and FONT
 | Offset | Size | Type | Meaning | Evidence | Confidence |
 |---|---|---|---|---|---|
-| TEXT+0x0c | 4 | int | UI object type; 4 = TEXT (dispatch `0040e180`) | [`FONT_LAYOUT.txt:24-27`](../../reverse/decompiled/runtime/FONT_LAYOUT.txt) | CONFIRMED |
+| TEXT+0x0c | 4 | int | UI object type; 4 = TEXT (dispatch `0040e180`) | `FONT_LAYOUT.txt:24-27` | CONFIRMED |
 | TEXT+0x14/+0x18 | 8 | var | POS_X, POS_Y | member table; FONT_LAYOUT | CONFIRMED |
 | TEXT+0x1c | 4 | bits | flags: D3D `0x1`, CONDENSED `0x2`, CENTER_X `0x100`, CENTER_Y `0x200`, TRANSPARENT `0x400`, NARROW `0x2000`, VISIBLE `0x4000`, SHADOW `0x40000`, OUTLINE `0x80000` | same | CONFIRMED |
 | TEXT+0x20…+0x2c | 16 | var/ptr | ALPHA, OFFSET_Y, LINES, FONT | same | CONFIRMED |
@@ -169,14 +169,14 @@ AMBIENT B/G/R `+0x0c..+0x14`; DIFFUSE `+0x18..+0x20`; SPECULAR `+0x24..+0x2c`; E
 #### BMAP / image records
 | Record | Fields | Evidence | Confidence |
 |---|---|---|---|
-| Standalone/script image | width `+0x0c`, height `+0x10`, bytes-per-pixel `+0x14` | [`bitmap-cpu-storage/contract.txt:37-39`](../../reverse/decompiled/runtime/bitmap-cpu-storage/contract.txt) | CONFIRMED |
+| Standalone/script image | width `+0x0c`, height `+0x10`, bytes-per-pixel `+0x14` | `bitmap-cpu-storage/contract.txt:37-39` | CONFIRMED |
 | WMB CPU bitmap | width `+0x10`, height `+0x14`, bpp `+0x18` (TURB9 gate `==2`), pixels `+0x60` | same `:7-21` | CONFIRMED |
 | Script BMAP wrapper | Other fields UNKNOWN in this pass | — | UNKNOWN |
 
 Native: `Object::Kind::Bmap`, plus `Engine::bitmapImages` (`ObjectId`→`Image`); `svc_bitmap` admits Object or Number raw handles (§30).
 
 ### 5.3 VECTOR temporary ring
-`[0x0063ce30, 0x0063d130)`, 64 slots × 12 bytes; cursor `0x0061d7e8` advances +12 before use (first slot returned `0x0063ce3c`). **CONFIRMED.** Sources: §18 `:663-672` and [`vector-temporary/layout.json`](../../reverse/decompiled/runtime/vector-temporary/layout.json). Native: `Engine::vectorTemps_`, `vectorTempCursor_`.
+`0x0063ce30, 0x0063d130)`, 64 slots × 12 bytes; cursor `0x0061d7e8` advances +12 before use (first slot returned `0x0063ce3c`). **CONFIRMED.** Sources: §18 `:663-672` and [`vector-temporary/layout.json`. Native: `Engine::vectorTemps_`, `vectorTempCursor_`.
 
 ## 6. DLL interface and plugin handles
 | Address / offset | Meaning | Evidence | Confidence |
@@ -193,7 +193,7 @@ Native: no PE ABI. `Engine::initialize_plugins` and `svc_plugin_open` set `plugi
 ## 7. Input slot tables
 | Address | Content | Evidence | Confidence |
 |---|---|---|---|
-| `0x0061b108` (stride 8, sentinel `0x0061b3d0`) | 89 key names → 80 slots (name, index) | §12 `:427-430`; [`input-contract.json`](../../reverse/decompiled/runtime/input-contract.json) | CONFIRMED |
+| `0x0061b108` (stride 8, sentinel `0x0061b3d0`) | 89 key names → 80 slots (name, index) | §12 `:427-430`; `input-contract.json` | CONFIRMED |
 | `0x006659a8 + 4·code` | Keyboard state, codes 0..126 (raw 1024 when held or freshly down) | §12 `:434`, `:448-449` | CONFIRMED |
 | `0x00665930..0x0066595c` / `0x00665c70..0x00665c9c` | JOY_1..12 / JOY2_1..12 | §12 `:435-436` | CONFIRMED |
 | `0x0066597c/80/84` | MOUSE_LEFT/RIGHT/MIDDLE | §12 `:437` | CONFIRMED |
@@ -236,7 +236,7 @@ Observed bytes: the ISO-installed `~/.local/share/kabus22/game/options.k22` is 3
 ### 8.2 Save slots
 | File | Format | Writer / reader | Evidence | Confidence |
 |---|---|---|---|---|
-| `kysd.sav` | Text: `file_var_write(Aktif_SaveNo)`, `file_var_write(SLG_KayitSayisi)`, then each slot label via `file_str_write` + `"\n"`; at most `SLG_MaxKayit`=99 | `YukleMenu.wdl:SLG_Kaydet` / `SLG_Yukle`; also read by `GA_AyarlariYukle` | Scripts. The installed sample starts `27 27 01)Demir - Ofis` per [`script_semantics.json`](../../reverse/extracted/script_semantics.json) `save_layout_correction_evidence`. | CONFIRMED |
+| `kysd.sav` | Text: `file_var_write(Aktif_SaveNo)`, `file_var_write(SLG_KayitSayisi)`, then each slot label via `file_str_write` + `"\n"`; at most `SLG_MaxKayit`=99 | `YukleMenu.wdl:SLG_Kaydet` / `SLG_Yukle`; also read by `GA_AyarlariYukle` | Scripts. The installed sample starts `27 27 01)Demir - Ofis` per `script_semantics.json` `save_layout_correction_evidence`. | CONFIRMED |
 | `kayit<N>.sav` | Positional stream of 2030 one-byte `file_asc_write` values; no XYZ position | `Yeni_Oyun_Deger.wdl:YD_OyunuKaydet` / `YD_OyunuYukle`. The filename is `"kayit"+str_for_num(Aktif_SaveNo)+".sav"`. | Same JSON. Installed `kayit0.sav`/`kayit27.sav` are both 2030 B. CONTRACT §46 `:1880-1881` notes the writer does not save XYZ. | CONFIRMED |
 | `ftz.k22` | 3 bytes: days, hours, minutes (total play time = d·1440 + h·60 + m) | `GenelAyarlar.wdl:GA_AyarlariYukle` | Script; JSON reports 3 B installed | CONFIRMED |
 

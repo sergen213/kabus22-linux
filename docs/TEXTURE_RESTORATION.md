@@ -103,11 +103,11 @@ Scale2x emits only source colours.
 
 ```sh
 # 1. dump the original textures (decoded RGBA, lossless) from your installed game
-kabus22 --dump-textures /tmp/k22-dump --data ~/.local/share/kabus22/game
+kabus22 --dump-textures ~/k22-dump --data ~/.local/share/kabus22/game
 # 2. build a 2x pack into ${XDG_DATA_HOME:-~/.local/share}/kabus22/packs/hd2x
-python3 tools/texture-upscaler/upscale.py /tmp/k22-dump --name hd2x --scale 2 [--pbr] [--method auto]
+python3 tools/texture-upscaler/upscale.py ~/k22-dump --name hd2x --scale 2 [--pbr] [--method auto]
 # 3. validate (also checks the integer-scale rule against the dump)
-python3 tools/texture-upscaler/upscale.py --validate ~/.local/share/kabus22/packs/hd2x /tmp/k22-dump
+python3 tools/texture-upscaler/upscale.py --validate ~/.local/share/kabus22/packs/hd2x ~/k22-dump
 # 4. play with it
 kabus22 --texture-pack hd2x
 ```

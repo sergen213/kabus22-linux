@@ -51,7 +51,7 @@ install. A reinstall shows them from the existing root right away; otherwise the
 a plain gradient panel. The settings launcher uses the same style (`installer/wizard_style.hpp`,
 GTK CSS on a fixed light Adwaita theme) and the root's `wizard-small-image.png` in its header;
 installations made before this change simply have no header image. Reference screenshots of the
-original (Wine, private Xvfb) live in `reverse/original-installer/` (local only, not in git).
+original installer are not included in the repository.
 
 The media-page preview doubles as the media check: Next on that page stays disabled while it runs
 (status line shows its stage) and is enabled only once it succeeds for the current path. Browse,

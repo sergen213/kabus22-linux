@@ -37,7 +37,7 @@ All reverse-engineering documents use: **CONFIRMED** (direct evidence: bytes, de
 | `Kabus-22_Win_TR-EN-DE_ISO-Version/Kabus 22.iso` | ISO edition "Kabus 22 Multi 3" (Inno Setup 5.2.1); only source for native installs |
 | `setup.exe` + `setup-1.bin` | different "Kabus 22 Test" build (Inno 5.1.10); not used for engine analysis |
 | `Kabus22Patch/` | community "Bug Fix and Widescreen Support" patch; its `K22.exe` is the Ghidra-analysed A6 binary (6 `.text` bytes differ from ISO, see [EXECUTABLE_ANALYSIS](reverse-engineering/EXECUTABLE_ANALYSIS.md)) |
-| `/mnt/1st4TB/Lutris Games/kabus22/…/Kabus 22/` | patched Windows install (source of `RenkAyar.dll` import and of `reverse/extracted/original/*.wdl`) |
+| Lutris (Wine) prefix `…/Merscom/Kabus 22/` | patched Windows install (source of `RenkAyar.dll` import and of `reverse/extracted/original/*.wdl`) |
 | `~/.local/share/kabus22/game/` | native installation's verbatim ISO data |
 
 Originals are never modified; mutation tests use private copies; `objcopy` must not be pointed at originals (it rewrites its input when no output is given).
@@ -88,11 +88,11 @@ GH=/opt/ghidra/support/analyzeHeadless
 
 # Embedded PCX (built-in font) export; args: OUT IMAGE_ADDRESS [POINTER_ADDRESS [PE_FILE ...]]
 "$GH" "$PWD/reverse/ghidra" Kabus22 -process K22.exe -noanalysis -readOnly \
-  -scriptPath "$PWD/reverse/scripts" -postScript ExportEmbeddedPcx.java /tmp/k22-font 0062130c 00627310
+  -scriptPath "$PWD/reverse/scripts" -postScript ExportEmbeddedPcx.java "$HOME/k22-font" 0062130c 00627310
 
 # Runtime follow-up (private script; args: OUT MAX_FUNCTIONS SEED_ADDRESS ...)
 "$GH" "$PWD/reverse/ghidra" Kabus22 -process K22.exe -noanalysis -readOnly \
-  -scriptPath "$PWD/reverse/decompiled/runtime" -postScript RecoverRuntime.java /tmp/k22-runtime 40 00414650
+  -scriptPath "$PWD/reverse/decompiled/runtime" -postScript RecoverRuntime.java "$HOME/k22-runtime" 40 00414650
 ```
 
 Commands 1-3 are recorded in `reverse/decompiled/RECOVERY.txt` lines 11-18; command 4 in the header of `reverse/scripts/ExportEmbeddedPcx.java`. A7 Bonus analysis uses private `reverse/decompiled/runtime/bonus-core/*.java` and `bonus-physics/*.java` scripts against a separate project containing `Kabus 22 Mode/acknex.dll` (SHA-256 `f96c7645…227b`). Expected outputs are Ghidra approximations that do not compile and are not engine source.

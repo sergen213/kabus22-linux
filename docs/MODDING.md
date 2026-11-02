@@ -45,7 +45,7 @@ cannot be replaced — replace their members instead.
 To get the original files to edit, export them in exactly this layout:
 
 ```sh
-kabus22 --export-files /tmp/k22-files --data ~/.local/share/kabus22/game   # [--mode bonus]
+kabus22 --export-files ~/k22-files --data ~/.local/share/kabus22/game   # [--mode bonus]
 ```
 
 `OUT` must not exist (or be empty) and must not be inside the game directory.
@@ -81,10 +81,10 @@ Export a model as the engine loads it (with `--mod`, a mod's replacement as the 
 
 ```sh
 kabus22 --list-models --data ~/.local/share/kabus22/game [--mode bonus] [--mod ID ...]   # <name>\t<original|mod id>
-kabus22 --export-model demir_2007.mdl /tmp/demir --data ~/.local/share/kabus22/game        # [--mode bonus] [--mod ID ...]
+kabus22 --export-model demir_2007.mdl ~/demir --data ~/.local/share/kabus22/game        # [--mode bonus] [--mod ID ...]
 ```
 
-This writes `/tmp/demir/demir_2007.gltf`, `demir_2007.bin` and one PNG per skin (`demir_2007_skin1.png`, …).
+This writes `~/demir/demir_2007.gltf`, `demir_2007.bin` and one PNG per skin (`demir_2007_skin1.png`, …).
 Import it in Blender with *File → Import → glTF 2.0*, edit, and export with *File → Export → glTF 2.0*
 into the mod's `data/` (*glTF Separate* or *glTF Binary*), under the original's name.
 
