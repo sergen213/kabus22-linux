@@ -18,7 +18,7 @@ target_link_libraries(kabus22_setup_core PUBLIC PkgConfig::GTK3 PkgConfig::AV Li
 target_compile_options(kabus22_setup_core PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(kabus22-setup main.cpp)
 target_link_libraries(kabus22-setup PRIVATE kabus22_setup_core)
-add_executable(kabus22-launcher launcher.cpp launcher_settings.cpp)
+add_executable(kabus22-launcher launcher.cpp launcher_settings.cpp launcher_text.cpp)
 # Mods page 3-D viewer: GtkGLArea drawn through libepoxy (a GTK 3 dependency); cgltf reads glTF.
 pkg_check_modules(EPOXY REQUIRED IMPORTED_TARGET epoxy)
 target_include_directories(kabus22-launcher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cgltf")
@@ -65,4 +65,6 @@ if(BUILD_TESTING)
   find_program(K22_PYTHON3 python3 REQUIRED) # PATH python3 with python3-cryptography
   add_test(NAME updater_end_to_end COMMAND "${K22_PYTHON3}" "${CMAKE_CURRENT_SOURCE_DIR}/check_updater_e2e.py"
     "$<TARGET_FILE:kabus22-updater-testhttp>" "$<TARGET_FILE:kabus22-updater>")
+  # Every literal passed to the launcher's tx/txn/fmt must have a Turkish entry in launcher_text.cpp.
+  add_test(NAME launcher_text_coverage COMMAND "${K22_PYTHON3}" "${CMAKE_CURRENT_SOURCE_DIR}/check_launcher_text.py")
 endif()

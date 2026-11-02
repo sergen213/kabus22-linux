@@ -1,4 +1,5 @@
 #include "launcher_settings.hpp"
+#include "launcher_text.hpp"
 #include "layout.hpp"
 #include <glib.h>
 #define CGLTF_IMPLEMENTATION
@@ -149,7 +150,7 @@ Preferences parsePreferences(const std::string& bytes, Preferences p = Preferenc
     auto text = [&](const char* name, std::string& destination) { if (g_key_file_has_key(key.get(), "Launcher", name, nullptr)) destination = keyText(key.get(), "Launcher", name); };
     text("mode", p.mode); text("renderer", p.renderer); text("display", p.display); text("window", p.window);
     text("resolution", p.resolution); text("language", p.language); text("audio-language", p.audioLanguage);
-    text("bonus-language", p.bonusLanguage); text("preset", p.preset); text("camera", p.camera);
+    text("bonus-language", p.bonusLanguage); text("preset", p.preset); text("camera", p.camera); text("interface-language", p.interfaceLanguage);
     if (g_key_file_has_key(key.get(), "Launcher", "bonus-aa", nullptr)) {
         p.bonusAA = g_key_file_get_integer(key.get(), "Launcher", "bonus-aa", &error);
         if (error) raise(error, "Invalid Bonus AA");
@@ -171,7 +172,7 @@ Preferences parsePreferences(const std::string& bytes, Preferences p = Preferenc
 }
 std::string encodePreferences(const Preferences& p) {
     KeyFile key(g_key_file_new(), g_key_file_free);
-    const std::pair<const char*,const std::string*> fields[]={{"mode",&p.mode},{"renderer",&p.renderer},{"display",&p.display},{"window",&p.window},{"resolution",&p.resolution},{"language",&p.language},{"audio-language",&p.audioLanguage},{"bonus-language",&p.bonusLanguage},{"preset",&p.preset},{"camera",&p.camera}};
+    const std::pair<const char*,const std::string*> fields[]={{"mode",&p.mode},{"renderer",&p.renderer},{"display",&p.display},{"window",&p.window},{"resolution",&p.resolution},{"language",&p.language},{"audio-language",&p.audioLanguage},{"bonus-language",&p.bonusLanguage},{"preset",&p.preset},{"camera",&p.camera},{"interface-language",&p.interfaceLanguage}};
     for (const auto& [name,value] : fields)
         g_key_file_set_string(key.get(), "Launcher", name, value->c_str());
     g_key_file_set_integer(key.get(), "Launcher", "bonus-aa", p.bonusAA);
@@ -195,15 +196,15 @@ void parseModText(std::string_view text, Mod& m) {
     for(std::size_t start=0;start<=text.size();) {
         auto end=text.find('\n',start);if(end==std::string_view::npos)end=text.size();
         auto line=text.substr(start,end-start);start=end+1;if(!line.empty()&&line.back()=='\r')line.remove_suffix(1);
-        if(first){require(line=="kabus22-mod 1","mod.txt must start with the line \"kabus22-mod 1\"");first=false;continue;}
+        if(first){require(line=="kabus22-mod 1",tx("mod.txt must start with the line \"kabus22-mod 1\""));first=false;continue;}
         if(line.empty())continue;
-        auto tab=line.find('\t');require(tab!=std::string_view::npos,"mod.txt line is not key<TAB>value: "+std::string(line));
+        auto tab=line.find('\t');require(tab!=std::string_view::npos,fmt("mod.txt line is not key<TAB>value: {0}",{std::string(line)}));
         std::string key(line.substr(0,tab));
         std::string* slot=key=="name"?&m.name:key=="version"?&m.version:key=="author"?&m.author:key=="description"?&m.description:nullptr;
-        require(slot,"mod.txt has an unknown key: "+key);require(!std::count(seen.begin(),seen.end(),key),"mod.txt repeats the key "+key);
+        require(slot,fmt("mod.txt has an unknown key: {0}",{key}));require(!std::count(seen.begin(),seen.end(),key),fmt("mod.txt repeats the key {0}",{key}));
         seen.push_back(key);*slot=line.substr(tab+1);
     }
-    require(!m.name.empty(),"mod.txt has no name");
+    require(!m.name.empty(),tx("mod.txt has no name"));
 }
 // Engine Assets::safe_name: ASCII lowercase, '\' -> '/', '//' collapsed, terminal '.'/' ' dropped.
 std::string assetName(std::string_view value) {
@@ -230,7 +231,7 @@ int privateLock(const fs::path& root) {
     int fd=::openat(parent.value,".launcher.lock",O_RDWR|O_CREAT|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC,0600);
     require(fd>=0,"Cannot open private launcher settings lock");
     if(::fstat(fd,&st)!=0||!S_ISREG(st.st_mode)||st.st_uid!=::geteuid()||(st.st_mode&0077)||st.st_nlink!=1){::close(fd);throw std::runtime_error("Unsafe launcher settings lock");}
-    if(::flock(fd,LOCK_EX|LOCK_NB)!=0){::close(fd);throw std::runtime_error("Another launcher is applying settings; retry after it finishes");}
+    if(::flock(fd,LOCK_EX|LOCK_NB)!=0){::close(fd);throw std::runtime_error(tx("Another launcher is applying settings; retry after it finishes"));}
     return fd;
 }
 bool originalEntry(const fs::path& game) {
@@ -258,8 +259,8 @@ std::string bonusMarker(const std::string& language) { return language=="tr"?"11
 std::span<const Key> keys() {
     static constexpr Key result[] = {{2,"1"},{3,"2"},{4,"3"},{5,"4"},{6,"5"},{7,"6"},{8,"7"},{9,"8"},{10,"9"},{11,"0"},
         {16,"Q"},{17,"W"},{18,"E"},{19,"R"},{20,"T"},{21,"Y"},{22,"U"},{23,"I"},{24,"O"},{25,"P"},
-        {29,"Left Ctrl"},{30,"A"},{31,"S"},{32,"D"},{33,"F"},{34,"G"},{35,"H"},{36,"J"},{37,"K"},{38,"L"},
-        {42,"Left Shift"},{44,"Z"},{45,"X"},{46,"C"},{47,"V"},{48,"B"},{49,"N"},{50,"M"},{54,"Right Shift"},{56,"Left Alt"},
+        {29,txn("Left Ctrl")},{30,"A"},{31,"S"},{32,"D"},{33,"F"},{34,"G"},{35,"H"},{36,"J"},{37,"K"},{38,"L"},
+        {42,txn("Left Shift")},{44,"Z"},{45,"X"},{46,"C"},{47,"V"},{48,"B"},{49,"N"},{50,"M"},{54,txn("Right Shift")},{56,txn("Left Alt")},
         {59,"F1"},{60,"F2"},{61,"F3"},{62,"F4"},{63,"F5"},{64,"F6"},{65,"F7"},{66,"F8"},{67,"F9"},{68,"F10"},{71,"Home"},{72,"Up"},{73,"Page Up"},{75,"Left"},{77,"Right"},{79,"End"},{80,"Down"},{81,"Page Down"},{82,"Insert"},{83,"Delete"},{87,"F11"},{88,"F12"}};
     return result;
 }
@@ -268,10 +269,10 @@ void validateCampaign(const std::vector<unsigned char>& b) {
     const int maxima[]={3,1,1,1,1,1,1,1,100,200,160,200,100,100,100};
     for (int i=0;i<15;++i) require(b[i]<=maxima[i], "Invalid campaign option byte " + std::to_string(i));
     for (int i=15;i<25;++i) {
-        require(std::any_of(keys().begin(),keys().end(),[&](const Key& k){return k.code==b[i];}), "Unsupported or reserved campaign keyboard binding");
-        require(std::find(b.begin()+15,b.begin()+i,b[i])==b.begin()+i, "Duplicate campaign keyboard binding");
+        require(std::any_of(keys().begin(),keys().end(),[&](const Key& k){return k.code==b[i];}), tx("Unsupported or reserved campaign keyboard binding"));
+        require(std::find(b.begin()+15,b.begin()+i,b[i])==b.begin()+i, tx("Duplicate campaign keyboard binding"));
     }
-    for (int i=25;i<31;++i) require(b[i]>=1&&b[i]<=12,"Joystick button must be 1 through 12");
+    for (int i=25;i<31;++i) require(b[i]>=1&&b[i]<=12,tx("Joystick button must be 1 through 12"));
     if(b.size()==32) require(b[31]<=5,"Invalid patched campaign language byte");
 }
 std::array<int,5> decodeBonus(const std::string& bytes) {
@@ -299,15 +300,16 @@ void validatePreferences(const Preferences& p) {
     require(p.bonusLanguage=="tr"||p.bonusLanguage=="en"||p.bonusLanguage=="de","Invalid Bonus text language");
     require(p.bonusAA>=0&&p.bonusAA<=3,"Invalid Bonus AA choice");
     if(!p.resolution.empty()) {
-        auto split=p.resolution.find('x'); require(split!=std::string::npos&&p.resolution.find('x',split+1)==std::string::npos,"Resolution must be WIDTHxHEIGHT or empty for desktop");
+        auto split=p.resolution.find('x'); require(split!=std::string::npos&&p.resolution.find('x',split+1)==std::string::npos,tx("Resolution must be WIDTHxHEIGHT or empty for desktop"));
         int w=integer(std::string_view(p.resolution).substr(0,split)), h=integer(std::string_view(p.resolution).substr(split+1));
-        require(w>=1280&&h>=720&&w<=16384&&h<=16384,"Native resolution must be 1280x720 through 16384x16384");
+        require(w>=1280&&h>=720&&w<=16384&&h<=16384,tx("Native resolution must be 1280x720 through 16384x16384"));
     }
     require(p.preset=="original"||p.preset=="enhanced"||p.preset=="ultra"||p.preset=="custom","Invalid graphics preset");
     for(auto it=p.graphics.begin();it!=p.graphics.end();++it)
         require(token(it->first)&&token(it->second)&&std::none_of(p.graphics.begin(),it,[&](const auto& o){return o.first==it->first;}),"Invalid or duplicate custom graphics option");
     for(auto it=p.packs.begin();it!=p.packs.end();++it) require(packName(*it)&&std::find(p.packs.begin(),it,*it)==it,"Invalid or duplicate texture pack name");
     for(auto it=p.mods.begin();it!=p.mods.end();++it) require(packName(*it)&&std::find(p.mods.begin(),it,*it)==it,"Invalid or duplicate mod id");
+    require(p.interfaceLanguage=="auto"||p.interfaceLanguage=="en"||p.interfaceLanguage=="tr","Invalid interface language");
 }
 bool Capabilities::available(std::string_view backend) const {
     auto found=std::find_if(backends.begin(),backends.end(),[&](const auto& b){return b.first==backend;});return found!=backends.end()&&found->second.first;
@@ -447,20 +449,20 @@ fs::path modsRoot() {
 Mod readMod(const fs::path& folder) {
     Mod m;m.id=folder.filename().string();
     try {
-        require(packName(m.id),"Invalid mod folder name");
+        require(packName(m.id),tx("Invalid mod folder name"));
         const auto txt=folder/"mod.txt";std::error_code ec;
-        require(fs::is_regular_file(fs::symlink_status(txt))&&fs::file_size(txt,ec)<=65536&&!ec,"mod.txt is missing, not a regular file or larger than 64 KiB");
-        std::ifstream in(txt,std::ios::binary);std::string text{std::istreambuf_iterator<char>(in),{}};require(!in.bad(),"Cannot read mod.txt");
+        require(fs::is_regular_file(fs::symlink_status(txt))&&fs::file_size(txt,ec)<=65536&&!ec,tx("mod.txt is missing, not a regular file or larger than 64 KiB"));
+        std::ifstream in(txt,std::ios::binary);std::string text{std::istreambuf_iterator<char>(in),{}};require(!in.bad(),tx("Cannot read mod.txt"));
         parseModText(text,m);
-        const auto data=folder/"data";require(fs::is_directory(fs::symlink_status(data)),"missing data/ directory");
+        const auto data=folder/"data";require(fs::is_directory(fs::symlink_status(data)),tx("missing data/ directory"));
         for(const auto& e:fs::recursive_directory_iterator(data))if(e.symlink_status().type()==fs::file_type::regular)m.files.push_back(assetName(e.path().lexically_relative(data).generic_string()));
         std::sort(m.files.begin(),m.files.end());
-        auto twice=std::adjacent_find(m.files.begin(),m.files.end());require(twice==m.files.end(),"Two files under data/ both name "+(twice==m.files.end()?std::string():*twice));
+        auto twice=std::adjacent_find(m.files.begin(),m.files.end());require(twice==m.files.end(),fmt("Two files under data/ both name {0}",{twice==m.files.end()?std::string():*twice}));
         // Engine rule: one file per model — x.mdl, x.gltf and x.glb in one mod conflict.
         std::vector<std::string> models;for(const auto& f:m.files)if(auto k=modelKey(f);!k.empty())models.push_back(k);
         std::sort(models.begin(),models.end());auto clash=std::adjacent_find(models.begin(),models.end());
-        require(clash==models.end(),"Two model files under data/ both provide "+(clash==models.end()?std::string():*clash)+" (keep one of .mdl, .gltf, .glb)");
-        m.valid=true;m.detail=std::to_string(m.files.size())+(m.files.size()==1?" file":" files");
+        require(clash==models.end(),fmt("Two model files under data/ both provide {0} (keep one of .mdl, .gltf, .glb)",{clash==models.end()?std::string():*clash}));
+        m.valid=true;m.detail=m.files.size()==1?tx("1 file"):fmt("{0} files",{std::to_string(m.files.size())});
     } catch(const std::exception& e){m.detail=e.what();}
     return m;
 }
@@ -472,9 +474,9 @@ std::vector<Mod> listMods(const fs::path& root) {
     return mods;
 }
 void createMod(const fs::path& root, const std::string& id, const std::string& name) {
-    require(packName(id)&&!id.starts_with("."),"Invalid mod id: "+id);
-    require(!name.empty()&&name.find_first_of("\t\r\n")==std::string::npos,"Mod name must be one non-empty line");
-    fs::create_directories(root);require(::mkdir((root/id).c_str(),0755)==0,"Cannot create mod "+id+": "+std::strerror(errno));
+    require(packName(id)&&!id.starts_with("."),fmt("Invalid mod id: {0}",{id}));
+    require(!name.empty()&&name.find_first_of("\t\r\n")==std::string::npos,tx("Mod name must be one non-empty line"));
+    fs::create_directories(root);require(::mkdir((root/id).c_str(),0755)==0,fmt("Cannot create mod {0}: {1}",{id,std::strerror(errno)}));
     try {
         std::ofstream out(root/id/"mod.txt",std::ios::binary);out<<"kabus22-mod 1\nname\t"<<name<<"\n";out.close();require(out.good(),"Cannot write mod.txt");
         fs::create_directory(root/id/"data");
@@ -512,14 +514,14 @@ std::string installMod(const fs::path& root, const fs::path& zip) {
         const auto content=stage/"content";fs::path top=content;std::string id=zip.stem().string();
         if(!fs::is_regular_file(fs::symlink_status(content/"mod.txt"))) {
             std::vector<fs::path> entries;std::error_code ec;for(const auto& e:fs::directory_iterator(content,ec))entries.push_back(e.path());
-            require(entries.size()==1&&fs::is_directory(fs::symlink_status(entries[0]))&&fs::is_regular_file(fs::symlink_status(entries[0]/"mod.txt")),"The zip has no mod.txt at its root or inside exactly one top folder");
+            require(entries.size()==1&&fs::is_directory(fs::symlink_status(entries[0]))&&fs::is_regular_file(fs::symlink_status(entries[0]/"mod.txt")),tx("The zip has no mod.txt at its root or inside exactly one top folder"));
             top=entries[0];id=top.filename().string();
         }
-        require(packName(id)&&!id.starts_with("."),"Invalid mod id from the zip: "+id);
-        require(!fs::exists(fs::symlink_status(root/id)),"A mod named "+id+" already exists; remove it first");
-        auto mod=readMod(top);require(mod.valid,"Invalid mod "+id+": "+mod.detail);
+        require(packName(id)&&!id.starts_with("."),fmt("Invalid mod id from the zip: {0}",{id}));
+        require(!fs::exists(fs::symlink_status(root/id)),fmt("A mod named {0} already exists; remove it first",{id}));
+        auto mod=readMod(top);require(mod.valid,fmt("Invalid mod {0}: {1}",{id,mod.detail}));
         if(::renameat2(AT_FDCWD,top.c_str(),AT_FDCWD,(root/id).c_str(),RENAME_NOREPLACE)!=0)
-            throw std::runtime_error(errno==EEXIST?"A mod named "+id+" already exists; remove it first":"Cannot install mod "+id+": "+std::strerror(errno));
+            throw std::runtime_error(errno==EEXIST?fmt("A mod named {0} already exists; remove it first",{id}):fmt("Cannot install mod {0}: {1}",{id,std::strerror(errno)}));
         fs::remove_all(stage);return id;
     } catch(...) {std::error_code ec;fs::remove_all(stage,ec);throw;}
 }
@@ -561,7 +563,7 @@ std::string lowerExtension(const fs::path& p) {return assetName(p.extension().st
 }
 ModelPlan planReplacement(const fs::path& mod, const std::string& key, const fs::path& source) {
     require(modelKey(key)==key,"Not a model name: "+key);
-    const auto ext=lowerExtension(source);require(ext==".mdl"||ext==".gltf"||ext==".glb","Pick a .gltf, .glb or .mdl file");
+    const auto ext=lowerExtension(source);require(ext==".mdl"||ext==".gltf"||ext==".glb",tx("Pick a .gltf, .glb or .mdl file"));
     const auto files=dataFiles(mod);ModelPlan plan;
     // An existing file with the same normalized name is overwritten in place (letter case does not matter).
     auto place=[&](const fs::path& wanted){auto name=assetName(wanted.lexically_relative(mod/"data").generic_string());for(const auto& [p,n]:files)if(n==name)return p;return wanted;};
@@ -569,14 +571,14 @@ ModelPlan planReplacement(const fs::path& mod, const std::string& key, const fs:
     for(const auto& [p,n]:files)if(modelKey(n)==key&&p!=destination)plan.removed.push_back(p);
     if(ext!=".mdl"){
         auto g=readGltf(source);std::string refused;
-        if(!g.meshes)plan.warnings.push_back("the file has no mesh");
-        if(g.triangles>20000)plan.warnings.push_back(std::to_string(g.triangles)+" triangles: above the 20 000 the engine is tuned for");
+        if(!g.meshes)plan.warnings.push_back(tx("the file has no mesh"));
+        if(g.triangles>20000)plan.warnings.push_back(fmt("{0} triangles: above the 20 000 the engine is tuned for",{std::to_string(g.triangles)}));
         for(const auto& uri:g.uris){
             auto rel=sideFile(uri);if(rel.empty()){refused+="\n  "+uri;continue;}
-            if(!fs::is_regular_file(source.parent_path()/rel)){plan.warnings.push_back("missing next to the model: "+uri);continue;}
+            if(!fs::is_regular_file(source.parent_path()/rel)){plan.warnings.push_back(fmt("missing next to the model: {0}",{uri}));continue;}
             plan.copies.emplace_back(source.parent_path()/rel,place(destination.parent_path()/rel));
         }
-        require(refused.empty(),"The glTF names files outside its folder (absolute or ../ URIs); copy them next to it and use relative URIs:"+refused);
+        require(refused.empty(),tx("The glTF names files outside its folder (absolute or ../ URIs); copy them next to it and use relative URIs:")+refused);
     }
     std::error_code ec;std::erase_if(plan.copies,[&](const auto& c){return fs::equivalent(c.first,c.second,ec);});
     for(const auto& [from,to]:plan.copies)if(fs::exists(to))plan.overwritten.push_back(to);
@@ -598,10 +600,10 @@ fs::path binDirectory(const fs::path& root) { auto active=layout::active_version
 Settings load(const fs::path& root, const fs::path& executable) {
     Settings s; s.root=checkedAbsolute(root); s.engine=executable.empty()?binDirectory(s.root)/"kabus22":checkedAbsolute(executable);
     Fd folder(directory(s.root)); struct stat st{};
-    require(::fstat(folder.value,&st)==0&&st.st_uid==::geteuid()&&!(st.st_mode&0022),"Installation must be private and user-owned");
-    require(snapshot(s.root/".kabus22-owned").bytes==std::optional<std::string>("Kabus22 native installation 1\n"),"Not a Kabus22 native installation (ownership marker missing)");
+    require(::fstat(folder.value,&st)==0&&st.st_uid==::geteuid()&&!(st.st_mode&0022),tx("Installation must be private and user-owned"));
+    require(snapshot(s.root/".kabus22-owned").bytes==std::optional<std::string>("Kabus22 native installation 1\n"),tx("Not a Kabus22 native installation (ownership marker missing)"));
     binary(s.engine); { Fd game(directory(s.root/"game")); }
-    s.privateRoot=defaultRoot(); s.configFile=fs::path(g_get_user_config_dir())/"kabus22/launcher.ini";
+    s.privateRoot=defaultRoot(); s.configFile=launcherConfig();
     s.campaignPrivate=snapshot(s.privateRoot/"options.k22",true); s.campaignSource=snapshot(s.root/"game/options.k22");
     s.campaign=campaignBytes(effective(s.campaignPrivate,s.campaignSource)); validateCampaign(s.campaign);
     require(s.campaignSource.bytes.has_value(),"Supplied campaign defaults missing"); s.defaults=campaignBytes(*s.campaignSource.bytes); validateCampaign(s.defaults);
@@ -625,6 +627,21 @@ Settings load(const fs::path& root, const fs::path& executable) {
     s.updatesFile=snapshot(s.configFile.parent_path()/"updates.ini",true); if(s.updatesFile.bytes) s.updates=parseUpdates(*s.updatesFile.bytes,s.warnings);
     return s;
 }
+fs::path launcherConfig() { return fs::path(g_get_user_config_dir())/"kabus22/launcher.ini"; }
+std::string savedInterfaceLanguage(const fs::path& config) {
+    try {
+        auto current=snapshot(config,true); if(!current.bytes) return "auto";
+        auto value=keyText(keyFile(*current.bytes).get(),"Launcher","interface-language");
+        return value=="en"||value=="tr"?value:"auto";
+    } catch(const std::exception&) { return "auto"; }
+}
+void saveInterfaceLanguage(const fs::path& config, const fs::path& lockRoot, const std::string& value) {
+    Preferences check; check.interfaceLanguage=value; validatePreferences(check);
+    Fd lock(privateLock(lockRoot)); auto current=snapshot(config,true);
+    KeyFile key=current.bytes?keyFile(*current.bytes):KeyFile(g_key_file_new(),g_key_file_free);
+    g_key_file_set_string(key.get(),"Launcher","interface-language",value.c_str());
+    atomicWrite(current,keyData(key.get()));
+}
 void saveUpdates(Settings& s) {
     validateUpdates(s.updates); Fd lock(privateLock(s.privateRoot)); unchanged(s.updatesFile,true);
     if(!s.updatesFile.bytes&&s.updates==Updates{}) return;
@@ -634,7 +651,7 @@ void saveUpdates(Settings& s) {
 void save(Settings& s) {
     validateCampaign(s.campaign); validatePreferences(s.preferences);
     if(s.bonusAvailable) (void)decodeBonus(encodeBonus(s.bonus));
-    require(s.preferences.mode!="bonus"||s.bonusAvailable,"Bonus data is not installed");
+    require(s.preferences.mode!="bonus"||s.bonusAvailable,tx("Bonus data is not installed"));
     Fd lock(privateLock(s.privateRoot));
     // Check every source before any publication, so stale game edits cannot be overwritten.
     for(const auto* expected:{&s.campaignPrivate,&s.config,&s.controllerFile,&s.updatesFile}) unchanged(*expected,true);
@@ -657,12 +674,12 @@ void save(Settings& s) {
 }
 std::vector<std::string> command(const Settings& s, const std::optional<unsigned long long>& frames) {
     validatePreferences(s.preferences); binary(s.engine); const auto& p=s.preferences;
-    require(p.mode!="bonus"||s.bonusAvailable,"Bonus data is not installed");
+    require(p.mode!="bonus"||s.bonusAvailable,tx("Bonus data is not installed"));
     const fs::path data=s.root/"game"/(p.mode=="bonus"?"Kabus 22 Mode":""); { Fd folder(directory(data)); }
     std::vector<std::string> args={s.engine.string(),"--data",data.string(),"--mode",p.mode};
     if(p.mode=="bonus")args.insert(args.end(),{"--language",p.bonusLanguage});
     else if(p.language!="saved"&&(s.campaign.size()!=32||p.language!=s.initialLanguage)){
-        require(std::count(s.languages.begin(),s.languages.end(),p.language)==1,"Text language "+p.language+" needs the community patch language data, which is not installed");
+        require(std::count(s.languages.begin(),s.languages.end(),p.language)==1,fmt("Text language {0} needs the community patch language data, which is not installed",{p.language}));
         args.insert(args.end(),{"--language",p.language});
     }
     if(p.mode=="campaign") { args.insert(args.end(),{"--audio-language",p.audioLanguage});
@@ -676,7 +693,7 @@ std::vector<std::string> command(const Settings& s, const std::optional<unsigned
     else args.insert(args.end(),{"--renderer","vulkan","--ray-tracing",p.renderer=="vulkan-rt"?"on":"off"});
     if(s.capabilities) {
         const auto& c=*s.capabilities;bool packs=false;
-        if(p.preset!="original"){require(std::count(c.presets.begin(),c.presets.end(),p.preset)==1,"Graphics preset "+p.preset+" is not offered by this engine; choose another on Rendering");args.insert(args.end(),{"--preset",p.preset});}
+        if(p.preset!="original"){require(std::count(c.presets.begin(),c.presets.end(),p.preset)==1,fmt("Graphics preset {0} is not offered by this engine; choose another on Rendering",{p.preset}));args.insert(args.end(),{"--preset",p.preset});}
         // backend and texture_packs have dedicated controls; stale or inapplicable custom values fall back to the engine default.
         // fps_limit (its own Rendering row) and seamless_doors apply under every preset; the other keys only under custom.
         for(const auto& [key,value]:p.graphics){
@@ -903,6 +920,34 @@ void selfCheck() {
         // Comments in a user-edited controller.ini survive an Apply that does not change it.
         auto edited=encodeController(pad)+"; user note\n";atomicWrite(first.controllerFile,edited);save(first);require(first.controllerFile.bytes==edited,"Unchanged controller.ini was rewritten");
         first.updates.channel="stable";saveUpdates(first);require(first.updatesFile.bytes==encodeUpdates(first.updates),"saveUpdates regression");
+        // Interface language: launcher.ini roundtrip and rejection; a language-only save keeps other keys and Apply keeps it.
+        {Preferences ui;ui.interfaceLanguage="tr";require(parsePreferences(encodePreferences(ui)).interfaceLanguage=="tr"&&Preferences{}.interfaceLanguage=="auto","Interface language roundtrip regression");}
+        for(auto bad:{"[Launcher]\ninterface-language=de\n","[Launcher]\ninterface-language=\n","[Launcher]\ninterface-language=TR\n"})rejects([&]{parsePreferences(bad);});
+        const auto config=first.privateRoot/"launcher.ini";
+        require(savedInterfaceLanguage(scratch/"absent/launcher.ini")=="auto","Absent launcher.ini interface language regression");
+        saveInterfaceLanguage(config,first.privateRoot,"tr");
+        require(savedInterfaceLanguage(config)=="tr"&&parsePreferences(*snapshot(config,true).bytes).language=="tr","Interface language save dropped other launcher keys");
+        rejects([&]{saveInterfaceLanguage(config,first.privateRoot,"fr");});
+        first.config=snapshot(config,true);first.preferences=parsePreferences(*first.config.bytes,first.preferences);save(first);
+        require(savedInterfaceLanguage(config)=="tr","Apply dropped the interface language");
+        {auto raw=snapshot(config,true);atomicWrite(raw,"[Launcher]\ninterface-language=xx\n");require(savedInterfaceLanguage(config)=="auto","Invalid saved interface language was not ignored");}
+        // Translation table: unique English keys, non-empty Turkish, the same {N} placeholders on both sides.
+        auto marks=[](std::string_view s){std::string r;for(std::size_t i=0;i+2<s.size();++i)if(s[i]=='{'&&s[i+1]>='0'&&s[i+1]<='9'&&s[i+2]=='}')r+=s[i+1];std::sort(r.begin(),r.end());r.erase(std::unique(r.begin(),r.end()),r.end());return r;};
+        const auto table=textTable();require(table.size()>300,"Translation table is missing");
+        for(std::size_t i=0;i<table.size();++i){
+            require(*table[i].en&&*table[i].tr,"Empty translation entry");
+            require(marks(table[i].en)==marks(table[i].tr),"Translation placeholders differ: "+std::string(table[i].en));
+            for(std::size_t j=0;j<i;++j)require(std::strcmp(table[i].en,table[j].en)!=0,"Duplicate translation key: "+std::string(table[i].en));
+        }
+        const std::string unknown="not in the table",swapped="{1} and {0}";
+        require(fmt(swapped.c_str(),{"a","b"})=="b and a"&&tx(unknown)==unknown&&std::string(tx("_Apply"))=="_Apply","English text lookup regression");
+        useTurkish(true);const bool translated=std::string(tx("_Apply"))=="_Uygula"&&tx(unknown)==unknown&&fmt("Removed mod {0}.",{"x"})=="x modu kaldırıldı.";useTurkish(false);
+        require(translated,"Turkish text lookup regression");
+        // auto: KABUS22_UI_LANG (tr, anything else English), then the first set of LC_ALL / LC_MESSAGES / LANG.
+        g_setenv("KABUS22_UI_LANG","tr",true);require(uiLanguage("auto")=="tr"&&uiLanguage("en")=="en","KABUS22_UI_LANG=tr ignored");
+        g_setenv("KABUS22_UI_LANG","de",true);g_setenv("LC_ALL","tr_TR.UTF-8",true);require(uiLanguage("auto")=="en"&&uiLanguage("tr")=="tr","KABUS22_UI_LANG=de is not English");
+        g_unsetenv("KABUS22_UI_LANG");require(uiLanguage("auto")=="tr","Turkish locale ignored");
+        g_setenv("LC_ALL","C",true);g_setenv("LANG","tr_TR.UTF-8",true);require(uiLanguage("auto")=="en","LC_ALL does not override LANG");
         fs::remove_all(scratch);
     } catch(...) { fs::remove_all(scratch); throw; }
 }

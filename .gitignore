@@ -251,10 +251,13 @@
 !/cmake/KabusODEContact.cmake
 !/cmake/KabusODELcp.cmake
 !/installer/CMakeLists.txt
+!/installer/check_launcher_text.py
 !/installer/check_setup.cpp
 !/installer/launcher.cpp
 !/installer/launcher_settings.cpp
 !/installer/launcher_settings.hpp
+!/installer/launcher_text.cpp
+!/installer/launcher_text.hpp
 !/installer/main.cpp
 !/installer/media.cpp
 !/installer/media.hpp

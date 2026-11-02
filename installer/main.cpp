@@ -234,7 +234,12 @@ enum Text { Title, LanguageTitle, LanguagePrompt, Ok, Back, Next, Cancel, Instal
     ReadyTitle, ReadySubtitle, ReadyLead, ReadyDestination, ReadyMedia, ReadyTasks, ReadyShortcuts, ReadyExtras,
     InstallingTitle, InstallingSubtitle, Preparing, NotCompleted, Cancelling, InstallCancelled,
     ReadingArtwork, ArtworkLoaded, ArtworkFailed, ArtworkCancelled,
-    FinishedTitle, FinishedBody, OpenSettings, ExitTitle, ExitBody, TextCount };
+    FinishedTitle, FinishedBody, OpenSettings, ExitTitle, ExitBody,
+    LanguageName, BrowseFor, MediaName, MediaDeveloper, MediaIso, MediaDescription, PreviewName, PreviewDescription,
+    LogoName, LogoDescription, MediaStatusName, MediaErrorsName, DestinationName, DestinationDescription,
+    ExtrasName, ExtrasDescription, SummaryName, StatusName, ProgressName, ErrorsName,
+    ChooseMedia, ChooseParent, ChooseExtras, Select, DialogCancel, FilterSetup, FilterIso, FilterAll,
+    SelectMediaFirst, ChooseDirectory, UnexpectedError, ArtworkDisplay, LaunchFailed, TextCount };
 // Wording follows the original wizard's pages; button captions follow its translations.
 constexpr const char* texts[TextCount][3] = {
     {"Setup - Kabus 22", "Setup - Kabus 22", "Kurulum - Kabus 22"},
@@ -247,7 +252,7 @@ constexpr const char* texts[TextCount][3] = {
     {"Abbrechen", "Cancel", "KAPAT"},
     {"_Installieren", "_Install", "_Kur"},
     {"_Fertigstellen", "_Finish", "_BİTTİ"},
-    {"Du_rchsuchen ...", "B_rowse...", "K_LASÖR AÇ..."},
+    {"Du_rchsuchen ...", "B_rowse...", "KLASÖR _AÇ..."},
     {"_Ja", "_Yes", "_EVET"},
     {"_Nein", "_No", "_HAYIR"},
     {"Willkommen zum Kabus 22 Setup-Assistenten", "Welcome to the Kabus 22 Setup Wizard",
@@ -347,8 +352,125 @@ constexpr const char* texts[TextCount][3] = {
      "You may run Setup again at another time to complete the installation.\n\nExit Setup?",
      "Kurulum tamamlanmadı. Şimdi çıkarsanız Kabus 22 kurulmayacak.\n\n"
      "Kurulumdan çıkmak istediğinizden emin misiniz?"},
+    {"Setup-Sprache", "Setup language", "Kurulum dili"},
+    {"Durchsuchen: ", "Browse: ", "Klasör aç: "},
+    {"Spieldatenträger", "Game media", "Oyun kaynağı"},
+    {"Original-Setup (Entwickler)", "Original setup (developer)", "Orijinal kurulum (geliştirici)"},
+    {"ISO-Abbild", "ISO image", "ISO kalıbı"},
+    {"Wählen Sie das vollständige Original-ISO-Abbild von Kabus 22, die originale setup.exe oder einen installierten "
+     "Windows-Spielordner. Es wird nichts ausgeführt.",
+     "Select the complete original Kabus22 ISO image, original setup.exe, or an installed Windows game folder. Nothing is executed.",
+     "Kabus 22'nin eksiksiz orijinal ISO kalıbını, orijinal setup.exe dosyasını veya kurulu Windows oyun klasörünü seçin. "
+     "Hiçbir şey çalıştırılmaz."},
+    {"Vorschau des Originalbilds", "Original artwork preview", "Orijinal görsel önizlemesi"},
+    {"Wählen Sie Ihren eigenen Spieldatenträger, um das Original-Logo zu laden. Es wird kein Spielbild mitgeliefert.",
+     "Choose your own game media to load the original logo. No game artwork is bundled.",
+     "Orijinal logoyu yüklemek için kendi oyun kaynağınızı seçin. Kurulum hiçbir oyun görseli içermez."},
+    {"Original-Logo von Kabus 22", "Original Kabus22 logo", "Orijinal Kabus 22 logosu"},
+    {"Aus dem gewählten Original-Spieldatenträger dekodiert.", "Decoded from the selected original game media.",
+     "Seçilen orijinal oyun kaynağından okundu."},
+    {"Datenträgerstatus", "Media status", "Kaynak durumu"},
+    {"Fehlerdetails zum Datenträger", "Media error details", "Kaynak hata ayrıntıları"},
+    {"Installationsordner", "Install directory", "Kurulum klasörü"},
+    {"Ein neuer oder leerer Ordner oder eine vorhandene Kabus 22-Installation, die ersetzt wird. \"Durchsuchen\" wählt "
+     "einen übergeordneten Ordner und hängt kabus22 an; bearbeiten Sie den Pfad für einen anderen Namen.",
+     "A new or empty directory, or an existing Kabus22 installation to replace. Browse selects a parent and adds kabus22; "
+     "edit the path to choose another name.",
+     "Yeni ya da boş bir klasör veya değiştirilecek mevcut bir Kabus 22 kurulumu. KLASÖR AÇ bir üst klasör seçer ve sonuna "
+     "kabus22 ekler; başka bir ad için yolu düzenleyin."},
+    {"Community-Extras (optional)", "Community extras (optional)", "Topluluk eklentileri (isteğe bağlı)"},
+    {"Optionaler, separat bezogener Kabus22Patch-Ordner für dessen Extras. Für Breitbild in der Original-Kampagne nicht "
+     "nötig; für reine Original-ISO-Daten leer lassen.",
+     "Optional, separately obtained Kabus22Patch directory for its extras. Not required for native original-campaign "
+     "widescreen; leave empty for original ISO data.",
+     "Eklentileri için ayrıca edinilmiş, isteğe bağlı Kabus22Patch klasörü. Orijinal kampanyada geniş ekran için gerekmez; "
+     "yalnızca orijinal ISO verileri için boş bırakın."},
+    {"Installationsübersicht", "Installation summary", "Kurulum özeti"},
+    {"Setup-Status", "Installer status", "Kurulum durumu"},
+    {"Installationsfortschritt", "Installation progress", "Kurulum ilerlemesi"},
+    {"Fehlerdetails des Setups", "Installer error details", "Kurulum hata ayrıntıları"},
+    {"Original-Datenträger von Kabus 22 wählen", "Select original Kabus22 media", "Orijinal Kabus 22 kaynağını seçin"},
+    {"Übergeordneten Ordner für den neuen Ordner kabus22 wählen", "Select parent for the new kabus22 directory",
+     "Yeni kabus22 klasörü için üst klasörü seçin"},
+    {"Optionale Kabus22Patch-Community-Extras wählen", "Select optional Kabus22Patch community extras",
+     "İsteğe bağlı Kabus22Patch topluluk eklentilerini seçin"},
+    {"Auswählen", "Select", "Seç"},
+    {"Abbrechen", "Cancel", "İptal"},
+    {"Original-setup.exe (Entwickler-Datenträger)", "Original setup.exe (developer media)", "Orijinal setup.exe (geliştirici kaynağı)"},
+    {"ISO-Abbilder", "ISO images", "ISO kalıpları"},
+    {"Alle Dateien", "All files", "Tüm dosyalar"},
+    {"Wählen Sie zuerst Ihr Original-ISO-Abbild.", "Select your original ISO image first.", "Önce orijinal ISO kalıbınızı seçin."},
+    {"Wählen Sie einen Installationsordner.", "Choose an installation directory.", "Bir kurulum klasörü seçin."},
+    {"Unerwarteter Fehler im nativen Setup.", "Unexpected native installer error.", "Kurulumda beklenmeyen bir hata oluştu."},
+    {"Das dekodierte Originalbild kann nicht angezeigt werden.", "Cannot display the decoded original artwork.",
+     "Okunan orijinal görsel gösterilemiyor."},
+    {"Kabus 22-Einstellungen können nicht geöffnet werden: ", "Cannot open Kabus 22 settings: ",
+     "Kabus 22 ayarları açılamadı: "},
 };
 const char* T(Text id) { return texts[id][language]; }
+
+// GUI wording for setup core progress stages; the core itself stays English for the CLI and logs.
+// Every literal stage passed to report()/progress() in setup.cpp and media.cpp must have a row here;
+// prefix rows ("Copying <file>") carry %s for the rest of the stage.
+struct Stage { const char* text[3]; bool prefix; };
+constexpr Stage stages[] = {
+    {{"%s wird kopiert", "Copying ", "%s kopyalanıyor"}, true},
+    {{"%s wird wiederhergestellt", "Restoring ", "%s geri yükleniyor"}, true},
+    {{"Inventar der installierten Dateien wird erfasst", "Recording installed inventory", "Kurulan dosyaların listesi kaydediliyor"}, false},
+    {{"Originale Engine-Schriftart wird wiederhergestellt", "Recovering original engine font", "Orijinal oyun motoru yazı tipi çıkarılıyor"}, false},
+    {{"Installierte Dateien werden überprüft", "Verifying installed files", "Kurulan dosyalar doğrulanıyor"}, false},
+    {{"Vorhandene Installation wird ersetzt", "Replacing existing installation", "Mevcut kurulum değiştiriliyor"}, false},
+    {{"Native Installation wird bereitgestellt", "Publishing native installation", "Yerel kurulum yerine yerleştiriliyor"}, false},
+    {{"Desktop-Verknüpfungen werden erstellt", "Creating desktop shortcuts", "Masaüstü kısayolları oluşturuluyor"}, false},
+    {{"Installierter Windows-Spielordner wird geprüft", "Inspecting installed Windows game folder", "Kurulu Windows oyun klasörü inceleniyor"}, false},
+    {{"Bei der Vorschau bereitgestellte Original-Setup-Teile der ISO werden verwendet",
+      "Reusing original ISO setup slices staged by the media preview",
+      "Önizlemede hazırlanan orijinal ISO kurulum parçaları kullanılıyor"}, false},
+    {{"Original-Quellteile werden überprüft", "Validating original source slices", "Orijinal kaynak parçaları doğrulanıyor"}, false},
+    {{"Original-Setup-Teile werden geprüft", "Inspecting original setup slices", "Orijinal kurulum parçaları inceleniyor"}, false},
+    {{"ISO9660-Datenträger wird geprüft", "Inspecting ISO9660 media", "ISO9660 kalıbı inceleniyor"}, false},
+    {{"Original-Setup-Teile der ISO werden bereitgestellt", "Staging original ISO setup slices", "Orijinal ISO kurulum parçaları hazırlanıyor"}, false},
+    {{"Entpackte Quelldateien werden überprüft", "Verifying extracted source members", "Çıkarılan kaynak dosyaları doğrulanıyor"}, false},
+    {{"Inno-Datenversion wird geprüft", "Inspecting Inno data version", "Inno veri sürümü inceleniyor"}, false},
+    {{"Alle Pfade des Original-Datenträgers werden überprüft", "Validating all original media paths",
+      "Orijinal kaynaktaki tüm dosya yolları doğrulanıyor"}, false},
+    {{"Inhalt des Original-Spieldatenträgers wird aufgelistet", "Listing original game media", "Orijinal oyun kaynağının içeriği listeleniyor"}, false},
+    {{"Quelldateien werden entpackt und getestet", "Extracting and testing source members", "Kaynak dosyaları çıkarılıyor ve sınanıyor"}, false},
+};
+// Unknown text (e.g. a T() status set by the wizard itself) passes through unchanged.
+std::string stageText(const std::string& stage, Language in = language) {
+    if (in == English) return stage;
+    for (const auto& row : stages) {
+        const std::string_view english = row.text[English];
+        if (row.prefix ? !stage.starts_with(english) : stage != english) continue;
+        std::string result = row.text[in];
+        if (row.prefix) result.replace(result.find("%s"), 2, stage.substr(english.size()));
+        return result;
+    }
+    return stage;
+}
+void textCheck() {
+    for (const auto& row : texts) for (const char* value : row)
+        if (!value || !*value) throw std::runtime_error("Empty installer translation");
+    // The setup core's literal stage strings; keep in sync with report()/progress() in setup.cpp and media.cpp.
+    for (const char* stage : {"Copying fon_logo.jpg", "Restoring game/K22.wrs", "Recording installed inventory",
+            "Recovering original engine font", "Verifying installed files", "Replacing existing installation",
+            "Publishing native installation", "Creating desktop shortcuts", "Inspecting installed Windows game folder",
+            "Reusing original ISO setup slices staged by the media preview", "Validating original source slices",
+            "Inspecting original setup slices", "Inspecting ISO9660 media", "Staging original ISO setup slices",
+            "Verifying extracted source members", "Inspecting Inno data version", "Validating all original media paths",
+            "Listing original game media", "Extracting and testing source members"})
+        for (const Language in : {German, Turkish}) {
+            const auto text = stageText(stage, in);
+            if (text == stage || text.empty() || text.find("%s") != std::string::npos)
+                throw std::runtime_error(std::string("Untranslated installer stage: ") + stage);
+        }
+    for (const auto& row : stages) for (const char* value : row.text)
+        if (!*value || (row.prefix && value != row.text[English] && std::string_view(value).find("%s") == std::string_view::npos))
+            throw std::runtime_error("Invalid installer stage translation");
+    if (stageText("Copying fon_logo.jpg", Turkish) != "fon_logo.jpg kopyalanıyor" || stageText("Unknown", Turkish) != "Unknown")
+        throw std::runtime_error("Installer stage translation regression");
+}
 
 // The original setup first asks for its language; the system locale preselects it.
 bool chooseLanguage() {
@@ -368,7 +490,7 @@ bool chooseLanguage() {
     auto* choices = gtk_combo_box_text_new();
     for (const char* name : {"Deutsch", "English", "Türkçe"}) gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(choices), name);
     gtk_combo_box_set_active(GTK_COMBO_BOX(choices), language);
-    accessible(choices, "Setup language");
+    accessible(choices, T(LanguageName));
     gtk_box_pack_start(GTK_BOX(column), k22::wizard::text(T(LanguagePrompt)), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(column), choices, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(row), icon, FALSE, FALSE, 0);
@@ -425,7 +547,7 @@ class Installer {
         gtk_widget_set_tooltip_text(entry, description);
         accessible(entry, name, description);
         auto* browser = gtk_button_new_with_mnemonic(T(Browse));
-        accessible(browser, (std::string("Browse: ") + name).c_str(), description);
+        accessible(browser, (std::string(T(BrowseFor)) + name).c_str(), description);
         g_signal_connect(browser, "clicked", browse, this);
         gtk_box_pack_start(GTK_BOX(row), entry, TRUE, TRUE, 0);
         gtk_box_pack_start(GTK_BOX(row), browser, FALSE, FALSE, 0);
@@ -537,9 +659,11 @@ class Installer {
     }
     void finish() {
         if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(launchCheck_))) {
+            // Hands the wizard language to the settings launcher (it treats de as English).
+            g_setenv("KABUS22_UI_LANG", language == Turkish ? "tr" : language == German ? "de" : "en", TRUE);
             try { launch(result_); }
             catch (const std::exception& error) {
-                labelText(finishErrors_, error.what());
+                labelText(finishErrors_, T(LaunchFailed) + std::string(error.what()));
                 gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(launchCheck_), FALSE);
                 return;
             }
@@ -561,18 +685,17 @@ class Installer {
         else if (confirmExit()) close();
     }
     void choose(GtkWidget* entry, GtkFileChooserAction action, bool source, bool parent = false) {
-        auto* dialog = gtk_file_chooser_native_new(source ? "Select original Kabus22 media" :
-                parent ? "Select parent for the new kabus22 directory" : "Select optional Kabus22Patch community extras",
-                GTK_WINDOW(window_), action, "Select", "Cancel");
+        auto* dialog = gtk_file_chooser_native_new(T(source ? ChooseMedia : parent ? ChooseParent : ChooseExtras),
+                GTK_WINDOW(window_), action, T(Select), T(DialogCancel));
         chooser_ = dialog;
         if (source) {
             auto* filter = gtk_file_filter_new();
-            gtk_file_filter_set_name(filter, loose_ ? "Original setup.exe (developer media)" : "ISO images");
+            gtk_file_filter_set_name(filter, T(loose_ ? FilterSetup : FilterIso));
             gtk_file_filter_add_pattern(filter, loose_ ? "*.exe" : "*.iso");
             gtk_file_filter_add_pattern(filter, loose_ ? "*.EXE" : "*.ISO");
             gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), filter);
             auto* all = gtk_file_filter_new();
-            gtk_file_filter_set_name(all, "All files");
+            gtk_file_filter_set_name(all, T(FilterAll));
             gtk_file_filter_add_pattern(all, "*");
             gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), all);
         }
@@ -605,12 +728,12 @@ class Installer {
         try {
             labelText(errors, "");
             const fs::path source = text(source_);
-            if (source.empty()) throw std::runtime_error("Select your original ISO image first.");
+            if (source.empty()) throw std::runtime_error(T(SelectMediaFirst));
             Request input = request_;
             input.source = fs::absolute(source).lexically_normal();
             input.sourceIso.clear(); input.sourceSetup.clear();
             input.installRoot = text(destination_);
-            if (!preview && input.installRoot.empty()) throw std::runtime_error("Choose an installation directory.");
+            if (!preview && input.installRoot.empty()) throw std::runtime_error(T(ChooseDirectory));
             if (!input.installRoot.empty()) input.installRoot = fs::absolute(input.installRoot).lexically_normal();
             input.optionalPatch = text(patch_);
             if (!input.optionalPatch.empty()) input.optionalPatch = fs::absolute(input.optionalPatch).lexically_normal();
@@ -662,8 +785,8 @@ class Installer {
                     }
                 } catch (const Cancelled& error) {
                     std::lock_guard lock(mutex_);
-                    stage_ = T(preview ? ArtworkCancelled : InstallCancelled);
-                    error_ = error.what();
+                    stage_ = T(preview ? ArtworkCancelled : InstallCancelled); // the status already says so
+                    error_.clear();
                 } catch (const std::exception& error) {
                     std::lock_guard lock(mutex_);
                     stage_ = T(preview ? ArtworkFailed : NotCompleted);
@@ -671,7 +794,7 @@ class Installer {
                 } catch (...) {
                     std::lock_guard lock(mutex_);
                     stage_ = T(preview ? ArtworkFailed : NotCompleted);
-                    error_ = "Unexpected native installer error.";
+                    error_ = T(UnexpectedError);
                 }
                 std::lock_guard lock(mutex_);
                 finished_ = dirty_ = true;
@@ -706,7 +829,7 @@ class Installer {
             std::lock_guard lock(mutex_);
             finished = finished_;
             if (dirty_) {
-                if (!cancelled_.load() || finished) labelText(previewing_ ? mediaStatus_ : status_, stage_);
+                if (!cancelled_.load() || finished) labelText(previewing_ ? mediaStatus_ : status_, stageText(stage_));
                 labelText(previewing_ ? mediaErrors_ : errors_, error_);
                 if (!previewing_)
                     gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(progress_), total_ ?
@@ -737,8 +860,8 @@ class Installer {
                 pixels.release();
                 gtk_image_set_from_pixbuf(GTK_IMAGE(image_), pixbuf);
                 g_object_unref(pixbuf);
-                accessible(image_, "Original Kabus22 logo", "Decoded from the selected original game media.");
-            } else labelText(mediaErrors_, "Cannot display the decoded original artwork.");
+                accessible(image_, T(LogoName), T(LogoDescription));
+            } else labelText(mediaErrors_, T(ArtworkDisplay));
         }
         artwork(std::exchange(wizard_, nullptr), std::exchange(wizardSmall_, nullptr));
         if (closing_) { gtk_widget_destroy(window_); return G_SOURCE_CONTINUE; }
@@ -775,23 +898,22 @@ public:
         auto* body = innerPage(Media, MediaTitle, MediaSubtitle);
         lead(body, "media-optical", MediaLead);
         gtk_box_pack_start(GTK_BOX(body), k22::wizard::text(T(MediaHint)), FALSE, FALSE, 0);
-        source_ = field(body, !request_.source.empty() ? "Game media" : loose_ ? "Original setup (developer)" : "ISO image",
+        source_ = field(body, T(!request_.source.empty() ? MediaName : loose_ ? MediaDeveloper : MediaIso),
             !request_.source.empty() ? request_.source : loose_ ? request_.sourceSetup : request_.sourceIso,
-            "Select the complete original Kabus22 ISO image, original setup.exe, or an installed Windows game folder. Nothing is executed.",
+            T(MediaDescription),
             G_CALLBACK(+[](GtkButton*, gpointer data) { auto* self = static_cast<Installer*>(data); self->choose(self->source_, GTK_FILE_CHOOSER_ACTION_OPEN, true); }));
         image_ = gtk_image_new();
-        accessible(image_, "Original artwork preview", "Choose your own game media to load the original logo. No game artwork is bundled.");
+        accessible(image_, T(PreviewName), T(PreviewDescription));
         gtk_box_pack_start(GTK_BOX(body), image_, FALSE, FALSE, 0);
         mediaStatus_ = detail(body, false);
-        accessible(mediaStatus_, "Media status");
+        accessible(mediaStatus_, T(MediaStatusName));
         mediaErrors_ = detail(body, true);
-        accessible(mediaErrors_, "Media error details");
+        accessible(mediaErrors_, T(MediaErrorsName));
 
         body = innerPage(Destination, DestinationTitle, DestinationSubtitle);
         lead(body, "folder", DestinationLead);
         gtk_box_pack_start(GTK_BOX(body), k22::wizard::text(T(DestinationHint)), FALSE, FALSE, 0);
-        destination_ = field(body, "Install directory", request_.installRoot,
-            "A new or empty directory, or an existing Kabus22 installation to replace. Browse selects a parent and adds kabus22; edit the path to choose another name.",
+        destination_ = field(body, T(DestinationName), request_.installRoot, T(DestinationDescription),
             G_CALLBACK(+[](GtkButton*, gpointer data) { auto* self = static_cast<Installer*>(data); self->choose(self->destination_, GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, false, true); }));
         auto* note = k22::wizard::text(T(DestinationNote));
         gtk_widget_set_valign(note, GTK_ALIGN_END);
@@ -802,8 +924,7 @@ public:
         auto* extras = gtk_label_new_with_mnemonic(T(TasksLabel));
         gtk_label_set_xalign(GTK_LABEL(extras), 0);
         gtk_box_pack_start(GTK_BOX(body), extras, FALSE, FALSE, 0);
-        patch_ = field(body, "Community extras (optional)", request_.optionalPatch,
-            "Optional, separately obtained Kabus22Patch directory for its extras. Not required for native original-campaign widescreen; leave empty for original ISO data.",
+        patch_ = field(body, T(ExtrasName), request_.optionalPatch, T(ExtrasDescription),
             G_CALLBACK(+[](GtkButton*, gpointer data) { auto* self = static_cast<Installer*>(data); self->choose(self->patch_, GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, false); }));
         gtk_label_set_mnemonic_widget(GTK_LABEL(extras), patch_);
         gtk_box_pack_start(GTK_BOX(body), k22::wizard::text(T(TasksNote)), FALSE, FALSE, 0);
@@ -816,18 +937,18 @@ public:
         gtk_text_view_set_editable(GTK_TEXT_VIEW(summary_), FALSE);
         gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(summary_), FALSE);
         gtk_text_view_set_left_margin(GTK_TEXT_VIEW(summary_), 4);
-        accessible(summary_, "Installation summary");
+        accessible(summary_, T(SummaryName));
         gtk_container_add(GTK_CONTAINER(memo), summary_);
         gtk_box_pack_start(GTK_BOX(body), memo, TRUE, TRUE, 0);
 
         body = innerPage(Installing, InstallingTitle, InstallingSubtitle);
         status_ = detail(body, false);
-        accessible(status_, "Installer status");
+        accessible(status_, T(StatusName));
         progress_ = gtk_progress_bar_new();
-        accessible(progress_, "Installation progress");
+        accessible(progress_, T(ProgressName));
         gtk_box_pack_start(GTK_BOX(body), progress_, FALSE, FALSE, 0);
         errors_ = detail(body, true);
-        accessible(errors_, "Installer error details");
+        accessible(errors_, T(ErrorsName));
 
         auto* finished = sidePage(Finished, FinishedTitle, FinishedBody);
         launchCheck_ = gtk_check_button_new_with_mnemonic(T(OpenSettings));
@@ -896,7 +1017,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (options.version) { std::cout << Version << '\n'; return 0; }
-        if (options.check) { argumentCheck(); selfCheck(); std::cout << "Installer self-check passed.\n"; return 0; }
+        if (options.check) { argumentCheck(); textCheck(); selfCheck(); std::cout << "Installer self-check passed.\n"; return 0; }
         defaults(options.request);
         std::signal(SIGINT, interrupt);
         std::signal(SIGTERM, interrupt);

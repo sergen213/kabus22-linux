@@ -21,6 +21,7 @@ struct Preferences {
     Pairs graphics;
     std::vector<std::string> packs;  // enabled texture packs, priority order
     std::vector<std::string> mods;   // enabled mods, priority order (first wins)
+    std::string interfaceLanguage = "auto"; // launcher UI: auto | en | tr
 };
 // Contract D: `kabus22 --list-capabilities`.
 struct Option { std::string key, label, fallback; std::vector<std::string> values, backends; };
@@ -110,6 +111,12 @@ std::optional<std::pair<int, std::string>> progressLine(std::string_view line);
 fs::path defaultRoot();
 fs::path binDirectory(const fs::path& root);
 Settings load(const fs::path& root, const fs::path& engine = {});
+// ${XDG_CONFIG_HOME:-~/.config}/kabus22/launcher.ini
+fs::path launcherConfig();
+// [Launcher] interface-language of that file; "auto" when absent, unreadable or invalid.
+std::string savedInterfaceLanguage(const fs::path& config);
+// Sets only [Launcher] interface-language (auto|en|tr), keeping every other key; lockRoot = the private settings lock folder.
+void saveInterfaceLanguage(const fs::path& config, const fs::path& lockRoot, const std::string& value);
 void save(Settings& settings);
 void saveUpdates(Settings& settings);
 void binary(const fs::path& path);
