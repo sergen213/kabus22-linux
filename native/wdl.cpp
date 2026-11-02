@@ -553,4 +553,15 @@ std::size_t Runtime::reroute_assigned_read(std::string_view function,std::string
  for(auto& f:impl_->functions)if(case_equal(f.name,function))for(auto& ins:f.code)walk(ins.expr);
  return count;
 }
+std::size_t Runtime::wrap_assigned(std::string_view field,std::string_view call,std::span<const std::string_view> files){
+ std::size_t count=0;
+ std::function<void(E&)> walk=[&](E& e){
+  if(!e)return;
+  if(e->kind==Expr::Binary&&e->op=="="&&e->args[0]->kind==Expr::Member&&case_equal(e->args[0]->op,field)){
+   auto& r=e->args[1];auto c=std::make_unique<Expr>();c->kind=Expr::Call;c->dispatch=Expr::Native;c->loc=r->loc;auto n=std::make_unique<Expr>();n->kind=Expr::Name;n->loc=r->loc;n->op=std::string(call);c->args.push_back(std::move(n));c->args.push_back(std::move(r));r=std::move(c);++count;return;}
+  for(auto& a:e->args)walk(a);
+ };
+ for(auto& f:impl_->functions)if(std::any_of(files.begin(),files.end(),[&](auto x){return case_equal(x,function_file_name(f));}))for(auto& ins:f.code)walk(ins.expr);
+ return count;
+}
 }

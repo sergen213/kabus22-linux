@@ -1107,6 +1107,16 @@ Value Engine::builtin(Runtime& runtime,ProcessContext& ctx,std::string_view name
   if(characterLock>=0&&lain&&ctx.you&&state.get(ctx.you)&&callback(ctx.you,"action1")==lain)return Value::from_int(2);
   return global("Aktif_Silah");
  }
+ if(name=="k22_inzar_hit_kind"){ // koruyucu.wdl/koru_buyuler.wdl you.skill3=KIND; gun-only enemies get a firearm kind (character.cpp)
+  const auto v=args.empty()?Value{}:args[0].current();const double k=v.real();
+  if(characterLock<0||k<10||!ctx.you||!state.get(ctx.you))return v;
+  const auto action=callback(ctx.you,"action1");
+  for(auto enemy:{"klasik_yaratik","ari_ai","Bond_ai","Bond_yz","latex_ai"})if(const auto f=runtime.function(enemy);f&&f==action)return Value::from_int(k<14?1:2);
+  return v;
+ }
+ // DemirYedekle/EbruYedekle/DemirYukle/EbruYukle (Ornek_Yasin.wdl:3957-4100): while a locked body holds its own firearms (character.cpp
+ // character_inventory), the story's weapon copies read their own destination, so they copy nothing.
+ if(name.starts_with("k22_weapon_copy:")){const auto rest=name.substr(16);const auto colon=rest.find(':');return global(weaponsHolder_>=0?rest.substr(colon+1):rest.substr(0,colon));}
  if(name=="k22_pose_weapon"){const double w=number("Aktif_Silah");return characterLock>=0&&(w<0||w>7)?Value::from_int(1):global("Aktif_Silah");} // oy_Oynat: Demir's t_Silah has weapons 0-7
  if(state.profile==SemanticProfile::BonusA7){
   auto count=[&](std::size_t n){if(args.size()!=n)throw std::runtime_error(std::string(name)+": invalid argument count");};
@@ -1410,7 +1420,7 @@ std::optional<Value> Engine::service_builtin(Runtime& runtime,ProcessContext&,st
   // GA_AyarlariKaydet writes the in-memory native tier; persist the user's authored GA_Cozunurluk instead.
   if(data.writable&&!data.bytes.empty()&&core_equal(data.output.filename().string(),"options.k22")&&display_admitted())data.bytes[0]=authoredResolution_;
   svc_flush(data);
-  if(data.writable&&saves::slot_number(data.output.filename().string())>=0){const auto& entry=runtime.compiler_settings().entry;if(!saveScriptKnown_){if(assets.contains(entry))saveScript_=saves::fnv1a64(assets.read(entry));saveScriptKnown_=true;}saves::write_meta(data.output,{saves::MetaFormat,K22_VERSION,saves::now_utc(),entry,saveScript_,"native",quickSaving?saved_position():"",characterLock,coop.active?coop.characters:std::array<int,2>{-1,-1}});}
+  if(data.writable&&saves::slot_number(data.output.filename().string())>=0){const auto& entry=runtime.compiler_settings().entry;if(!saveScriptKnown_){if(assets.contains(entry))saveScript_=saves::fnv1a64(assets.read(entry));saveScriptKnown_=true;}saves::write_meta(data.output,{saves::MetaFormat,K22_VERSION,saves::now_utc(),entry,saveScript_,"native",quickSaving?saved_position():"",characterLock,coop.active?coop.characters:std::array<int,2>{-1,-1},weaponsHolder_});}
   files.erase(std::uint32_t(integer(0)));return Value{};}
  if(name=="file_asc_read"){count(1);auto& data=file();if(data.writable)throw std::runtime_error("file handle is write-only");if(data.cursor==data.bytes.size())return Value::from_int(-1);return Value::from_int(data.bytes[data.cursor++]);}
  if(name=="file_asc_write"){count(2);auto& data=file();auto byte=std::uint8_t(raw(1)>>10);svc_append(data,std::string_view(reinterpret_cast<const char*>(&byte),1));return Value::from_int(byte);}

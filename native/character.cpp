@@ -24,6 +24,9 @@ constexpr std::array<std::string_view,2> demirEbruFiles{"oyuncu2.wdl","oyuncu2_e
 constexpr std::array<std::string_view,2> inzarFiles{"koruyucu.wdl","koru_buyuler.wdl"};
 constexpr std::array<std::string_view,1> ebruFiles{"oyuncu2_ebru.wdl"};
 constexpr std::array<std::string_view,2> posingFunctions{"oy_Oynat","Hareket_Hizi"};
+// A locked Demir or Ebru body carries its own firearms and ammunition (character_inventory); items and documents stay the story's.
+constexpr std::array<std::string_view,5> weaponGlobals{"Silahlar","SilahSayisi","Aktif_Silah","Kursun_Sayisi","S_Kursun_Sayisi"};
+constexpr std::array<std::string_view,2> backupPrefix{"Demir_","Ebru_"};
 // Glyph cells of the original language-independent menu atlas (TusYonetim.wdl TYI_Tus*): 170x32 cells, one key label each.
 struct Cell {char c;int x,y;};
 constexpr std::array<Cell,30> cells{{{'1',0,0},{'2',0,32},{'Q',0,320},{'W',0,352},{'E',0,384},{'R',0,416},{'T',0,448},{'Y',0,480},{'U',0,512},{'I',0,544},{'O',0,576},{'P',0,608},
@@ -64,6 +67,11 @@ void Engine::configure_characters(Runtime& runtime,int defaultLock){
  // kinds and firearm 2. Ates_Et (silah.wdl:680) records the firearm number there, so any other gun fell through every branch and
  // ended Lain's AI with its Enerji below 0 (no Kotukoru_Ol, no progression). A locked game records Lain's bullet hits as kind 2.
  runtime.reroute_assigned_read("Ates_Et","skill3","aktif_silah","k22_bullet_hit_kind");
+ // Inzar's sword and spells record her attack kind in the victim's skill3 (koruyucu.wdl, koru_buyuler.wdl: 10-30). The enemies of
+ // Demir's story know only firearm kinds: Klasik_Yaralan (klasik_yara.wdl:545), ari_Yaralan, Bond's and latex's hit reactions wait
+ // in a loop for kind 1-8/21 (no death check inside), so an Inzar hit froze them for good. Locked, those enemies get firearm
+ // kinds: 10-13 (her light slashes and drains) as the pistol's 1 (a stagger), her heavy strikes as the shotgun's 2 (knock-back).
+ runtime.wrap_assigned("skill3","k22_inzar_hit_kind",inzarFiles);
  // Demir's story scenes pose the player through oy_Oynat and Hareket_Hizi (oyuncu2.wdl:540/396: t_Silah.String[Aktif_Silah], 8
  // strings; Action_Zaman[Aktif_Silah*20+n], 160), called from cinematic.wdl, BUL_Saat.wdl and kotu_koruyucu.wdl buyukes_koruses.
  // An Ebru body there may still hold her magnum (8): those reads see the pistol (1).
@@ -72,13 +80,38 @@ void Engine::configure_characters(Runtime& runtime,int defaultLock){
  static constexpr std::array<std::string_view,1> gameOver{"game_over_strtr"};
  runtime.reroute_reads("game_over_start","k22_coop_game_over",gameOver);
  runtime.reroute_reads("key_enter","k22_coop_enter",{},{},demirEbruFiles);
+ // The story swaps the inventories at its switches (DemirYedekle/EbruYedekle park the live one, DemirYukle/EbruYukle load one;
+ // Ornek_Yasin.wdl:3957-4100, called from cinematic.wdl, LevelYonetim.wdl LevelYukle, seytan.wdl). While a locked body holds its own
+ // firearms their weapon copies read their destination (k22_weapon_copy, a no-op copy); items and documents are copied as written.
+ for(int c=0;c<2;++c){
+  const std::string save=std::string(c?"EbruYedekle":"DemirYedekle"),load=std::string(c?"EbruYukle":"DemirYukle");
+  for(auto n:weaponGlobals){const std::string backup=std::string(backupPrefix[c])+std::string(n);
+   const std::array<std::string_view,1> fs{save},fl{load};
+   runtime.reroute_reads(n,"k22_weapon_copy:"+std::string(n)+":"+backup,fs);runtime.reroute_reads(backup,"k22_weapon_copy:"+backup+":"+std::string(n),fl);}
+ }
 }
 void Engine::set_character_lock(int character){characterLock=std::clamp(character,-1,2);storyAtLevel_=story_character();adoptStory_=false;switchPrompt_=-1;}
+// Level entry (apply_character_lock). Unlocked, locked to Inzar or in coop the live inventory holds the story character's firearms
+// (Inzar's story uses none: there the parked Demir_*/Ebru_* copies are the authority). A locked Demir or Ebru holds their own: the
+// live firearms and ammunition (Silahlar, SilahSayisi, Aktif_Silah, Kursun_Sayisi, S_Kursun_Sayisi) are parked into the holder's
+// Demir_*/Ebru_* copy and the body's copy is loaded, as the story's own switch would. Saves record the holder (weapons= sidecar).
+void Engine::character_inventory(){
+ const int s=story_character(),want=(characterLock==0||characterLock==1)&&!coop.active?characterLock:-1;
+ if(want==weaponsHolder_)return;
+ const int from=weaponsHolder_>=0?weaponsHolder_:s<2?s:-1,to=want>=0?want:s<2?s:-1;
+ auto copy=[&](const std::string& dst,const std::string& src){
+  const auto d=global(dst),v=global(src);auto* a=d.kind==Value::Kind::Object?state.get(d.bits):nullptr;auto* b=v.kind==Value::Kind::Object?state.get(v.bits):nullptr;
+  if(a&&b){for(std::size_t i=0;i<std::min(a->array.size(),b->array.size());++i)a->array[i].value=b->array[i].value;}else set_global(dst,v);};
+ if(from>=0&&from!=to)for(auto n:weaponGlobals)copy(std::string(backupPrefix[from])+std::string(n),std::string(n));
+ if(to>=0&&to!=from)for(auto n:weaponGlobals)copy(std::string(n),std::string(backupPrefix[to])+std::string(n));
+ weaponsHolder_=want;
+}
 // load_level, before the placed actions start. The entity that would become the player for the story character runs the locked
 // character's action instead; a placed action of the locked character that the story does not use gets the story character's
 // action, whose guard (a body read) then removes it, as the original does for every unused player action.
 void Engine::apply_character_lock(Runtime& runtime,std::vector<std::pair<ObjectId,FunctionId>>& actions){
  if(adoptStory_||storyAtLevel_<0){storyAtLevel_=story_character();adoptStory_=false;}
+ character_inventory();
  if(characterLock<0)return;
  std::array<FunctionId,3> fn{};for(int i=0;i<3;++i)fn[i]=runtime.function(playerActions[i]);
  const auto effect=runtime.function("koru_efekt_bas");const int s=story_character(),b=characterLock;
@@ -101,23 +134,41 @@ void Engine::apply_character_lock(Runtime& runtime,std::vector<std::pair<ObjectI
  if(b!=2){const auto lain=runtime.function("kotukoru_ai"),devil=runtime.function("devil_ai");
   for(auto& [id,action]:actions)if(action&&(action==lain||action==devil))if(auto& t=state.require(id).field("skill2").value;t.raw()==0)t=Value::from_int(1);}
 }
-// Weapons a locked body can hold (every frame while locked). Demir's tables (Silah_isimleri, t_Silah) stop at weapon 7: in Ebru's
-// inventory he fires her magnum rounds from his pistol. Ebru's model has one pose set; she fires the story's firearms 1-5 or her
-// magnum through it (silah.wdl Ates_Et is generic) but cannot throw grenades or lay mines (6, 7: Demir's action only). Inzar fights
-// with her sword and spells and never reads Aktif_Silah.
+// Weapons a locked body can hold (every frame while locked). Demir's tables (Silah_isimleri, t_Silah) stop at weapon 7; Ebru's model
+// has one pose set: she fires firearms 1-5 or her magnum through it (silah.wdl Ates_Et is generic) but cannot throw grenades or lay
+// mines (6, 7: Demir's action only). Inzar fights with her sword and spells and never reads Aktif_Silah. Each body normally holds
+// its own inventory (character_inventory); in coop the inventory is shared and stays the story's.
 void Engine::character_weapons(Runtime& runtime,bool spawning){
  if(characterLock<0||characterLock==2)return;
  // Only once the locked body plays: right after a console change the old body runs on until the next level entry.
  const auto p=live_player();if(!spawning&&(!p||callback(p,"action1")!=runtime.function(playerActions[characterLock])))return;
- const int w=int(number("Aktif_Silah"));
+ int w=int(number("Aktif_Silah"));
  auto slot=[&](std::string_view name,std::size_t i)->Slot*{auto v=global(name);auto* o=v.kind==Value::Kind::Object?state.get(v.bits):nullptr;return o&&i<o->array.size()?&o->array[i]:nullptr;};
  auto rounds=[&](int weapon){auto* m=slot("S_Kursun_Sayisi",std::size_t(weapon));auto* r=slot("Kursun_Sayisi",std::size_t(weapon));return (m?m->value.raw():0)+(r?r->value.raw():0);};
- if(characterLock==0&&story_character()!=0&&(w<1||w>7)){
+ auto morph=[&](int weapon){ // Demir's gun model follows Aktif_Silah (KuBiGoMenu.wdl EM_KuBiGoSMenu:47)
+  auto gun=global("a_silah");auto names=slot("Silah_isimleri",std::size_t(weapon));
+  if(gun.kind==Value::Kind::Object&&state.get(gun.bits)&&state.get(gun.bits)->alive&&names){ProcessContext context;std::array<Argument,2> args{{{gun,{}},{names->value,{}}}};builtin(runtime,context,"ent_morph",args);}};
+ if(weaponsHolder_>=0){
+  // A story write of a weapon the body does not carry (LevelYukle's aktif_silah=1 or 8 at a story switch, LevelYonetim.wdl:879/933)
+  // selects the body's first firearm it can hold instead, Ebru's magnum first.
+  const int count=int(number("SilahSayisi"));
+  auto owned=[&](int x){for(int i=0;i<count;++i)if(auto* s=slot("Silahlar",std::size_t(i));s&&int(s->value.real())==x)return true;return false;};
+  if(ebruWeapon_&&!owned(ebruWeapon_))ebruWeapon_=0;
+  if(w!=0&&!owned(w)){
+   int pick=characterLock==1&&owned(8)?8:0;
+   for(int i=0;i<count&&!pick;++i)if(auto* s=slot("Silahlar",std::size_t(i))){const int x=int(s->value.real());if(characterLock==0?x>=1&&x<=7:x>=1&&x<=5)pick=x;}
+   if(pick){w=pick;set_global("Aktif_Silah",Value::from_int(w));if(characterLock==0)morph(w);}
+  }
+  // Ammunition picked up for a firearm the body does not carry (Demir's magazines and boxes, silah.wdl Kursun_Al/KursunKutusu, in
+  // another character's story) joins the reserve of the body's own firearm: Ebru's magnum, Demir's pistol.
+  if(const int to=characterLock==1?8:1;owned(to))
+   for(int x=1;x<=8;++x)if(x!=to&&!owned(x))if(auto *r=slot("Kursun_Sayisi",std::size_t(x)),*d=slot("Kursun_Sayisi",std::size_t(to));r&&d&&r->value.raw()>0){d->value=Value::from_double(d->value.real()+r->value.real());r->value=Value{};}
+ }
+ // In the story's inventory (coop): Demir in Ebru's holds his pistol, and her magnum rounds move to it if the pistol is empty.
+ if(weaponsHolder_<0&&characterLock==0&&story_character()!=0&&(w<1||w>7)){
   auto *m8=slot("S_Kursun_Sayisi",8),*r8=slot("Kursun_Sayisi",8),*m1=slot("S_Kursun_Sayisi",1),*r1=slot("Kursun_Sayisi",1);
   if(w==8&&m8&&r8&&m1&&r1&&rounds(1)==0){m1->value=m8->value;r1->value=r8->value;m8->value=Value{};r8->value=Value{};}
-  set_global("Aktif_Silah",Value::from_int(1));
-  auto gun=global("a_silah");auto names=slot("Silah_isimleri",1);
-  if(gun.kind==Value::Kind::Object&&state.get(gun.bits)&&state.get(gun.bits)->alive&&names){ProcessContext context;std::array<Argument,2> args{{{gun,{}},{names->value,{}}}};builtin(runtime,context,"ent_morph",args);}
+  set_global("Aktif_Silah",Value::from_int(1));morph(1);
  }
  if(characterLock==1&&story_character()!=1){
   // Her action's spawn write (oyuncu2_ebru.wdl:194 aktif_silah=8) gives way to the story's firearm even while the magnum has rounds;
@@ -133,7 +184,7 @@ bool Engine::character_tick(Runtime& runtime,const Input& in){
  if(auto start=runtime.function("YeniOyunBaslat");runtime.running(start)){
   // The 2 PLAYER select (coop_menu.cpp) left its choice pending for this New Game; any other New Game is one player.
   if(newGameMenu_){if(coopPending_){coop={true,coopPick_};set_character_lock(coopPick_[0]);}else{coop={};set_character_lock(newGameChoice_-1);}coopRestart_=true;newGameMenu_=false;coopPending_=false;}
-  adoptStory_=true;
+  adoptStory_=true;weaponsHolder_=-1; // Yeni_Oyun_Kolay (end of YeniOyunBaslat) refills the live inventory with the story's
  }
  // A slot load (Yukleme_Kontrol, YukleMenu.wdl:324-340) first resets the story (Yeni_Oyun_Kolay: Aktif_Player 0), then reads the slot:
  // neither is a story switch. Without this an in-game load of a locked non-Demir game opened the prompt and paused the load forever.
@@ -176,6 +227,12 @@ bool Engine::character_tick(Runtime& runtime,const Input& in){
   // or mine, whose blast hurts the boss by distance (hedef.wdl Dusman_Tarama:59-77). Ebru's body throws neither (rule 3): for her
   // the guard keeps her place beside the boss (pan 180, K22.wdl:262), and shots from off that line reach it.
   if(characterLock==1&&number("boss_ebruhedefpan")!=180)set_global("boss_ebruhedefpan",Value::from_int(180));
+  // Demir's final fight is balanced for his arsenal; Ebru carries her own firearms (rule 3), mostly the magnum. While the boss lives,
+  // her magnum reserve (Kursun_Sayisi[8]) is kept at 100 rounds or more.
+  if(characterLock==1&&weaponsHolder_>=0){
+   const auto boss=global("boss_ent");const auto* o=boss.kind==Value::Kind::Object?state.get(boss.bits):nullptr;const auto ammo=global("Kursun_Sayisi");auto* a=ammo.kind==Value::Kind::Object?state.get(ammo.bits):nullptr;
+   if(o&&o->alive&&a&&a->array.size()>8&&callback(boss.bits,"action1")==runtime.function("boss_ai")&&a->array[8].value.real()<100)a->array[8].value=Value::from_int(100);
+  }
   if(characterLock<0||adoptStory_||storyAtLevel_<0||coop.active)return false; // coop: both characters are fixed, no prompt
   const int s=story_character();if(s==storyAtLevel_)return false;
   storyAtLevel_=s;if(s==characterLock)return false;

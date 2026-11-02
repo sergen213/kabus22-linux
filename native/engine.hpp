@@ -175,6 +175,8 @@ private:
  void apply_character_lock(Runtime&,std::vector<std::pair<ObjectId,FunctionId>>& placedActions);
  bool character_tick(Runtime&,const Input&); // true: a switch prompt is open and the scripts stay paused this frame
  void character_weapons(Runtime&,bool spawning);int ebruWeapon_=0;bool ebruSpawn_=false;
+ void character_inventory(); // a locked Demir or Ebru body carries its own firearms and ammunition
+ int weaponsHolder_=-1; // whose firearms the live inventory (Silahlar, Kursun_Sayisi, ...) holds: 0/1 a locked body's, -1 the story's
  void character_overlay();float draw_menu_word(std::string_view,float x,float y,float scale,float alpha,bool measure,bool lit=false); // lit: the selected-item style
  void coop_tick(Runtime&,const Input&);void coop_models(Runtime&);void coop_overlay(); // native/coop_menu.cpp
  enum class CoopScreen {Off,Select,Leaving,Starting};CoopScreen coopScreen_=CoopScreen::Off;bool coopItem_=false,coopPending_=false;float coopTime_=0;

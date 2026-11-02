@@ -4,7 +4,9 @@
 # DEMIR -> EBRU), then Demir's opening (Start4, Aktif_Player stays 0) played by Ebru: the WMB's Oyuncu_Demir runs Oyuncu_Ebru.
 # Story gates still see Demir's story: the soldiers' magazines (silah.wdl KursunKutusu/Kursun_Al, Demir-only), the crowbar by
 # the burning car (Nesneler.wdl NS_Nesne item 16) answers as in the story (not before Ebru's Ev scene, character_inzar_crowbar
-# takes it later). Ebru picks Demir's pistol in the original inventory and fires it (Ates_Et is generic). A quicksave/quickload keeps the lock (kayitN.sav.meta character=).
+# takes it later). Ebru carries her own firearms (docs/CHARACTER_LOCK.md rule 3): the live inventory holds her magnum, Demir's
+# pistol is parked in Demir_Silahlar; she picks the magnum in the original inventory and fires it. A quicksave/quickload keeps the
+# lock and her inventory (kayitN.sav.meta character=ebru, weapons=ebru).
 realtime off
 wait until Menu_Acilis.visible == 1 timeout 900
 frames 30
@@ -34,20 +36,22 @@ assert $count(Oyuncu_Ebru) == 1 && $count(Oyuncu_Demir) == 0
 assert player.skill1 == 100 && ebru_yaralanma == 100
 assert $prompt == -1
 capture ebru_start4
-# Magazines on the dead soldiers (unic 51, 52): Demir's gate (aktif_player==0) passes, the story is Demir's.
-store mg Kursun_Sayisi[3]
+# Magazines on the dead soldiers (unic 51, 52): Demir's gate (aktif_player==0) passes, the story is Demir's. Their rifle rounds
+# join her magnum reserve (docs/CHARACTER_LOCK.md rule 3).
+store mg Kursun_Sayisi[8]
 walk-to -1383 404 20 timeout 900
 press-until D unic_obje_dizi[51] == 1 timeout 300
 walk-to -1301 457 20 timeout 900
 press-until D unic_obje_dizi[52] == 1 timeout 300
-assert Kursun_Sayisi[3] > @mg
+frames 2
+assert Kursun_Sayisi[8] > @mg && Kursun_Sayisi[3] == 0
 # Crowbar (item 16, unic 10) at the burning car: refused before Ebru's Ev scene (NS_AlTarama, message 16) for every body.
 walk-to -42 218 20 path run timeout 3000
 route 20 -42 160 156 195 206 230 run timeout 3000
 turn-to 239 253
 press-until D LYT_AltYazi.visible == 1 timeout 300
 assert unic_obje_dizi[10] == 0
-# Ebru chooses Demir's pistol through the original inventory (M -> Silahlar -> slot 0 -> Kullan) and fires it.
+# Ebru chooses her magnum through the original inventory (M -> Silahlar -> slot 0 -> Kullan) and fires it.
 wait until EnvaterAcilabilirmi == 1 timeout 900
 press M
 wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
@@ -55,25 +59,25 @@ press Return
 wait until EM_Bolge == 2 timeout 300
 press Up
 press-until Left EM_CursorNesne+EM_NesneKafa <= 0 timeout 600
-assert Silahlar[0] == 1
+assert Silahlar[0] == 8 && Silahlar[1] == 18 && Demir_Silahlar[0] == 1
 press Return
 wait until EM_Bolge == 6 timeout 300
 press Return
-wait until Aktif_Silah == 1 && EM_Bolge == 2 timeout 300
+wait until Aktif_Silah == 8 && EM_Bolge == 2 timeout 300
 press M
 wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
 assert $count(Oyuncu_Ebru) == 1
 down S
 wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 600
-store rounds S_Kursun_Sayisi[1]
-press-until D S_Kursun_Sayisi[1] < @rounds timeout 600
-capture ebru_fires_pistol
+store rounds S_Kursun_Sayisi[8]
+press-until D S_Kursun_Sayisi[8] < @rounds timeout 600
+capture ebru_fires_magnum
 up S
 wait until silah_kaldir == 0 timeout 900
 # Grenades are thrown by Demir's action only: Ebru keeps her firearm.
 set Aktif_Silah 6
 frames 2
-assert Aktif_Silah == 1
+assert Aktif_Silah == 8
 # Quicksave, wander off, quickload: the sidecar restores Ebru.
 store x player.x
 store y player.y
@@ -94,3 +98,4 @@ capture ebru_reloaded
 assert $count(Oyuncu_Ebru) == 1 && $count(Oyuncu_Demir) == 0
 assert player.x > @x - 1 && player.x < @x + 1 && player.y > @y - 1 && player.y < @y + 1
 assert unic_obje_dizi[51] == 1 && unic_obje_dizi[52] == 1 && unic_obje_dizi[10] == 0
+assert Silahlar[0] == 8 && Demir_Silahlar[0] == 1

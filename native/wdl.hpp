@@ -31,6 +31,8 @@ public:
  std::size_t reroute_reads(std::string_view global,std::string_view call,std::span<const std::string_view> functions,std::span<const std::string_view> arrays={},std::span<const std::string_view> files={});
  // Native override: in FUNCTION, a statement `X.FIELD = GLOBAL` assigns the native call CALL() instead; returns the count.
  std::size_t reroute_assigned_read(std::string_view function,std::string_view field,std::string_view global,std::string_view call);
+ // Native override: in every function defined in FILES, a statement `X.FIELD = VALUE` assigns the native call CALL(VALUE) instead.
+ std::size_t wrap_assigned(std::string_view field,std::string_view call,std::span<const std::string_view> files);
  // Coop: per-player global banks (docs/COOP.md). Off until enable_banks; zero overhead when off.
  static constexpr int BankDynamic=-1,BankSkip=-2;
  // resolver(function,my,inherited): inherited = the active process's bank (0 if none) when a process is prepared (start/enqueue/

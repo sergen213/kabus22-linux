@@ -64,7 +64,7 @@ std::string Engine::saved_position()const{
 // story); the loaded Aktif_Player is adopted without a switch prompt.
 void Engine::read_saved_position(const std::filesystem::path& slot){
  positionRestore.reset();auto meta=saves::read_meta(slot);coop=meta&&meta->coop[0]>=0?Coop{true,meta->coop}:Coop{};coopRestart_=true; // coop slots restore both characters (native/coop.cpp)
- characterLock=meta&&meta->character>=0?meta->character:characterDefault;switchPrompt_=-1;adoptStory_=true;if(!meta||meta->position.empty())return;
+ characterLock=meta&&meta->character>=0?meta->character:characterDefault;weaponsHolder_=meta?meta->weapons:-1;switchPrompt_=-1;adoptStory_=true;if(!meta||meta->position.empty())return;
  std::istringstream in(meta->position);PositionRestore r;if(in>>r.level>>r.position.x>>r.position.y>>r.position.z>>r.pan&&r.level>0)positionRestore=r;
 }
 // YukleMenu.wdl LV_LevelKaydeta: SLG_LevelKaydet(Aktif_SaveNo,label) -> YD_OyunuKaydet -> SLG_Kaydet, the original slot writer and

@@ -36,12 +36,12 @@ wait until EM_Bolge == 1 && freeze_mode == 1 timeout 300
 press Return
 wait until EM_Bolge == 2 timeout 300
 press Up
-press-until Right Silahlar[EM_CursorNesne+EM_NesneKafa] == 2 || Silahlar[EM_CursorNesne+EM_NesneKafa+1] == 2 timeout 600
-press-until Down Silahlar[EM_CursorNesne+EM_NesneKafa] == 2 timeout 60
+press-until Right Silahlar[EM_CursorNesne+EM_NesneKafa] == 8 || Silahlar[EM_CursorNesne+EM_NesneKafa+1] == 8 timeout 600
+press-until Down Silahlar[EM_CursorNesne+EM_NesneKafa] == 8 timeout 60
 press Return
 wait until EM_Bolge == 6 timeout 300
 press Return
-wait until Aktif_Silah == 2 && EM_Bolge == 2 timeout 300
+wait until Aktif_Silah == 8 && EM_Bolge == 2 timeout 300
 press M
 wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
 # Creatures.
