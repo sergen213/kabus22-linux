@@ -268,7 +268,7 @@ float Engine::draw_menu_word(std::string_view word,float x,float y,float scale,f
 void Engine::character_overlay(){
  menuArrows_={};promptRows_={};
  if(!renderer||currentWidth_<=0)return;
- coop_overlay();coop_hud();
+ coop_overlay();coop_hud();pause_overlay();
  if(newGameMenu_&&switchPrompt_<0&&!coopPending_){
   // One button height above NORMAL (YeniMenu.wdl YeniMenuAc), at the menu's own scale: "< ORIGINAL >".
   const auto panel=global("YMP_Normal").bits;const float sx=std::max(0.1f,float(field(panel,"scale_x"))),sy=std::max(0.1f,float(field(panel,"scale_y")));

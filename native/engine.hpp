@@ -172,6 +172,7 @@ private:
  void console_tick(Runtime&);void console_overlay();void console_print(std::string_view);void notify(std::string);
  std::string gameplay_blocked(const Runtime&)const;ObjectId live_player()const;std::string saved_position()const;void read_saved_position(const std::filesystem::path& slot);
  bool consoleOpen_=false,consoleRelease_=false,god_=false,noclip_=false,fpsOverlay_=false;ObjectId noclipPlayer_=0;
+ bool pause_tick(Runtime&,const Input&);void pause_overlay();bool pauseItem_=false;Rect pauseItemRect_{}; // pause-menu SAVE item (native/console.cpp); true: hide this press from the scripts
  void apply_character_lock(Runtime&,std::vector<std::pair<ObjectId,FunctionId>>& placedActions);
  bool character_tick(Runtime&,const Input&); // true: a switch prompt is open and the scripts stay paused this frame
  void character_weapons(Runtime&,bool spawning);int ebruWeapon_=0;bool ebruSpawn_=false;
