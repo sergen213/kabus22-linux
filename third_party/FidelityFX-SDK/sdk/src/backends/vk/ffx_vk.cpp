@@ -1526,20 +1526,26 @@ FfxErrorCode CreateBackendContextVK(FfxInterface* backendInterface, FfxEffect ef
         vkEnumerateDeviceExtensionProperties(backendContext->physicalDevice, nullptr, &backendContext->numDeviceExtensions, backendContext->extensionProperties);
 
         // create a global descriptor pool to hold all descriptors we'll need
+        // Kabus22 local patch 9 (after OpenUnderworld third_party/fidelityfx-sdk "ou patch 7"): per type, maxSets x what one
+        // set can hold (FFX_MAX_SAMPLERS / FFX_MAX_NUM_SRVS / FFX_MAX_NUM_UAVS / FFX_MAX_NUM_CONST_BUFFERS) instead of
+        // maxSets x FFX_MAX_RESOURCE_COUNT (512) of each of six types (SAMPLER twice). RADV places every descriptor pool in one
+        // 4 GiB 32-bit address window; the upstream sizes (with patch 8's 8 queued frames: ~1.4 GiB upscaler + ~2.9 GiB frame
+        // generation) no longer fit once a second context set exists, and frame generation failed with
+        // VK_ERROR_OUT_OF_DEVICE_MEMORY.
         VkDescriptorPoolCreateInfo descriptorPoolCreateInfo = {};
+        const uint32_t k22Sets = backendContext->maxEffectContexts * FFX_MAX_PASS_COUNT * FFX_MAX_QUEUED_FRAMES * MAX_PIPELINE_USAGE_PER_FRAME;
         VkDescriptorPoolSize poolSizes[] = {
-            { VK_DESCRIPTOR_TYPE_SAMPLER, backendContext->maxEffectContexts * FFX_MAX_RESOURCE_COUNT * FFX_MAX_PASS_COUNT * FFX_MAX_QUEUED_FRAMES * MAX_PIPELINE_USAGE_PER_FRAME },
-            { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, backendContext->maxEffectContexts * FFX_MAX_RESOURCE_COUNT * FFX_MAX_PASS_COUNT * FFX_MAX_QUEUED_FRAMES * MAX_PIPELINE_USAGE_PER_FRAME },
-            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, backendContext->maxEffectContexts * FFX_MAX_RESOURCE_COUNT * FFX_MAX_PASS_COUNT * FFX_MAX_QUEUED_FRAMES * MAX_PIPELINE_USAGE_PER_FRAME },
-            { VK_DESCRIPTOR_TYPE_SAMPLER, backendContext->maxEffectContexts * FFX_MAX_RESOURCE_COUNT * FFX_MAX_PASS_COUNT * FFX_MAX_QUEUED_FRAMES * MAX_PIPELINE_USAGE_PER_FRAME },
-            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, backendContext->maxEffectContexts * FFX_MAX_RESOURCE_COUNT * FFX_MAX_PASS_COUNT * FFX_MAX_QUEUED_FRAMES * MAX_PIPELINE_USAGE_PER_FRAME },
-            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, backendContext->maxEffectContexts * FFX_MAX_RESOURCE_COUNT * FFX_MAX_PASS_COUNT * FFX_MAX_QUEUED_FRAMES * MAX_PIPELINE_USAGE_PER_FRAME },
+            { VK_DESCRIPTOR_TYPE_SAMPLER, k22Sets * FFX_MAX_SAMPLERS },
+            { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, k22Sets * FFX_MAX_NUM_SRVS },
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, k22Sets * FFX_MAX_NUM_UAVS },
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, k22Sets * FFX_MAX_NUM_CONST_BUFFERS },
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, k22Sets * (FFX_MAX_NUM_SRVS + FFX_MAX_NUM_UAVS) }, // buffer SRVs + UAVs
         };
 
         descriptorPoolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         descriptorPoolCreateInfo.pNext = nullptr;
         descriptorPoolCreateInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        // Kabus22 local patch (shared with IKV): all 6 entries (upstream passed 5, dropping STORAGE_BUFFER, which frame interpolation's counters use).
+        // Kabus22 local patch (shared with IKV): every entry (upstream passed 5 of 6, dropping STORAGE_BUFFER, which frame interpolation's counters use).
         descriptorPoolCreateInfo.poolSizeCount = _countof(poolSizes);
         descriptorPoolCreateInfo.pPoolSizes = poolSizes;
         descriptorPoolCreateInfo.maxSets = backendContext->maxEffectContexts * FFX_MAX_PASS_COUNT * MAX_PIPELINE_USAGE_PER_FRAME * FFX_MAX_QUEUED_FRAMES;

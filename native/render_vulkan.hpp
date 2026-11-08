@@ -3,6 +3,7 @@
 #include "vulkan_loader.hpp"
 #include "fsr_vk.hpp"
 #include <array>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <functional>
@@ -80,13 +81,18 @@ struct VulkanBackend::State {
     std::unique_ptr<vk22::Fsr3> fsr; // fsr feature: upscales the composited render-size view to extent.
     // FSR 3.1.4 frame generation (fsr->generates(); docs/GRAPHICS_ROADMAP.md): per frame slot, generated is the frame
     // interpolated between the previous and this rendered frame with this frame's UI drawn over it (valid when
-    // generatedValid), real a copy of this frame's finalImage. The present thread (Presenter) then owns the swapchain: it
-    // acquires, blits and presents generated, then real half a rendered-frame interval later.
+    // generatedValid), real a copy of this frame's finalImage (captures). The frame's own command buffer blits both into
+    // two acquired swapchain images; the present thread (Presenter) only presents them: generated, then real half a
+    // rendered-frame interval later. generationInterval: EMA of the render thread's period between submissions without its
+    // wait on the present thread (generationWait), last measured at generationLast. frameTimeline: timeline semaphore
+    // (frame generation devices) signalled with frameValue by each frame-generation submission; the present thread waits it.
     bool generating{},generatedValid{}; std::array<vk22::Image,2> generated,real;
     struct Presenter; std::unique_ptr<Presenter> presenter;
+    double generationInterval{},generationWait{}; std::chrono::steady_clock::time_point generationLast{};
+    VkSemaphore frameTimeline{}; std::uint64_t frameValue{};
     void drain_presents(std::uint64_t outstanding=0);
     bool retainedColorValid{},portalColorValid{},finalValid{};
-    struct Slot { VkCommandPool pool{}; VkCommandBuffer command{}; VkFence fence{}; VkSemaphore acquired{},rendered{}; bool pending{}; std::vector<vk22::Buffer> garbageBuffers; std::vector<vk22::Image> garbageImages; VkQueryPool queries{}; std::vector<const char*> marks; };
+    struct Slot { VkCommandPool pool{}; VkCommandBuffer command{}; VkFence fence{}; VkSemaphore acquired{},acquiredGenerated{},rendered{}; bool pending{}; std::vector<vk22::Buffer> garbageBuffers; std::vector<vk22::Image> garbageImages; VkQueryPool queries{}; std::vector<const char*> marks; };
     std::array<Slot,2> slots{}; unsigned slotIndex{},front{},pending{},limit{1}; std::uint64_t submissions{},waits{};
     VkCommandBuffer command{}; std::uint32_t acquiredIndex{}; int requestedInterval{-1};
     std::uint64_t finalSubmission{}; unsigned finalSlot{};

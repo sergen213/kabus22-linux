@@ -1,5 +1,6 @@
 // In-game graphics menu (docs/GRAPHICS_MENU.md); not in the original. The pause menu's GRAPHICS item (native/console.cpp) opens
-// it over the Smartmenu. Its rows are the launcher's Rendering settings (installer/launcher.cpp): renderer, preset, window, FPS
+// it over the Smartmenu, the RENDERING item of the main menu's settings screen (console.cpp settings_tick) over AYARLAR. Its rows
+// are the launcher's Rendering settings (installer/launcher.cpp): renderer, preset, window, FPS
 // limit and every --graphics key of render_policy::graphicsOptions, greyed where the active backend cannot run them (the same
 // admission tables admit_features uses). fps_limit, seamless doors and the window apply at once; renderer keys apply 0.4 s after
 // the last change through Renderer::reconfigure, or main.cpp recreates the renderer (backend switch, or reconfigure false).
@@ -53,9 +54,10 @@ std::string value_of(const render_policy::GraphicsSettings& g,std::string_view k
 int fps_value(std::string_view v){return v=="original"?0:v=="unlimited"?-1:std::stoi(std::string(v));}
 std::string upper(std::string_view s){std::string out;for(char c:s)out+=c=='_'?' ':c>='a'&&c<='z'?char(c-32):c;return out;}
 std::string shown(std::string_view key,std::string_view v){
+    // Sample counts before the generic booleans: msaa/anisotropy 1 is one sample (off), which "1"→ON used to show as ON.
+    if(key=="msaa"||key=="anisotropy")return v=="1"?"OFF":std::string(v)+"X";
     if(v=="0"||v=="off")return "OFF";if(v=="1"||v=="on")return "ON";
     if(key=="fps_limit")return v=="original"?"ORIGINAL":v=="unlimited"?"UNLIMITED":std::string(v)+" FPS";
-    if(key=="msaa"||key=="anisotropy")return v=="1"?"OFF":std::string(v)+"X";
     if(key=="shadows"&&v=="shadowmap")return "SHADOW MAPS";if(key=="shadows"&&v=="rt")return "RAY TRACED";
     if(key=="reflections"&&v=="rough")return "ROUGHNESS-AWARE";
     return upper(v);
@@ -194,13 +196,20 @@ void Engine::graphics_persist(){
     for(const auto& [key,value]:a.values)g.options.push_back({key,value,std::string(option(key).fallback)});
     try{launcher_config::write(g);}catch(const std::exception& e){notify(std::string("launcher.ini not updated: ")+e.what());}
 }
-void Engine::open_graphics_menu(){
+void Engine::open_graphics_menu(GraphicsHost host){
     if(!graphicsConfigured_)configure_graphics({},renderer?renderer->options():RenderOptions{},"original",{});
-    graphicsOpen_=true;graphicsTop_=0;graphicsRow_=Renderer_;while(!graphics_applicable(graphicsRow_))++graphicsRow_;
+    graphicsOpen_=true;graphicsHost_=host;graphicsTop_=0;graphicsRow_=Renderer_;while(!graphics_applicable(graphicsRow_))++graphicsRow_;
     if(renderer&&!graphicsProbe_.valid()&&std::count(graphicsBackends_.begin(),graphicsBackends_.end(),-1))graphicsProbe_=std::async(std::launch::async,self_capabilities);
 }
+int Engine::graphics_value(std::string_view key)const{
+    const auto it=graphicsWant_.values.find(key);if(it==graphicsWant_.values.end())return -1;const std::string_view v=it->second;
+    if(!v.empty()&&std::all_of(v.begin(),v.end(),[](char c){return c>='0'&&c<='9';}))return std::stoi(std::string(v));
+    const auto list=values(option(key));return int(std::find(list.begin(),list.end(),v)-list.begin()); // named values: their index
+}
 bool Engine::graphics_menu_tick(Runtime& runtime,const Input& in){
-    if(state.profile==SemanticProfile::CampaignA6&&number("STM_Acik")==0){graphicsOpen_=false;graphics_update();return false;} // the pause menu it covers went away
+    // The original screen it covers went away (the pause menu resumed, or the settings screen closed some other way).
+    const bool host=graphicsHost_==GraphicsHost::Pause?number("STM_Acik")!=0:!settings_panels().empty();
+    if(state.profile==SemanticProfile::CampaignA6&&!host){graphicsOpen_=false;graphics_update();return false;}
     if(graphicsProbe_.valid()&&graphicsProbe_.wait_for(std::chrono::seconds(0))==std::future_status::ready){
         const auto json=graphicsProbe_.get(); // graphics_cli::list_capabilities: "NAME":{"available":true|false,...}
         for(std::size_t i=0;i<3;++i)if(graphicsBackends_[i]<0)graphicsBackends_[i]=json.find('"'+std::string(backendNames[i])+"\":{\"available\":true")!=std::string::npos;

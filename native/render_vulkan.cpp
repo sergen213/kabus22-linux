@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 
 namespace k22 {
@@ -61,6 +62,7 @@ void cleanup(VulkanBackend::State& s) {
     if(s.device) {
         s.presenter.reset(); // joins the frame-generation present thread before the device goes idle
         vkDeviceWaitIdle(s.device);
+        if(s.frameTimeline) vkDestroySemaphore(s.device,s.frameTimeline,nullptr);
         s.raster.reset(); s.rays.reset(); s.fsr.reset();
         destroy_target(s,s.scene); destroy_target(s,s.alpha); destroy_target(s,s.portal); destroy_target(s,s.hdr); s.destroy(s.finalImage);
         for(auto* i:{&s.generated[0],&s.generated[1],&s.real[0],&s.real[1]}) s.destroy(*i);
@@ -68,6 +70,7 @@ void cleanup(VulkanBackend::State& s) {
             garbage(s,slot);
             if(slot.fence) vkDestroyFence(s.device,slot.fence,nullptr);
             if(slot.acquired) vkDestroySemaphore(s.device,slot.acquired,nullptr);
+            if(slot.acquiredGenerated) vkDestroySemaphore(s.device,slot.acquiredGenerated,nullptr);
             if(slot.rendered) vkDestroySemaphore(s.device,slot.rendered,nullptr);
             if(slot.pool) vkDestroyCommandPool(s.device,slot.pool,nullptr);
             if(slot.queries) vkDestroyQueryPool(s.device,slot.queries,nullptr);
@@ -123,7 +126,10 @@ void create_swapchain(VulkanBackend::State& s,WindowMetrics metrics) {
     VkExtent2D size=caps.currentExtent;
     if(size.width==UINT32_MAX) size={std::clamp(static_cast<std::uint32_t>(metrics.drawableWidth),caps.minImageExtent.width,caps.maxImageExtent.width),std::clamp(static_cast<std::uint32_t>(metrics.drawableHeight),caps.minImageExtent.height,caps.maxImageExtent.height)};
     if(!size.width||!size.height) {s.swapDirty=true; return;}
-    auto images=std::max(caps.minImageCount,3u); if(caps.maxImageCount) images=std::min(images,caps.maxImageCount);
+    // Frame generation acquires two images per frame in its command buffer (generated + real) while the previous frame's
+    // pair may still wait on the present thread (drain_presents(1)): four held at once, and an infinite-timeout acquire
+    // needs at most count - minImageCount held before it (VUID-vkAcquireNextImageKHR-surface-07783).
+    auto images=s.options.features.fsr&&s.options.features.frameGeneration?caps.minImageCount+3:std::max(caps.minImageCount,3u); if(caps.maxImageCount) images=std::min(images,caps.maxImageCount);
     VkCompositeAlphaFlagBitsKHR composite=VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     if(!(caps.supportedCompositeAlpha&composite)) for(auto bit:{VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR}) if(caps.supportedCompositeAlpha&bit){composite=bit;break;}
     VkSwapchainCreateInfoKHR info{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR}; info.surface=s.surface; info.minImageCount=images; info.imageFormat=format.format; info.imageColorSpace=format.colorSpace; info.imageExtent=size; info.imageArrayLayers=1; info.imageUsage=VK_IMAGE_USAGE_TRANSFER_DST_BIT; info.imageSharingMode=VK_SHARING_MODE_EXCLUSIVE; info.preTransform=caps.currentTransform; info.compositeAlpha=composite; info.presentMode=mode; info.clipped=VK_TRUE; info.oldSwapchain=s.swapchain;
@@ -140,112 +146,70 @@ void create_swapchain(VulkanBackend::State& s,WindowMetrics metrics) {
     s.extent=size; s.swapDirty=false;
 }
 }
-// FSR 3.1.4 frame generation presentation (ported from IKV renderer_vk.cpp present_loop): this thread owns the swapchain
-// while generating. Per rendered frame it waits for the frame's fence, presents the generated frame, sleeps half the
-// measured rendered-frame interval minus a compositor lead (K22_FG_PACING_LEAD_MS, default 2), then presents the
-// rendered frame. Presents never wait for display and the user's present mode is kept: under FIFO each image is shown
-// for at least one refresh in order, and a full swapchain back-pressures the renderer through drain_presents(1).
-// Every 600 presents it logs the presented and rendered rates measured at present calls.
+// FSR 3.1.4 frame generation presentation. The frame's own command buffer already blitted the generated and the rendered
+// frame into two acquired swapchain images (finish()); this thread only presents them, so a present never queues behind a
+// later frame's GPU work. (The earlier IKV-derived thread acquired and blitted here after the frame's fence: on the one
+// graphics queue those blits ran after the next frame's rendering, so a GPU-bound frame's rendered image reached the
+// display together with the next generated one, and the generated one often too.) Pacing as OpenUnderworld
+// (src/render/vk/VkRenderer.cpp presentLoop) and ETI Yami (native/vulkan_renderer.cpp present_loop): once the frame's GPU
+// work is done, the generated image no earlier than half an interval after the previous rendered one, the rendered image half an
+// interval after it, no compositor lead (ETI Yami: IKV's 2 ms lead split every interval ~40/60, visible judder), and no
+// sleeping while further jobs are queued (catch up instead of adding latency). The present mode is unchanged: under FIFO
+// each image shows for at least one refresh in order and a full swapchain back-pressures the render thread's acquire.
+// Every 600 presents it logs the presented and rendered rates measured at present calls and the generated->real and
+// real->generated interval medians (equal when the cadence is even).
 struct VulkanBackend::State::Presenter {
-    struct Job { unsigned slot; bool generated; VkFence fence; };
+    static constexpr std::uint32_t none=UINT32_MAX;
+    struct Job { std::uint64_t frame; std::uint32_t generated,real; double halfMs; }; // frameTimeline value; swapchain image indices (generated: none)
     State& s;
-    std::array<VkCommandPool,2> pools{}; std::array<VkCommandBuffer,2> commands{}; std::array<VkFence,2> fences{}; std::array<VkSemaphore,2> acquired{}; // [0] generated, [1] real
     std::mutex mutex; std::condition_variable cv; std::deque<Job> jobs; std::uint64_t queued{},done{}; bool stop{}; std::exception_ptr error;
-    std::atomic<bool> stale{}; // a present/acquire reported out of date or suboptimal: the render thread recreates the swapchain
-    double leadMs{2};
-    std::thread thread;
-    explicit Presenter(State& state):s(state) {
-        if(const char* lead=std::getenv("K22_FG_PACING_LEAD_MS");lead&&*lead){const double v=std::strtod(lead,nullptr);if(std::isfinite(v)&&v>=0&&v<=20)leadMs=v;}
-        try {
-            for(unsigned i=0;i<2;++i) {
-                VkCommandPoolCreateInfo pool{};pool.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;pool.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;pool.queueFamilyIndex=s.queueFamily;
-                require(vkCreateCommandPool(s.device,&pool,nullptr,&pools[i]),"Creating Vulkan present pool");
-                VkCommandBufferAllocateInfo allocation{};allocation.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;allocation.commandPool=pools[i];allocation.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;allocation.commandBufferCount=1;
-                require(vkAllocateCommandBuffers(s.device,&allocation,&commands[i]),"Allocating Vulkan present command");
-                VkFenceCreateInfo fence{};fence.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;fence.flags=VK_FENCE_CREATE_SIGNALED_BIT;require(vkCreateFence(s.device,&fence,nullptr,&fences[i]),"Creating Vulkan present fence");
-                VkSemaphoreCreateInfo semaphore{};semaphore.sType=VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;require(vkCreateSemaphore(s.device,&semaphore,nullptr,&acquired[i]),"Creating Vulkan present acquisition semaphore");
-            }
-            thread=std::thread([this]{loop();});
-        } catch(...) {release();throw;}
-    }
+    std::atomic<bool> stale{}; // a present reported out of date or suboptimal: the render thread recreates the swapchain
+    std::thread thread; // last: starts after the members above exist
+    explicit Presenter(State& state):s(state),thread([this]{loop();}) {}
     ~Presenter() {
         {std::scoped_lock lock(mutex);stop=true;}
-        cv.notify_all();if(thread.joinable())thread.join();
-        {std::scoped_lock lock(s.queueMutex);vkQueueWaitIdle(s.queue);}
-        release();
+        cv.notify_all();if(thread.joinable())thread.join(); // presents every queued job first: no image stays acquired
+        std::scoped_lock lock(s.queueMutex);vkQueueWaitIdle(s.queue);
     }
-    void release() {
-        for(unsigned i=0;i<2;++i) {
-            if(fences[i])vkDestroyFence(s.device,fences[i],nullptr);
-            if(acquired[i])vkDestroySemaphore(s.device,acquired[i],nullptr);
-            if(pools[i])vkDestroyCommandPool(s.device,pools[i],nullptr);
-        }
-    }
-    bool stopping(){std::scoped_lock lock(mutex);return stop;}
-    // Acquires a swapchain image, blits source (TRANSFER_SRC_OPTIMAL, written by an earlier submission on this queue whose
-    // fence was waited) into it and presents it. False when nothing was presented.
-    bool present(unsigned index,const vk22::Image& source) {
-        auto& fence=fences[index];const auto command=commands[index];
-        while(vkWaitForFences(s.device,1,&fence,VK_TRUE,50'000'000)==VK_TIMEOUT){}
-        std::uint32_t image{};VkResult result;
-        do result=vkAcquireNextImageKHR(s.device,s.swapchain,50'000'000,acquired[index],VK_NULL_HANDLE,&image);
-        while((result==VK_TIMEOUT||result==VK_NOT_READY)&&!stopping());
-        if(result==VK_TIMEOUT||result==VK_NOT_READY)return false;
-        if(result==VK_ERROR_OUT_OF_DATE_KHR){stale=true;return false;}
-        if(result==VK_SUBOPTIMAL_KHR)stale=true;else require(result,"Acquiring Vulkan frame-generation image");
-        require(vkResetCommandPool(s.device,pools[index],0),"Resetting Vulkan present command");
-        VkCommandBufferBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        require(vkBeginCommandBuffer(command,&begin),"Beginning Vulkan present command");
-        VkMemoryBarrier2 written{};written.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;written.srcStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;written.srcAccessMask=VK_ACCESS_2_MEMORY_WRITE_BIT;
-        written.dstStageMask=VK_PIPELINE_STAGE_2_TRANSFER_BIT;written.dstAccessMask=VK_ACCESS_2_TRANSFER_READ_BIT;
-        VkImageMemoryBarrier2 swap{};swap.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;swap.srcStageMask=VK_PIPELINE_STAGE_2_TRANSFER_BIT;swap.dstStageMask=VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-        swap.dstAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;swap.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;swap.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        swap.srcQueueFamilyIndex=swap.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;swap.image=s.swapImages[image];swap.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
-        VkDependencyInfo dependency{};dependency.sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO;dependency.memoryBarrierCount=1;dependency.pMemoryBarriers=&written;dependency.imageMemoryBarrierCount=1;dependency.pImageMemoryBarriers=&swap;
-        vkCmdPipelineBarrier2(command,&dependency);
-        VkImageBlit blit{};blit.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};blit.dstSubresource=blit.srcSubresource;blit.srcOffsets[1]={static_cast<int>(source.width),static_cast<int>(source.height),1};blit.dstOffsets[1]=blit.srcOffsets[1];
-        vkCmdBlitImage(command,source.handle,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,s.swapImages[image],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,VK_FILTER_NEAREST);
-        swap.srcAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;swap.dstStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;swap.dstAccessMask=VK_ACCESS_2_NONE;
-        swap.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;swap.newLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;dependency.memoryBarrierCount=0;
-        vkCmdPipelineBarrier2(command,&dependency);
-        require(vkEndCommandBuffer(command),"Ending Vulkan present command");require(vkResetFences(s.device,1,&fence),"Resetting Vulkan present fence");
-        VkSemaphoreSubmitInfo wait{};wait.sType=VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;wait.semaphore=acquired[index];wait.stageMask=VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-        VkSemaphoreSubmitInfo signal{};signal.sType=VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;signal.semaphore=s.swapRendered[image];signal.stageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-        VkCommandBufferSubmitInfo commandInfo{};commandInfo.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;commandInfo.commandBuffer=command;
-        VkSubmitInfo2 submit{};submit.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO_2;submit.waitSemaphoreInfoCount=1;submit.pWaitSemaphoreInfos=&wait;submit.commandBufferInfoCount=1;submit.pCommandBufferInfos=&commandInfo;submit.signalSemaphoreInfoCount=1;submit.pSignalSemaphoreInfos=&signal;
+    // False when the swapchain was out of date (nothing shown).
+    bool present(std::uint32_t image) {
         VkPresentInfoKHR info{};info.sType=VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;info.waitSemaphoreCount=1;info.pWaitSemaphores=&s.swapRendered[image];info.swapchainCount=1;info.pSwapchains=&s.swapchain;info.pImageIndices=&image;
-        {std::scoped_lock lock(s.queueMutex);require(vkQueueSubmit2(s.queue,1,&submit,fence),"Submitting Vulkan present copy");result=vkQueuePresentKHR(s.queue,&info);}
+        VkResult result;{std::scoped_lock lock(s.queueMutex);result=vkQueuePresentKHR(s.queue,&info);}
         if(result==VK_ERROR_OUT_OF_DATE_KHR||result==VK_SUBOPTIMAL_KHR)stale=true;else require(result,"Presenting Vulkan frame-generation image");
         return result!=VK_ERROR_OUT_OF_DATE_KHR;
     }
     void loop()noexcept {
         using clock=std::chrono::steady_clock;
         const auto ms=[](clock::duration d){return std::chrono::duration<double,std::milli>(d).count();};
-        clock::time_point lastReady{},logStart{},lastShown{};double interval=0;std::vector<double> gaps;std::uint64_t generatedShown=0,realShown=0;
+        clock::time_point logStart{},lastShown{},lastReal{};bool lastWasReal=true;double interval=0;
+        std::vector<double> gaps,toReal,toGenerated;std::uint64_t generatedShown=0,realShown=0;
+        const auto median=[](std::vector<double>& v){if(v.empty())return 0.;std::nth_element(v.begin(),v.begin()+v.size()/2,v.end());return v[v.size()/2];};
         const auto shown=[&](bool real) {
             const auto now=clock::now();
-            if(lastShown!=clock::time_point{})gaps.push_back(ms(now-lastShown));else logStart=now;
-            lastShown=now;++(real?realShown:generatedShown);
+            if(lastShown!=clock::time_point{}){const double gap=ms(now-lastShown);gaps.push_back(gap);if(real!=lastWasReal)(real?toReal:toGenerated).push_back(gap);}else logStart=now;
+            lastShown=now;lastWasReal=real;++(real?realShown:generatedShown);
             if(gaps.size()<600)return;
-            const double seconds=ms(now-logStart)/1000;std::sort(gaps.begin(),gaps.end());
-            std::fprintf(stderr,"kabus22: frame generation presents=%zu generated=%llu real=%llu presentedFps=%.1f renderedFps=%.1f presentIntervalMs p50=%.2f p99=%.2f renderedFrameMs=%.2f\n",
-                gaps.size(),(unsigned long long)generatedShown,(unsigned long long)realShown,double(gaps.size())/seconds,double(realShown)/seconds,gaps[gaps.size()/2],gaps[gaps.size()*99/100],interval);
-            gaps.clear();generatedShown=realShown=0;logStart=now;
+            const double seconds=ms(now-logStart)/1000;const double toRealMs=median(toReal),toGeneratedMs=median(toGenerated);std::sort(gaps.begin(),gaps.end());
+            std::fprintf(stderr,"kabus22: frame generation presents=%zu generated=%llu real=%llu presentedFps=%.1f renderedFps=%.1f presentIntervalMs p50=%.2f p99=%.2f generatedToRealMs=%.2f realToGeneratedMs=%.2f renderedFrameMs=%.2f\n",
+                gaps.size(),(unsigned long long)generatedShown,(unsigned long long)realShown,double(gaps.size())/seconds,double(realShown)/seconds,gaps[gaps.size()/2],gaps[gaps.size()*99/100],toRealMs,toGeneratedMs,interval);
+            gaps.clear();toReal.clear();toGenerated.clear();generatedShown=realShown=0;logStart=now;
         };
+        const auto sleep=[](clock::time_point t){if(t>clock::now())std::this_thread::sleep_until(t);};
         for(;;) {
-            Job job{};
-            {std::unique_lock lock(mutex);cv.wait(lock,[&]{return stop||!jobs.empty();});if(jobs.empty())return;job=jobs.front();}
+            Job job{};bool behind{};
+            {std::unique_lock lock(mutex);cv.wait(lock,[&]{return stop||!jobs.empty();});if(jobs.empty())return;job=jobs.front();behind=jobs.size()>1;}
             try {
-                // The frame's GPU work: its fence (the render thread resets it only after this job is done).
-                while(vkWaitForFences(s.device,1,&job.fence,VK_TRUE,50'000'000)==VK_TIMEOUT){}
-                const auto ready=clock::now();const double period=lastReady==clock::time_point{}?0:ms(ready-lastReady);lastReady=ready;
-                // Clamped to 1.5x the running interval so one stall does not inflate the pacing sleep for the next frames.
-                if(period>0&&period<250)interval=interval>0?interval*.9+std::min(period,interval*1.5)*.1:period;
-                if(job.generated) {
-                    if(present(0,s.generated[job.slot]))shown(false);
-                    std::this_thread::sleep_until(ready+std::chrono::duration_cast<clock::duration>(std::chrono::duration<double,std::milli>(interval*.5-leadMs)));
+                // The frame's GPU work, blits included: its frameTimeline value (no fence the render thread could reset).
+                VkSemaphoreWaitInfo wait{};wait.sType=VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;wait.semaphoreCount=1;wait.pSemaphores=&s.frameTimeline;wait.pValues=&job.frame;
+                for(VkResult r;(r=vkWaitSemaphores(s.device,&wait,50'000'000))!=VK_SUCCESS;)if(r!=VK_TIMEOUT)require(r,"Waiting for Vulkan frame-generation frame");
+                interval=job.halfMs*2;const auto half=std::chrono::duration_cast<clock::duration>(std::chrono::duration<double,std::milli>(job.halfMs));
+                if(job.generated!=none) {
+                    if(!behind&&lastReal!=clock::time_point{})sleep(lastReal+half);
+                    if(present(job.generated))shown(false);
+                    if(!behind)sleep(clock::now()+half);
                 }
-                if(present(1,s.real[job.slot]))shown(true);
+                if(present(job.real))shown(true);
+                lastReal=clock::now();
             } catch(...) {std::scoped_lock lock(mutex);if(!error)error=std::current_exception();}
             {std::scoped_lock lock(mutex);jobs.pop_front();++done;}
             cv.notify_all();
@@ -296,6 +260,7 @@ VulkanBackend::State::State(SDL_Window* w,const RenderOptions& o):window(w),opti
         VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR}; acceleration.accelerationStructure=rayEnabled; acceleration.pNext=rayEnabled?&ray:nullptr;
         VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES}; f13.dynamicRendering=VK_TRUE; f13.synchronization2=VK_TRUE; f13.pNext=rayEnabled?&acceleration:nullptr;
         VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES}; f12.bufferDeviceAddress=bufferAddressEnabled; f12.runtimeDescriptorArray=rayEnabled; f12.shaderSampledImageArrayNonUniformIndexing=rayEnabled; f12.pNext=&f13;
+        f12.timelineSemaphore=options.features.fsr&&options.features.frameGeneration; // frame generation's frameTimeline (core 1.2, required)
         // tessellation is optional: an unsupported request is dropped with a notice instead of failing device selection.
         tessellationSupported=tessellation;if(options.features.tessellation&&!tessellation){std::fprintf(stderr,"kabus22: graphics: tessellation unsupported by %s; disabling it\n",properties.deviceName);options.features.tessellation=false;}
         tessellationEnabled=options.features.tessellation;
@@ -308,6 +273,7 @@ VulkanBackend::State::State(SDL_Window* w,const RenderOptions& o):window(w),opti
         if(rayEnabled) deviceExtensions.insert(deviceExtensions.end(),{VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,VK_KHR_RAY_QUERY_EXTENSION_NAME});
         VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO}; deviceInfo.pNext=&f12; deviceInfo.pEnabledFeatures=&features; deviceInfo.queueCreateInfoCount=1; deviceInfo.pQueueCreateInfos=&queueInfo; deviceInfo.enabledExtensionCount=static_cast<std::uint32_t>(deviceExtensions.size()); deviceInfo.ppEnabledExtensionNames=deviceExtensions.data();
         require(vkCreateDevice(physical,&deviceInfo,nullptr,&device),"Creating Vulkan device"); vkGetDeviceQueue(device,queueFamily,0,&queue);
+        if(f12.timelineSemaphore){VkSemaphoreTypeCreateInfo type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};type.semaphoreType=VK_SEMAPHORE_TYPE_TIMELINE;VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};semaphore.pNext=&type;require(vkCreateSemaphore(device,&semaphore,nullptr,&frameTimeline),"Creating Vulkan frame-generation timeline");}
         for(auto format:{VK_FORMAT_D24_UNORM_S8_UINT,VK_FORMAT_D32_SFLOAT_S8_UINT}) {VkFormatProperties p{}; vkGetPhysicalDeviceFormatProperties(physical,format,&p); if(p.optimalTilingFeatures&VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT){depthFormat=format;break;} }
         VkImageFormatProperties colorProperties{},depthProperties{};
         VkFormatProperties numericColor{};
@@ -329,6 +295,7 @@ VulkanBackend::State::State(SDL_Window* w,const RenderOptions& o):window(w),opti
             VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}; fence.flags=VK_FENCE_CREATE_SIGNALED_BIT; require(vkCreateFence(device,&fence,nullptr,&slot.fence),"Creating Vulkan frame fence");
             if(const char* t=std::getenv("K22_GPU_TIMING");t&&*t=='1'){VkQueryPoolCreateInfo q{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};q.queryType=VK_QUERY_TYPE_TIMESTAMP;q.queryCount=64;require(vkCreateQueryPool(device,&q,nullptr,&slot.queries),"Creating Vulkan timestamp queries");timing.enabled=true;timing.period=properties.limits.timestampPeriod;}
             VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO}; require(vkCreateSemaphore(device,&semaphore,nullptr,&slot.acquired),"Creating Vulkan acquisition semaphore");
+            require(vkCreateSemaphore(device,&semaphore,nullptr,&slot.acquiredGenerated),"Creating Vulkan frame-generation acquisition semaphore");
         }
         requestedInterval=options.vsync?1:0;
         WindowMetrics metrics{};
@@ -480,7 +447,7 @@ void VulkanBackend::State::ensure_targets(WindowMetrics metrics){
         if(generating){
             // image() always creates a view, which needs a view-capable usage (VUID-VkImageViewCreateInfo-image-04441): SAMPLED.
             for(unsigned i=0;i<2;++i){generated[i]=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT);real[i]=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);}
-            if(!presenter){presenter=std::make_unique<Presenter>(*this);std::fprintf(stderr,"kabus22: graphics: FSR 3.1.4 frame generation on (presentMode=%s, %zu swapchain images, pacing lead %g ms)\n",presentMode==VK_PRESENT_MODE_FIFO_KHR?"fifo":presentMode==VK_PRESENT_MODE_MAILBOX_KHR?"mailbox":"immediate",swapImages.size(),presenter->leadMs);}
+            if(!presenter){presenter=std::make_unique<Presenter>(*this);std::fprintf(stderr,"kabus22: graphics: FSR 3.1.4 frame generation on (presentMode=%s, %zu swapchain images)\n",presentMode==VK_PRESENT_MODE_FIFO_KHR?"fifo":presentMode==VK_PRESENT_MODE_MAILBOX_KHR?"mailbox":"immediate",swapImages.size());}
         }
         const bool composite=render_policy::composite_enabled(options.pbr,options.features),depthEffects=options.features.ssao||options.features.fog||options.features.taa||options.features.fsr;auto usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;scene.color=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,usage,1,1,samples);scene.depth=image(extent.width,extent.height,depthFormat,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|(composite?VK_IMAGE_USAGE_TRANSFER_DST_BIT:0)|(depthEffects?VK_IMAGE_USAGE_TRANSFER_SRC_BIT:0),1,1,samples);if(samples!=VK_SAMPLE_COUNT_1_BIT)scene.resolve=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,usage);finalImage=image(extent.width,extent.height,VK_FORMAT_R8G8B8A8_UNORM,usage);
         if(composite){hdr.color=image(render.width,render.height,VK_FORMAT_R16G16B16A16_SFLOAT,usage,1,1,samples);hdr.depth=image(render.width,render.height,depthFormat,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT,1,1,samples);if(samples!=VK_SAMPLE_COUNT_1_BIT)hdr.resolve=image(render.width,render.height,VK_FORMAT_R16G16B16A16_SFLOAT,usage);}}
@@ -499,11 +466,14 @@ void VulkanBackend::State::begin(WindowMetrics metrics,std::int32_t tripleBuffer
     // in-flight frame instead of serializing CPU recording behind the previous frame's GPU work.
     limit=desired;
     ensure_targets(metrics);if(swapDirty||!swapchain)return;
-    // Frame generation: the present thread owns the swapchain. The job of frame N-2 (this slot's images and fence) must be
-    // done before this frame reuses them; an out-of-date report recreates the swapchain here.
+    // Frame generation: the job of frame N-2 must be done before this frame reuses its slot (about half a rendered frame of
+    // latency); an out-of-date present recreates the swapchain here. The wait is excluded from generationInterval: counted,
+    // the render thread's period became the pacing period and the pacing never shrank (gpu-timing fps 32 with frame
+    // generation against 58 without, acquire_ms 11.8). Two jobs of slack instead ran into compositor buffer releases
+    // (whole frames waiting on acquire semaphores: 40 rendered fps against 160 at fps_limit=unlimited).
     if(generating){
         if(presenter->stale.exchange(false)){swapDirty=true;ensure_targets(metrics);if(swapDirty||!swapchain)return;}
-        const auto waitStart=std::chrono::steady_clock::now();drain_presents(1);timing.acquire+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-waitStart).count();
+        const auto waitStart=std::chrono::steady_clock::now();drain_presents(1);const double waited=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-waitStart).count();timing.acquire+=waited;generationWait+=waited;
     }
     auto& slot=slots[slotIndex];if(slot.pending)retire_slot(*this,slotIndex);
     garbage(*this,slot);
@@ -521,21 +491,53 @@ void VulkanBackend::State::finish(){
     if(!command)return;auto& slot=slots[slotIndex];
     transition(finalImage,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
     if(generating){
-        // The present thread blits generated/real of this slot after the frame's fence; finalImage is reused next frame.
+        // real: a copy of the rendered frame for captures (finalImage is reused next frame).
         transition(real[slotIndex],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
         VkImageCopy copy{};copy.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.dstSubresource=copy.srcSubresource;copy.extent={extent.width,extent.height,1};
         vkCmdCopyImage(command,finalImage.handle,finalImage.layout,real[slotIndex].handle,real[slotIndex].layout,1,&copy);
         transition(real[slotIndex],VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
         if(generatedValid)transition(generated[slotIndex],VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
-        mark("present_copy");
+        // Two swapchain images (rendered, then generated when there is one), blitted here so the present thread only
+        // presents: out of date presents nothing this frame, the rendered frame alone when only the second acquire fails.
+        constexpr std::uint32_t none=Presenter::none;std::uint32_t realImage=none,generatedImage=none;
+        const auto acquireStart=std::chrono::steady_clock::now();
+        const auto take=[&](VkSemaphore semaphore,std::uint32_t& index){
+            const VkResult r=vkAcquireNextImageKHR(device,swapchain,UINT64_MAX,semaphore,VK_NULL_HANDLE,&index);
+            if(r==VK_ERROR_OUT_OF_DATE_KHR){swapDirty=true;index=none;return;}
+            if(r==VK_SUBOPTIMAL_KHR)swapDirty=true;else require(r,"Acquiring Vulkan frame-generation image");
+        };
+        take(slot.acquired,realImage);if(realImage!=none&&generatedValid)take(slot.acquiredGenerated,generatedImage);
+        timing.acquire+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-acquireStart).count();
+        std::array<VkSemaphoreSubmitInfo,3> waits{},signals{};std::uint32_t count=0;
+        for(auto [image,source,semaphore]:{std::tuple{generatedImage,&generated[slotIndex],slot.acquiredGenerated},std::tuple{realImage,&finalImage,slot.acquired}}){
+            if(image==none)continue;
+            // As the single-present path: the acquire wait is at TRANSFER, so the discard transition starts there.
+            VkImageMemoryBarrier2 swap{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};swap.srcStageMask=swap.dstStageMask=VK_PIPELINE_STAGE_2_TRANSFER_BIT;swap.dstAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            swap.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;swap.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;swap.srcQueueFamilyIndex=swap.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;swap.image=swapImages[image];swap.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+            VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};dependency.imageMemoryBarrierCount=1;dependency.pImageMemoryBarriers=&swap;vkCmdPipelineBarrier2(command,&dependency);
+            VkImageBlit blit{};blit.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};blit.dstSubresource=blit.srcSubresource;blit.srcOffsets[1]={static_cast<int>(extent.width),static_cast<int>(extent.height),1};blit.dstOffsets[1]=blit.srcOffsets[1];
+            vkCmdBlitImage(command,source->handle,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,swapImages[image],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,VK_FILTER_NEAREST);
+            swap.srcAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;swap.dstStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;swap.dstAccessMask=VK_ACCESS_2_NONE;swap.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;swap.newLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            vkCmdPipelineBarrier2(command,&dependency);swapLayouts[image]=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            waits[count]={VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};waits[count].semaphore=semaphore;waits[count].stageMask=VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            signals[count]={VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};signals[count].semaphore=swapRendered[image];signals[count].stageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;++count;
+        }
+        mark("present_blit");
         require(vkEndCommandBuffer(command),"Ending Vulkan frame");require(vkResetFences(device,1,&slot.fence),"Resetting Vulkan frame fence");
-        VkCommandBufferSubmitInfo commands{};commands.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;commands.commandBuffer=command;VkSubmitInfo2 submit{};submit.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO_2;submit.commandBufferInfoCount=1;submit.pCommandBufferInfos=&commands;
+        VkCommandBufferSubmitInfo commands{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};commands.commandBuffer=command;
+        signals[count]={VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};signals[count].semaphore=frameTimeline;signals[count].value=++frameValue;signals[count].stageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        VkSubmitInfo2 submit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};submit.waitSemaphoreInfoCount=count;submit.signalSemaphoreInfoCount=count+1;submit.pWaitSemaphoreInfos=waits.data();submit.pSignalSemaphoreInfos=signals.data();submit.commandBufferInfoCount=1;submit.pCommandBufferInfos=&commands;
         while(pending>=limit){retire_slot(*this,front);front=(front+1)%slots.size();}
         {std::scoped_lock lock(queueMutex);require(vkQueueSubmit2(queue,1,&submit,slot.fence),"Submitting Vulkan frame");}
         if(!pending)front=slotIndex;
         slot.pending=true;++pending;++submissions;finalSlot=slotIndex;finalSubmission=submissions;finalValid=true;command=VK_NULL_HANDLE;
-        {std::scoped_lock lock(presenter->mutex);presenter->jobs.push_back({slotIndex,generatedValid,slot.fence});++presenter->queued;}
-        presenter->cv.notify_all();slotIndex=(slotIndex+1)%slots.size();
+        // Rendered-frame period between submissions without the present-thread wait (begin()); GPU, display (FIFO
+        // acquire) and fps-limit waits count. Clamped to 1.5x the running value so one stall does not stretch the pacing.
+        const auto now=std::chrono::steady_clock::now();
+        if(generationLast!=std::chrono::steady_clock::time_point{}){const double period=std::chrono::duration<double,std::milli>(now-generationLast).count()-generationWait;if(period>0&&period<250)generationInterval=generationInterval>0?generationInterval*.9+std::min(period,generationInterval*1.5)*.1:period;}
+        generationLast=now;generationWait=0;
+        if(realImage!=none){{std::scoped_lock lock(presenter->mutex);presenter->jobs.push_back({frameValue,generatedImage,realImage,generationInterval*.5});++presenter->queued;}presenter->cv.notify_all();}
+        slotIndex=(slotIndex+1)%slots.size();
         return;
     }
     // The acquire wait is at TRANSFER, so the layout transition must start there too,
@@ -668,8 +670,8 @@ void VulkanBackend::State::readback(std::string_view path,WindowMetrics metrics)
     };
     write(finalImage,std::string(path));
     if(!generating)return;
-    // The present thread may still blit these images: wait for it (both only read them).
-    drain_presents();
+    // The previous rendered frame (the other slot) may still be in flight: its fence too (both only read here).
+    for(auto& other:slots) if(other.pending) require(vkWaitForFences(device,1,&other.fence,VK_TRUE,UINT64_MAX),"Waiting for Vulkan capture");
     std::string stem(path);if(stem.size()>4&&stem.compare(stem.size()-4,4,".ppm")==0)stem.resize(stem.size()-4);
     if(generatedValid)write(generated[finalSlot],stem+"-fg-generated.ppm");
     if(submissions>1)write(real[finalSlot^1u],stem+"-fg-previous.ppm");

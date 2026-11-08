@@ -6,8 +6,10 @@
 #include <epoxy/gl.h>
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -292,14 +294,26 @@ const char* aoApplyFS="in vec2 uv;out vec4 color;uniform sampler2D ao;uniform ve
 const char* fogFSPrelude="#version 330 core\nuniform samplerBuffer lights;uniform int lightCount;\n#define K22_LIGHT(i) texelFetch(lights,i)\nfloat fogVisibility(int i,vec3 x);\n#define K22_FOG_VISIBILITY(i,x) fogVisibility(i,x)\n";
 const char* fogFS="in vec2 uv;out vec4 color;uniform sampler2D linearDepth;uniform mat4 inverseViewProjection;uniform vec3 eye,forward;uniform vec2 fogRange;uniform float farPlane;uniform bool shadowMaps;uniform int shadowLight;uniform samplerCubeShadow cubeShadowMap;\n"
     "float fogVisibility(int i,vec3 x){if(!shadowMaps||i!=shadowLight)return 1.0;vec4 a=K22_LIGHT(i*5);return k22CubeShadow(cubeShadowMap,a.xyz,x,vec3(0),k22CubeShadowNear,a.w);}\n"
-    "void main(){float d=texture(linearDepth,uv).r;if(d<=0.0)d=farPlane;color=vec4(k22FogInscatter(eye,eye+k22ViewRay(k22NdcFromUv(uv),inverseViewProjection,eye,forward)*d,fogRange,k22Noise(gl_FragCoord.xy)),0);}";
+    "void main(){float d=texture(linearDepth,uv).r;if(d<=0.0)d=farPlane;color=vec4(k22FogInscatter(eye,eye+k22ViewRay(k22NdcFromUv(uv),inverseViewProjection,eye,forward)*d,fogRange,k22Noise(gl_FragCoord.xy)),d);}";
+// Half-resolution fog (alpha = its sample's linear depth) added at full resolution: effects.frag mode 14 (Vulkan raster).
+const char* fogUpsampleFS=R"(#version 330 core
+in vec2 uv;out vec4 color;uniform sampler2D fog,linearDepth;uniform float farPlane;
+void main(){
+    vec2 size=vec2(textureSize(fog,0)),p=uv*size-0.5,f=fract(p);ivec2 b=ivec2(floor(p)),last=ivec2(size)-1;float d=texture(linearDepth,uv).r;if(d<=0.0)d=farPlane;
+    vec3 sum=vec3(0),best=vec3(0);float weight=0.0,closest=1e30;
+    for(int i=0;i<4;++i){ivec2 o=ivec2(i&1,i>>1);vec4 s=texelFetch(fog,clamp(b+o,ivec2(0),last),0);float dz=abs(s.a-d);
+        float w=(o.x==1?f.x:1.0-f.x)*(o.y==1?f.y:1.0-f.y)*exp(-dz/(0.05*max(d,1e-3)));sum+=w*s.rgb;weight+=w;if(dz<closest){closest=dz;best=s.rgb;}}
+    color=vec4(weight>1e-4?sum/weight:best,0);
+})";
 // mode 0: prefiltered 4x4 downsample of the HDR scene, 1: downsample, 2: tent upsample (additively blended).
 const char* bloomFS="in vec2 uv;out vec4 color;uniform sampler2D image;uniform vec2 texel;uniform int mode;void main(){color=vec4(mode==0?k22BloomPrefilter(k22BloomDown(image,uv,texel)):mode==1?k22BloomDown(image,uv,texel):k22BloomUp(image,uv,texel),1);}";
 const char* compositeFS="in vec2 uv;out vec4 color;uniform sampler2D image,bloom;uniform bool bloomEnabled,toneMap;void main(){vec4 c=texture(image,uv);if(bloomEnabled)c.rgb+=k22BloomStrength*texture(bloom,uv).rgb;color=vec4(toneMap?k22ToneMap(c.rgb):c.rgb,c.a);}";
 const char* fxaaFS="in vec2 uv;out vec4 color;uniform sampler2D image;uniform vec2 texel;void main(){color=vec4(k22Fxaa(image,uv,texel),texture(image,uv).a);}";
 struct UIVertex { float x,y,u,v,r,g,b,a,u0,v0,u1,v1; }; // u0..v1: the sampled sub-rect (min/max texture coordinates).
 struct Batch { GLuint first{},count{};std::uint32_t material{};GLuint centroidFirst{},centroidCount{}; };
-struct MeshGPU { GLuint vao{},vertices{},indices{},tangents{},poseBuffer{},poses{};std::vector<Batch> batches;int frameCount{},primaryMax{},skinLayers{};Bounds bounds;std::vector<Bounds> frameBounds; };
+// overridden: a mutable pose (bind_override) repointed the VAO's position/normal/tangent attributes; default_attributes
+// restores them only then, instead of respecifying six attributes (a Mesa VAO revalidation) on every draw.
+struct MeshGPU { GLuint vao{},vertices{},indices{},tangents{},poseBuffer{},poses{};std::vector<Batch> batches;int frameCount{},primaryMax{},skinLayers{};Bounds bounds;std::vector<Bounds> frameBounds;bool overridden{}; };
 // width/height stay the original image's; pack replacements change only GPU storage, never UV policy.
 struct TextureGPU {GLuint id{};std::uint32_t width{},height{};std::uint64_t serial{};bool dynamic{},alpha{},mipsValid{};GLuint normal{},orm{};bool roughness{};};
 struct MeshOverride {
@@ -356,7 +370,7 @@ struct GLBackend::Impl {
     SDL_Window* window{};SDL_GLContext context{};bool portalPass{};
     RenderOptions options;GLuint scene{},ui{},post{},white{},uiVao{},uiVbo{},postVao{},lightBuffer{},lightTexture{},gammaTexture{},sceneSampler{},uiNearestSampler{},uiLinearSampler{};
     GLuint particleVbo{},lightmapSampler{},dynamicSceneSampler{};GLint maxTextureSize{};
-    GLuint msaaFbo{},msaaColor{},msaaDepth{},resolveFbo{},resolveColor{};int targetWidth{},targetHeight{},samples{1};float preferredAnisotropy{1},anisotropy{1};
+    GLuint msaaFbo{},msaaColor{},msaaDepth{},resolveFbo{},resolveColor{};int targetWidth{},targetHeight{},samples{1},actualSamples{1};float preferredAnisotropy{1},anisotropy{1};
     GLint maxSamples{1};float maxAnisotropy{}; // Context limits (0: no anisotropic filtering), kept for reconfigure clamps.
     GLint minificationFilter{GL_LINEAR_MIPMAP_LINEAR};bool mipsEnabled{true};
     GLuint alphaFbo{},alphaColor{},alphaDepth{};
@@ -376,10 +390,10 @@ struct GLBackend::Impl {
             glMultiDrawElements(GL_TRIANGLES,g.counts.data(),GL_UNSIGNED_INT,g.offsets.data(),GLsizei(g.counts.size()));
         }
     }
-    GLuint compositeProgram{},bloomProgram{},fxaaProgram{},linearizeProgram{},ssaoProgram{},aoApplyProgram{},fogProgram{};
+    GLuint compositeProgram{},bloomProgram{},fxaaProgram{},linearizeProgram{},ssaoProgram{},aoApplyProgram{},fogProgram{},fogUpsampleProgram{};
     std::array<GLuint,5> bloomFbo{},bloomTexture{};GLuint ldrFbo{},ldrColor{};
     // Primary-view screen effects (SSAO, volumetric fog), sized to that view.
-    GLuint effectDepthFbo{},effectDepth{},linearFbo{},linearDepth{},aoFbo{},aoTexture{};int effectWidth{},effectHeight{};
+    GLuint effectDepthFbo{},effectDepth{},linearFbo{},linearDepth{},aoFbo{},aoTexture{},fogFbo{},fogTexture{};int effectWidth{},effectHeight{};
     GLuint sunShadowFbo{},sunShadowMap{},cubeShadowFbo{},cubeShadowMap{};
     bool retainedColorValid{},portalColorValid{},finalFrameValid{};
     GLuint videoTexture{};int videoWidth{},videoHeight{};std::uint64_t videoSerial{~0ull};
@@ -403,6 +417,35 @@ struct GLBackend::Impl {
     std::array<GLsync,2> completion{};unsigned completionFront{},completionCount{},completionLimit{1};
     std::uint64_t completionSubmissions{},completionWaits{};
     int requestedSwapInterval{-1};
+    // K22_GL_TIMINGS=1: GPU time per pass from GL_TIMESTAMP queries, read back four frames later (no stall), averaged to stderr
+    // every 300 frames. Views includes the sky stencil mask and planar shadows; SSAO and volumetric fog are reported apart.
+    // CPU side: the completion-fence wait before a frame, command recording, and SDL_GL_SwapWindow.
+    struct GpuTimings{
+        enum Mark{Begin,Shadows,EffectsBegin,SsaoEnd,EffectsEnd,Views,Composite,Ui,End,Count};
+        bool enabled{};std::array<std::array<GLuint,Count>,4> queries{};std::array<std::array<bool,Count>,4> used{};std::uint64_t frame{};
+        std::array<double,8> sums{};unsigned samples{};std::array<double,3> cpu{};unsigned cpuFrames{};
+    } timings;
+    void mark(GpuTimings::Mark m){if(timings.enabled){glQueryCounter(timings.queries[timings.frame%4][m],GL_TIMESTAMP);timings.used[timings.frame%4][m]=true;}}
+    void begin_timings(){
+        auto&t=timings;if(!t.enabled)return;++t.frame;const auto slot=t.frame%4;auto&q=t.queries[slot];auto&used=t.used[slot];
+        GLint ready{};if(used[GpuTimings::End])glGetQueryObjectiv(q[GpuTimings::End],GL_QUERY_RESULT_AVAILABLE,&ready);
+        if(ready&&used[GpuTimings::Begin]){
+            std::array<GLuint64,GpuTimings::Count> v{};for(int m=0;m<GpuTimings::Count;++m)if(used[m])glGetQueryObjectui64v(q[m],GL_QUERY_RESULT,&v[m]);
+            auto at=[&](int m,int fallback){return used[m]?v[m]:v[fallback];};
+            const bool effects=used[GpuTimings::EffectsBegin]&&used[GpuTimings::EffectsEnd];
+            const double ssao=effects?double(v[GpuTimings::SsaoEnd]-v[GpuTimings::EffectsBegin]):0,fog=effects?double(v[GpuTimings::EffectsEnd]-v[GpuTimings::SsaoEnd]):0;
+            const GLuint64 shadows=at(GpuTimings::Shadows,GpuTimings::Begin),views=at(GpuTimings::Views,GpuTimings::Shadows),composite=used[GpuTimings::Composite]?v[GpuTimings::Composite]:views;
+            const std::array<double,8> d{double(shadows-v[GpuTimings::Begin]),double(views-shadows)-ssao-fog,ssao,fog,double(composite-views),double(v[GpuTimings::Ui]-composite),double(v[GpuTimings::End]-v[GpuTimings::Ui]),double(v[GpuTimings::End]-v[GpuTimings::Begin])};
+            for(std::size_t i=0;i<d.size();++i)t.sums[i]+=d[i];
+            if(++t.samples==300){
+                auto ms=[&](int i){return t.sums[i]/t.samples/1e6;};
+                std::cerr<<"kabus22: gl gpu ms (300-frame avg): shadows "<<ms(0)<<" views "<<ms(1)<<" ssao "<<ms(2)<<" fog "<<ms(3)<<" composite "<<ms(4)<<" ui "<<ms(5)<<" resolve+post "<<ms(6)<<" total "<<ms(7);
+                if(t.cpuFrames)std::cerr<<"; cpu ms: fence wait "<<t.cpu[0]/t.cpuFrames<<" record "<<t.cpu[1]/t.cpuFrames<<" swap "<<t.cpu[2]/t.cpuFrames;
+                std::cerr<<'\n';t.sums={};t.samples=0;t.cpu={};t.cpuFrames=0;
+            }
+        }
+        used={};mark(GpuTimings::Begin);
+    }
     bool centroidLighting{};
     GLuint skyProgram{},cloudProgram{},skyClampSampler{};
     struct SkyUniforms{GLint image,basis,cone,scroll,cube,blend,curve,clip,layer;}skyUniforms{};
@@ -495,12 +538,13 @@ struct GLBackend::Impl {
             glGenSamplers(1,&uiNearestSampler);glSamplerParameteri(uiNearestSampler,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glSamplerParameteri(uiNearestSampler,GL_TEXTURE_MAG_FILTER,GL_NEAREST);glSamplerParameteri(uiNearestSampler,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glSamplerParameteri(uiNearestSampler,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
             glGenSamplers(1,&uiLinearSampler);glSamplerParameteri(uiLinearSampler,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glSamplerParameteri(uiLinearSampler,GL_TEXTURE_MAG_FILTER,GL_LINEAR);glSamplerParameteri(uiLinearSampler,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glSamplerParameteri(uiLinearSampler,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
             uiVertices.reserve(4096);lightData.reserve(128);transparent.reserve(256);
+            if(const char*t=std::getenv("K22_GL_TIMINGS");t&&*t=='1'){for(auto&q:timings.queries)glGenQueries(GpuTimings::Count,q.data());timings.enabled=true;}
         }catch(...){destroy();throw;}
     }
-    bool retire_completion(){
+    bool retire_completion(GLbitfield flags=GL_SYNC_FLUSH_COMMANDS_BIT){
         if(!completionCount)return true;
         auto&fence=completion[completionFront];GLenum status;
-        do {status=glClientWaitSync(fence,GL_SYNC_FLUSH_COMMANDS_BIT,1000000000ull);}while(status==GL_TIMEOUT_EXPIRED);
+        do {status=glClientWaitSync(fence,flags,1000000000ull);}while(status==GL_TIMEOUT_EXPIRED);
         glDeleteSync(fence);fence=nullptr;completionFront=(completionFront+1)%completion.size();--completionCount;
         if(status==GL_WAIT_FAILED)return false;
         ++completionWaits;return true;
@@ -513,12 +557,18 @@ struct GLBackend::Impl {
     }
     void admit_frame(std::int32_t raw,bool bonus){
         completionLimit=presentation_limit(options.mode,raw);
-        while(completionCount>=completionLimit)if(!retire_completion())throw std::runtime_error("OpenGL complete-frame fence wait failed");
         const int interval=presentation_interval(options.mode,raw,bonus,options.vsync);
         if(interval!=requestedSwapInterval){
             requestedSwapInterval=interval;
             if(SDL_GL_SetSwapInterval(interval)!=0)std::cerr<<"kabus22: warning: SDL_GL_SetSwapInterval("<<interval<<") failed: "<<SDL_GetError()<<'\n';
         }
+    }
+    // The completion limit bounds submissions, not recording (as the Vulkan slots, docs/RAYTRACING.md): the frame records
+    // while the previous one runs on the GPU and waits only before its swap submits it. Waiting before recording serialized
+    // CPU and GPU (kizic2, user settings at 4K: 5.2 ms fence wait + 0.9 ms recording per frame for 4.5 ms of GPU work).
+    // The previous fence was flushed by complete_frame; no flush here, so this frame is not queued behind it early.
+    void await_submission(){
+        while(completionCount>=completionLimit)if(!retire_completion(0))throw std::runtime_error("OpenGL complete-frame fence wait failed");
     }
     void complete_frame(){
         auto&fence=completion[(completionFront+completionCount)%completion.size()];
@@ -534,8 +584,9 @@ struct GLBackend::Impl {
             for(auto&[image,sky]:skies)glDeleteTextures(1,&sky.texture);glDeleteProgram(skyProgram);glDeleteProgram(cloudProgram);glDeleteSamplers(1,&skyClampSampler);
             glDeleteProgram(shadowProgram);
             glDeleteProgram(tonemapProgram);glDeleteTextures(1,&flatNormal);glDeleteTextures(1,&defaultOrm);
-            for(GLuint p:{compositeProgram,bloomProgram,fxaaProgram,linearizeProgram,ssaoProgram,aoApplyProgram,fogProgram})glDeleteProgram(p);
+            for(GLuint p:{compositeProgram,bloomProgram,fxaaProgram,linearizeProgram,ssaoProgram,aoApplyProgram,fogProgram,fogUpsampleProgram})glDeleteProgram(p);
             glDeleteFramebuffers(1,&sunShadowFbo);glDeleteTextures(1,&sunShadowMap);glDeleteFramebuffers(1,&cubeShadowFbo);glDeleteTextures(1,&cubeShadowMap);
+            if(timings.enabled)for(auto&q:timings.queries)glDeleteQueries(GpuTimings::Count,q.data());
             glDeleteProgram(scene);glDeleteProgram(ui);glDeleteProgram(post);glDeleteTextures(1,&white);glDeleteTextures(1,&videoTexture);glDeleteVertexArrays(1,&uiVao);glDeleteVertexArrays(1,&postVao);glDeleteBuffers(1,&uiVbo);glDeleteBuffers(1,&lightBuffer);glDeleteTextures(1,&lightTexture);free_targets();SDL_GL_DeleteContext(context);context=nullptr;}
     }
     ~Impl(){destroy();}
@@ -563,9 +614,9 @@ struct GLBackend::Impl {
         retainedColorValid=portalColorValid=finalFrameValid=false;targetWidth=targetHeight=0;
     }
     void free_effects(){
-        for(GLuint*fbo:{&effectDepthFbo,&linearFbo,&aoFbo})glDeleteFramebuffers(1,fbo);
-        for(GLuint*texture:{&effectDepth,&linearDepth,&aoTexture})glDeleteTextures(1,texture);
-        effectDepthFbo=linearFbo=aoFbo=effectDepth=linearDepth=aoTexture=0;effectWidth=effectHeight=0;
+        for(GLuint*fbo:{&effectDepthFbo,&linearFbo,&aoFbo,&fogFbo})glDeleteFramebuffers(1,fbo);
+        for(GLuint*texture:{&effectDepth,&linearDepth,&aoTexture,&fogTexture})glDeleteTextures(1,texture);
+        effectDepthFbo=linearFbo=aoFbo=fogFbo=effectDepth=linearDepth=aoTexture=fogTexture=0;effectWidth=effectHeight=0;
     }
     // Effect programs exist only for enabled effects; reconfigure builds newly enabled ones and keeps disabled ones. The
     // composite program is the exception: its presence selects it over the plain tone-map pass (composite_pass).
@@ -577,7 +628,7 @@ struct GLBackend::Impl {
         if(fx.fxaa&&!fxaaProgram)fxaaProgram=effect(fxaaFS);
         if((fx.ssao||fx.fog)&&!linearizeProgram)linearizeProgram=effect(linearizeFS);
         if(fx.ssao&&!ssaoProgram){ssaoProgram=effect(ssaoFS);aoApplyProgram=effect(aoApplyFS);}
-        if(fx.fog&&!fogProgram)fogProgram=program(postVS,(std::string(fogFSPrelude)+effectsGLSL+fogFS).c_str());
+        if(fx.fog&&!fogProgram){fogProgram=program(postVS,(std::string(fogFSPrelude)+effectsGLSL+fogFS).c_str());fogUpsampleProgram=program(postVS,fogUpsampleFS);}
     }
     // Renderer::reconfigure. Only shadow maps on<->off needs a new context: K22_SHADOW_MAPS is compiled into the scene
     // program whose uniform locations are resolved once. Everything else is per-frame state, a lazily rebuilt target or
@@ -597,11 +648,16 @@ struct GLBackend::Impl {
         finalFrameValid=retainedColorValid=portalColorValid=false;
         return true;
     }
+    // glRenderbufferStorageMultisample(1) asks for "at least 1" sample and Mesa radeonsi rounds it up to 2 (measured on the
+    // RX 7900 XTX: RENDERBUFFER_SAMPLES 1 -> 2), so MSAA off still rendered 2x. 0 is the only single-sample request.
+    GLsizei storage_samples()const{return samples>1?samples:0;}
     void targets(int w,int h){if(w==targetWidth&&h==targetHeight)return;free_targets();targetWidth=w;targetHeight=h;
-        glGenFramebuffers(1,&msaaFbo);glBindFramebuffer(GL_FRAMEBUFFER,msaaFbo);glGenRenderbuffers(1,&msaaColor);glBindRenderbuffer(GL_RENDERBUFFER,msaaColor);glRenderbufferStorageMultisample(GL_RENDERBUFFER,samples,GL_RGBA8,w,h);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_RENDERBUFFER,msaaColor);glGenRenderbuffers(1,&msaaDepth);glBindRenderbuffer(GL_RENDERBUFFER,msaaDepth);glRenderbufferStorageMultisample(GL_RENDERBUFFER,samples,GL_DEPTH24_STENCIL8,w,h);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_RENDERBUFFER,msaaDepth);if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)throw std::runtime_error("Incomplete multisample game framebuffer");
+        glGenFramebuffers(1,&msaaFbo);glBindFramebuffer(GL_FRAMEBUFFER,msaaFbo);glGenRenderbuffers(1,&msaaColor);glBindRenderbuffer(GL_RENDERBUFFER,msaaColor);glRenderbufferStorageMultisample(GL_RENDERBUFFER,storage_samples(),GL_RGBA8,w,h);
+        {GLint got{};glGetRenderbufferParameteriv(GL_RENDERBUFFER,GL_RENDERBUFFER_SAMPLES,&got);actualSamples=std::max(1,int(got));}
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_RENDERBUFFER,msaaColor);glGenRenderbuffers(1,&msaaDepth);glBindRenderbuffer(GL_RENDERBUFFER,msaaDepth);glRenderbufferStorageMultisample(GL_RENDERBUFFER,storage_samples(),GL_DEPTH24_STENCIL8,w,h);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_RENDERBUFFER,msaaDepth);if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)throw std::runtime_error("Incomplete multisample game framebuffer");
         glGenFramebuffers(1,&resolveFbo);glBindFramebuffer(GL_FRAMEBUFFER,resolveFbo);glGenTextures(1,&resolveColor);glBindTexture(GL_TEXTURE_2D,resolveColor);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,w,h,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,resolveColor,0);if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)throw std::runtime_error("Incomplete game resolve framebuffer");
         if(!composite)return;
-        glGenFramebuffers(1,&hdrFbo);glBindFramebuffer(GL_FRAMEBUFFER,hdrFbo);glGenRenderbuffers(1,&hdrColor);glBindRenderbuffer(GL_RENDERBUFFER,hdrColor);glRenderbufferStorageMultisample(GL_RENDERBUFFER,samples,GL_RGBA16F,w,h);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_RENDERBUFFER,hdrColor);glGenRenderbuffers(1,&hdrDepth);glBindRenderbuffer(GL_RENDERBUFFER,hdrDepth);glRenderbufferStorageMultisample(GL_RENDERBUFFER,samples,GL_DEPTH24_STENCIL8,w,h);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_RENDERBUFFER,hdrDepth);if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)throw std::runtime_error("Incomplete HDR game framebuffer");
+        glGenFramebuffers(1,&hdrFbo);glBindFramebuffer(GL_FRAMEBUFFER,hdrFbo);glGenRenderbuffers(1,&hdrColor);glBindRenderbuffer(GL_RENDERBUFFER,hdrColor);glRenderbufferStorageMultisample(GL_RENDERBUFFER,storage_samples(),GL_RGBA16F,w,h);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_RENDERBUFFER,hdrColor);glGenRenderbuffers(1,&hdrDepth);glBindRenderbuffer(GL_RENDERBUFFER,hdrDepth);glRenderbufferStorageMultisample(GL_RENDERBUFFER,storage_samples(),GL_DEPTH24_STENCIL8,w,h);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_RENDERBUFFER,hdrDepth);if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)throw std::runtime_error("Incomplete HDR game framebuffer");
         glGenFramebuffers(1,&hdrResolveFbo);glBindFramebuffer(GL_FRAMEBUFFER,hdrResolveFbo);glGenTextures(1,&hdrResolveColor);glBindTexture(GL_TEXTURE_2D,hdrResolveColor);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA16F,w,h,0,GL_RGBA,GL_HALF_FLOAT,nullptr);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,hdrResolveColor,0);if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)throw std::runtime_error("Incomplete HDR resolve framebuffer");
         if(options.features.bloom)for(int level=0;level<5;++level)render_target(bloomFbo[level],bloomTexture[level],GL_RGBA16F,GL_RGBA,GL_HALF_FLOAT,std::max(1,w>>(level+1)),std::max(1,h>>(level+1)));
         if(options.features.fxaa)render_target(ldrFbo,ldrColor,GL_RGBA8,GL_RGBA,GL_UNSIGNED_BYTE,w,h);
@@ -648,12 +704,13 @@ struct GLBackend::Impl {
     // Primary-view SSAO and volumetric fog, before view-space entities clear depth. Depth is copied to a single-sample
     // texture and linearized; AO multiplies into the view color, fog in-scattering adds to it (HDR before tone mapping).
     void screen_effects(const RenderFrame&f,const Camera&camera,int x,int y,int w,int h){
-        const auto&fx=options.features;GLint destination{};glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&destination);
+        mark(GpuTimings::EffectsBegin);const auto&fx=options.features;GLint destination{};glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&destination);
         if(effectWidth!=w||effectHeight!=h){
             free_effects();effectWidth=w;effectHeight=h;
             render_target(effectDepthFbo,effectDepth,GL_DEPTH24_STENCIL8,GL_DEPTH_STENCIL,GL_UNSIGNED_INT_24_8,w,h,GL_DEPTH_STENCIL_ATTACHMENT);
             render_target(linearFbo,linearDepth,GL_R32F,GL_RED,GL_FLOAT,w,h);
             if(fx.ssao)render_target(aoFbo,aoTexture,GL_R8,GL_RED,GL_UNSIGNED_BYTE,w,h);
+            if(fx.fog)render_target(fogFbo,fogTexture,GL_RGBA16F,GL_RGBA,GL_HALF_FLOAT,std::max(1,w/2),std::max(1,h/2));
         }
         const bool clip=glIsEnabled(GL_CLIP_DISTANCE0);glDisable(GL_SCISSOR_TEST);glDisable(GL_DEPTH_TEST);glDisable(GL_BLEND);glDisable(GL_CULL_FACE);glDisable(GL_CLIP_DISTANCE0);
         glBindFramebuffer(GL_READ_FRAMEBUFFER,destination);glBindFramebuffer(GL_DRAW_FRAMEBUFFER,effectDepthFbo);glBlitFramebuffer(x,y,x+w,y+h,0,0,w,h,GL_DEPTH_BUFFER_BIT,GL_NEAREST);
@@ -668,14 +725,21 @@ struct GLBackend::Impl {
             glBindFramebuffer(GL_FRAMEBUFFER,destination);glViewport(x,y,w,h);glUseProgram(aoApplyProgram);glActiveTexture(GL_TEXTURE11);glBindTexture(GL_TEXTURE_2D,aoTexture);glBindSampler(11,uiLinearSampler);
             glUniform1i(uniform(aoApplyProgram,"ao"),11);glUniform2f(uniform(aoApplyProgram,"texel"),1.f/w,1.f/h);glEnable(GL_BLEND);glBlendFuncSeparate(GL_ZERO,GL_SRC_COLOR,GL_ZERO,GL_ONE);glDrawArrays(GL_TRIANGLES,0,3);glDisable(GL_BLEND);
         }
+        mark(GpuTimings::SsaoEnd);
         if(fx.fog){
-            glBindFramebuffer(GL_FRAMEBUFFER,destination);glViewport(x,y,w,h);view(fogProgram);
+            // Half resolution, as the Vulkan raster path: 24 march steps x every scene light per pixel cost 8-16 ms of GPU at 4K
+            // (K22_GL_TIMINGS, RX 7900 XTX); the depth-aware upsample keeps silhouettes from bleeding.
+            const int fw=std::max(1,w/2),fh=std::max(1,h/2);const float farPlane=camera.farClip;
+            glBindFramebuffer(GL_FRAMEBUFFER,fogFbo);glViewport(0,0,fw,fh);view(fogProgram);
             glUniform1i(uniform(fogProgram,"lights"),3);glUniform1i(uniform(fogProgram,"lightCount"),lightData.size()/5);glUniform1i(uniform(fogProgram,"cubeShadowMap"),9);
-            glUniform1i(uniform(fogProgram,"shadowMaps"),shadowsReady&&shadowLight>=0);glUniform1i(uniform(fogProgram,"shadowLight"),shadowLight);glUniform1f(uniform(fogProgram,"farPlane"),camera.farClip);
+            glUniform1i(uniform(fogProgram,"shadowMaps"),shadowsReady&&shadowLight>=0);glUniform1i(uniform(fogProgram,"shadowLight"),shadowLight);glUniform1f(uniform(fogProgram,"farPlane"),farPlane);
             glUniform2f(uniform(fogProgram,"fogRange"),camera.environmentOverride?camera.fogStart:f.fogStart,camera.environmentOverride?camera.fogEnd:f.fogEnd);
+            glDrawArrays(GL_TRIANGLES,0,3);
+            glBindFramebuffer(GL_FRAMEBUFFER,destination);glViewport(x,y,w,h);glUseProgram(fogUpsampleProgram);glActiveTexture(GL_TEXTURE11);glBindTexture(GL_TEXTURE_2D,fogTexture);glBindSampler(11,uiNearestSampler);
+            glUniform1i(uniform(fogUpsampleProgram,"fog"),11);glUniform1i(uniform(fogUpsampleProgram,"linearDepth"),10);glUniform1f(uniform(fogUpsampleProgram,"farPlane"),farPlane);
             glEnable(GL_BLEND);glBlendFuncSeparate(GL_ONE,GL_ONE,GL_ZERO,GL_ONE);glDrawArrays(GL_TRIANGLES,0,3);
         }
-        glBindFramebuffer(GL_FRAMEBUFFER,destination);glViewport(x,y,w,h);glEnable(GL_SCISSOR_TEST);glEnable(GL_DEPTH_TEST);glEnable(GL_BLEND);if(clip)glEnable(GL_CLIP_DISTANCE0);glUseProgram(scene);
+        glBindFramebuffer(GL_FRAMEBUFFER,destination);glViewport(x,y,w,h);glEnable(GL_SCISSOR_TEST);glEnable(GL_DEPTH_TEST);glEnable(GL_BLEND);if(clip)glEnable(GL_CLIP_DISTANCE0);glUseProgram(scene);mark(GpuTimings::EffectsEnd);
     }
     // Background composite: HDR resolve, bloom, tone map (PBR only, else identity) and FXAA into the LDR scene target.
     void composite_pass(int w,int h){
@@ -825,6 +889,8 @@ struct GLBackend::Impl {
         MeshGPU gpu;glGenVertexArrays(1,&gpu.vao);glGenBuffers(1,&gpu.vertices);glGenBuffers(1,&gpu.indices);glBindVertexArray(gpu.vao);glBindBuffer(GL_ARRAY_BUFFER,gpu.vertices);glBufferData(GL_ARRAY_BUFFER,vertices.size_bytes(),vertices.data(),GL_STATIC_DRAW);
         for(const auto&vertex:model.vertices)include_point(gpu.bounds,vertex.position);
         glEnableVertexAttribArray(0);glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)offsetof(Vertex,position));glEnableVertexAttribArray(1);glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)offsetof(Vertex,normal));glEnableVertexAttribArray(2);glVertexAttribPointer(2,2,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)offsetof(Vertex,uv));glEnableVertexAttribArray(3);glVertexAttribPointer(3,2,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)offsetof(Vertex,lightmap_uv));
+        // The interpolation endpoint streams default to the same vertices (static meshes and texel-buffer poses).
+        glEnableVertexAttribArray(4);glVertexAttribPointer(4,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)offsetof(Vertex,position));glEnableVertexAttribArray(5);glVertexAttribPointer(5,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)offsetof(Vertex,normal));
         if(model.triangles.size()>static_cast<std::size_t>(std::numeric_limits<GLsizei>::max()/3)||centroidTriangles.size()>static_cast<std::size_t>(std::numeric_limits<GLsizei>::max()/3))throw std::runtime_error("Game mesh exceeds OpenGL index capacity");
         gpu.batches.resize(std::max<std::size_t>(model.materials.size(),1));
         for(const auto&t:model.triangles){auto material=display_material_index(model.formatVersion,t.materialIndex);if(material>=gpu.batches.size())throw std::runtime_error("Game triangle references invalid material");for(auto index:t.indices)if(index>=model.vertices.size())throw std::runtime_error("Game triangle references invalid vertex");gpu.batches[material].count+=3;}
@@ -1009,7 +1075,15 @@ struct GLBackend::Impl {
         }
         return queues;
     }
-    void bind_override(const DrawInstance&d,const MeshGPU&gpu,EffectKind liveEffectKind,std::uint32_t id,std::uint64_t revision,std::span<const Vec3>positions,std::span<const Vec3>normals,int positionAttribute,int normalAttribute,int tangentAttribute,std::uint32_t frameIndex){
+    void default_attributes(MeshGPU&gpu){
+        if(!gpu.overridden)return;
+        glBindBuffer(GL_ARRAY_BUFFER,gpu.vertices);
+        for(int attribute:{0,4})glVertexAttribPointer(attribute,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)offsetof(Vertex,position));
+        for(int attribute:{1,5})glVertexAttribPointer(attribute,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)offsetof(Vertex,normal));
+        glBindBuffer(GL_ARRAY_BUFFER,gpu.tangents);for(int attribute:{12,13})glVertexAttribPointer(attribute,3,GL_FLOAT,GL_FALSE,sizeof(Vec3),nullptr);
+        gpu.overridden=false;
+    }
+    void bind_override(const DrawInstance&d,MeshGPU&gpu,EffectKind liveEffectKind,std::uint32_t id,std::uint64_t revision,std::span<const Vec3>positions,std::span<const Vec3>normals,int positionAttribute,int normalAttribute,int tangentAttribute,std::uint32_t frameIndex){
         if(positions.empty()&&normals.empty())return;
         if(!id||(!positions.empty()&&positions.size()!=d.model->vertices.size())||(!normals.empty()&&normals.size()!=d.model->vertices.size()))throw std::runtime_error("Invalid mutable entity frame override");
         auto&data=overrides[id];
@@ -1028,6 +1102,7 @@ struct GLBackend::Impl {
         if(!positions.empty()){glBindBuffer(GL_ARRAY_BUFFER,data.positions);glVertexAttribPointer(positionAttribute,3,GL_FLOAT,GL_FALSE,sizeof(Vec3),nullptr);}
         if(!normals.empty()){glBindBuffer(GL_ARRAY_BUFFER,data.normals);glVertexAttribPointer(normalAttribute,3,GL_FLOAT,GL_FALSE,sizeof(Vec3),nullptr);}
         if(liveEffectKind!=EffectKind::None){glBindBuffer(GL_ARRAY_BUFFER,data.tangents);glVertexAttribPointer(tangentAttribute,3,GL_FLOAT,GL_FALSE,sizeof(Vec3),nullptr);}
+        gpu.overridden=true;
     }
     void draw_instance(const DrawInstance&d,std::span<const SkinBinding> skinBindings,const Camera*camera=nullptr,bool depthWrite=true,int nativeQueue=-1){
         if((!d.visible&&!d.shadowRequested)||!d.model||d.scale.x==0||d.scale.y==0||d.scale.z==0||(maskPass&&(!d.visible||d.model->formatVersion!=6)))return;
@@ -1055,10 +1130,7 @@ struct GLBackend::Impl {
         glUniform1i(su.particleInstanced,0);material_uniforms(live);
         const EffectKind liveEffectKind=live?live->effect:EffectKind::None;
         model_uniform(m);glBindVertexArray(gpu.vao);
-        glBindBuffer(GL_ARRAY_BUFFER,gpu.vertices);
-        for(int attribute:{0,4}){glEnableVertexAttribArray(attribute);glVertexAttribPointer(attribute,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)offsetof(Vertex,position));}
-        for(int attribute:{1,5}){glEnableVertexAttribArray(attribute);glVertexAttribPointer(attribute,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)offsetof(Vertex,normal));}
-        glBindBuffer(GL_ARRAY_BUFFER,gpu.tangents);for(int attribute:{12,13}){glEnableVertexAttribArray(attribute);glVertexAttribPointer(attribute,3,GL_FLOAT,GL_FALSE,sizeof(Vec3),nullptr);}
+        default_attributes(gpu);
         // PBR normal mapping consumes the same per-pose tangent stream as effect materials.
         const EffectKind tangentKind=options.pbr&&liveEffectKind==EffectKind::None?EffectKind::NormalMix:liveEffectKind;
         bind_override(d,gpu,tangentKind,d.meshId,d.meshRevision,d.positions,d.normals,0,1,12,d.frame);
@@ -1188,8 +1260,7 @@ struct GLBackend::Impl {
         const auto projection=planar_projection(d,shadow,frame);
         if(!geometry_eligible(poseBounds,product(projection,model),viewProjection,geometryClipPlane))return;
         glUseProgram(shadowProgram);glBindVertexArray(gpu.vao);
-        glBindBuffer(GL_ARRAY_BUFFER,gpu.vertices);
-        for(int attribute:{0,4}){glEnableVertexAttribArray(attribute);glVertexAttribPointer(attribute,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),(void*)offsetof(Vertex,position));}
+        default_attributes(gpu);
         bind_override(d,gpu,EffectKind::None,d.meshId,d.meshRevision,d.positions,d.normals,0,1,12,d.frame);
         bind_override(d,gpu,EffectKind::None,d.nextMeshId,d.nextMeshRevision,d.nextPositions,d.nextNormals,4,5,13,d.nextFrame);
         glUniformMatrix4fv(shu.model,1,GL_FALSE,model.data());glUniformMatrix4fv(shu.projection,1,GL_FALSE,projection.data());glUniformMatrix4fv(shu.vp,1,GL_FALSE,viewProjection.data());
@@ -1253,7 +1324,7 @@ void GLBackend::drain(){impl_->drain_completion();}
 void GLBackend::invalidate(WindowMode mode){impl_->options.mode=mode;impl_->finalFrameValid=false;}
 int GLBackend::shader_version()const{return impl_->scene&&impl_->su.effectKind>=0&&impl_->su.normalSkin>=0&&impl_->su.skillMain>=0&&impl_->su.skillExtra>=0&&impl_->su.preparedAmbient>=0?2020:0;}
 std::string GLBackend::description()const{return std::string("OpenGL ")+reinterpret_cast<const char*>(glGetString(GL_VERSION))+"; "+reinterpret_cast<const char*>(glGetString(GL_RENDERER));}
-PresentationState GLBackend::presentation_state()const{const auto&i=*impl_;return {i.completionLimit,i.completionCount,i.completionSubmissions,i.completionWaits,SDL_GL_GetSwapInterval(),i.samples};}
+PresentationState GLBackend::presentation_state()const{const auto&i=*impl_;return {i.completionLimit,i.completionCount,i.completionSubmissions,i.completionWaits,SDL_GL_GetSwapInterval(),i.targetWidth?i.actualSamples:i.samples};}
 const RenderOptions& GLBackend::options()const{return impl_->options;}
 bool GLBackend::reconfigure(const RenderOptions&next){bool reload{};if(!impl_->reconfigure(next,reload))return false;if(reload)release_scene();return true;}
 void GLBackend::purge_model(const Model*model){
@@ -1668,7 +1739,8 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
     i.currentFrame=&f;
     struct PacketScope { Impl& owner; ~PacketScope(){owner.currentFrame=nullptr;} } packetScope{i};
     if(f.world&&!f.hardwareLighting)throw std::runtime_error("Legacy software world-light topology is not implemented by the native OpenGL hardware path");
-    i.admit_frame(f.tripleBufferRaw,f.bonusProfile);i.centroidLighting=centroid_lighting(f);
+    using Clock=std::chrono::steady_clock;const bool timed=i.timings.enabled;const auto c0=timed?Clock::now():Clock::time_point{};
+    i.admit_frame(f.tripleBufferRaw,f.bonusProfile);i.begin_timings();i.centroidLighting=centroid_lighting(f);
     i.configure_sampling(f.mipmapping,f.anisotropy);
     i.targets(m.drawableWidth,m.drawableHeight);
     if(f.door.world)i.prepare_door(f.door.world->mesh);
@@ -1683,7 +1755,7 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
         if(primary){Rect v=primary->viewport;if(v.width<=0||v.height<=0)v={0,0,float(m.width),float(m.height)};i.shadow_pass(f,*primary,float(std::lround(v.width*m.scaleX))/float(std::lround(v.height*m.scaleY)));}
         else{glUseProgram(i.scene);glUniform1i(i.su.shadowMaps,0);}
     }
-    glBindFramebuffer(GL_FRAMEBUFFER,i.composite?i.hdrFbo:i.msaaFbo);
+    i.mark(Impl::GpuTimings::Shadows);glBindFramebuffer(GL_FRAMEBUFFER,i.composite?i.hdrFbo:i.msaaFbo);
     // PBR background views composite through the tone curve; seed clears with its inverse so untouched pixels round-trip.
     auto seed=[&](Color c){return i.options.pbr?inverse_tone_map(c):c;};
     glViewport(0,0,m.drawableWidth,m.drawableHeight);glDisable(GL_SCISSOR_TEST);
@@ -1907,7 +1979,7 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
     };
     // A6 panels/text and view entities are foreground regardless of signed layer.
     for(const auto&camera:f.cameras)if(!camera.foreground&&!camera.portalTarget)draw_camera(draw_camera,camera,false,nullptr);
-    if(i.composite)i.composite_pass(m.drawableWidth,m.drawableHeight);
+    i.mark(Impl::GpuTimings::Views);if(i.composite){i.composite_pass(m.drawableWidth,m.drawableHeight);i.mark(Impl::GpuTimings::Composite);}
     std::size_t cameraIndex=0,uiIndex=0;
     std::size_t cursorIndex=f.ui.size();
     while(cameraIndex<f.cameras.size()||uiIndex<f.ui.size()){
@@ -1928,14 +2000,16 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
     }
     // Source cursor is appended to the completed scene/UI, after every foreground view and video.
     for(;cursorIndex<f.ui.size();++cursorIndex)if(f.ui[cursorIndex].cursorOverlay)draw_ui(f.ui[cursorIndex]);
-    i.post_state();
+    i.mark(Impl::GpuTimings::Ui);i.post_state();
     glBindFramebuffer(GL_READ_FRAMEBUFFER,i.msaaFbo);glBindFramebuffer(GL_DRAW_FRAMEBUFFER,i.resolveFbo);glBlitFramebuffer(0,0,m.drawableWidth,m.drawableHeight,0,0,m.drawableWidth,m.drawableHeight,GL_COLOR_BUFFER_BIT,GL_NEAREST);
     if(f.adjustment.enabled&&(!i.gammaUploaded||i.gamma.gammaRamp!=f.adjustment.gammaRamp)){
         glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,i.gammaTexture);
         glTexSubImage2D(GL_TEXTURE_2D,0,0,0,256,3,GL_RED,GL_UNSIGNED_SHORT,f.adjustment.gammaRamp.data());i.gamma=f.adjustment;i.gammaUploaded=true;
     }
     i.gamma.enabled=f.adjustment.enabled;
-    i.post_draw();SDL_GL_SwapWindow(i.window);i.complete_frame();i.finalFrameValid=true;
+    i.post_draw();i.mark(Impl::GpuTimings::End);const auto c1=timed?Clock::now():c0;i.await_submission();const auto c2=timed?Clock::now():c0;
+    SDL_GL_SwapWindow(i.window);i.complete_frame();i.finalFrameValid=true;
+    if(timed){auto ms=[](auto d){return std::chrono::duration<double,std::milli>(d).count();};auto&t=i.timings;t.cpu[0]+=ms(c2-c1);t.cpu[1]+=ms(c1-c0);t.cpu[2]+=ms(Clock::now()-c2);++t.cpuFrames;}
 }
 void GLBackend::capture(std::string_view path,WindowMetrics m)const{
     auto&i=*impl_;

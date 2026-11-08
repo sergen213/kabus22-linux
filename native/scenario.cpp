@@ -55,6 +55,10 @@ struct Eval {
    if(name=="character")return {false,double(engine.characterLock),{}}; // native character lock: -1 original, 0 Demir, 1 Ebru, 2 Inzar
    // Graphics menu (docs/GRAPHICS_MENU.md): $gfxrow its highlighted row (-1 closed), $fpslimit the live fps_limit (0 original, -1 unlimited), $doors seamless doors on.
    if(name=="gfxrow")return {false,double(engine.graphics_row()),{}};if(name=="fpslimit")return {false,double(engine.fpsLimit),{}};if(name=="doors")return {false,engine.seamlessDoors?1.0:0.0,{}};
+   // $setitem: the main menu settings screen's RENDERING item highlighted; $gfx(KEY): the menu's value of a --graphics key (numbers as
+   // themselves, msaa 1 = off; named values as their index); $samples: the renderer's real MSAA sample count (0 headless).
+   if(name=="setitem")return {false,double(engine.settings_item()),{}};if(name=="samples")return {false,double(engine.presented_samples()),{}};
+   if(name=="gfx"){if(!take("("))fail("expected (");auto key=lower(ident());if(!take(")"))fail("expected )");const int v=engine.graphics_value(key);if(v<0)fail("unknown graphics key "+key);return {false,double(v),{}};}
    // Coop (docs/COOP.md): $coop active, $coop1/$coop2 its characters, $coopmenu 0 off/1 2 PLAYER highlighted/2 select screen, $pick1/$pick2 the select highlight (-1 not joined).
    if(name=="coop")return {false,engine.coop.active?1.0:0.0,{}};if(name=="coop1"||name=="coop2")return {false,double(engine.coop.characters[name=="coop2"]),{}};
    if(name=="coopmenu")return {false,double(engine.coop_menu()),{}};if(name=="pick1"||name=="pick2")return {false,double(engine.coop_pick(name=="pick2")),{}};

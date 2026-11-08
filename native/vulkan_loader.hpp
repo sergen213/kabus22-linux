@@ -103,7 +103,8 @@
     X(vkResetFences) \
     X(vkUnmapMemory) \
     X(vkUpdateDescriptorSets) \
-    X(vkWaitForFences)
+    X(vkWaitForFences) \
+    X(vkWaitSemaphores)
 namespace k22::vk22 {
 namespace api {
 #define K22_DECLARE_VULKAN(name) extern PFN_##name name;

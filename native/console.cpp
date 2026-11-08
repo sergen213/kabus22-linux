@@ -103,11 +103,12 @@ std::string Engine::quicksave(Runtime& runtime){
 // picker (native/save_menu.cpp), GRAPHICS the graphics menu (native/graphics_menu.cpp). Both eat every input while open.
 bool Engine::pause_tick(Runtime& runtime,const Input& in){
  if(graphics_menu_open())return graphics_menu_tick(runtime,in);
+ if(settings_tick(runtime,in))return true;
  const auto first=global("STMP_Devam");
  if(number("STM_Acik")==0||first.kind!=Value::Kind::Object||!state.get(first.bits)||!field(first.bits,"visible")){pauseItem_=PauseItem::None;saveMenu_=false;return false;}
  auto key=[&](std::initializer_list<SDL_Scancode> keys){return std::any_of(keys.begin(),keys.end(),[&](auto k){return bool(in.pressed[k]);});};
  auto pad=[&](SDL_GameControllerButton b){return legacyPad>=0&&legacyPad<Input::Pads&&in.controllerPressed[legacyPad][b];};
- auto bitmap=[&](int item,bool selected){auto list=global("DMIL_SmartMenu");auto* o=list.kind==Value::Kind::Object?state.get(list.bits):nullptr;const auto i=std::size_t(int(number("GA_Dil"))*4+item*2+(selected?0:1));
+ auto bitmap=[&](int item,bool selected){auto list=global("DMIL_SmartMenu");auto* o=list.kind==Value::Kind::Object?state.get(list.bits):nullptr;const auto i=std::size_t(menu_language()*4+item*2+(selected?0:1));
   if(o&&i<o->array.size())state.require(global(item?"STMP_AnaMenu":"STMP_Devam").bits).field("bmap").value=o->array[i].value;}; // STM_Kernel's own BMAP choice
  bool eaten=false;
  if(saveMenu_){save_menu_tick(runtime,in);eaten=true;}
@@ -125,17 +126,19 @@ bool Engine::pause_tick(Runtime& runtime,const Input& in){
   else if(pauseItem_!=PauseItem::None&&key({SDL_SCANCODE_ESCAPE})){pauseItem_=PauseItem::None;return false;} // STM_Kernel closes the menu
   else if(hovered!=PauseItem::None&&((in.mouseDX||in.mouseDY)||click))pauseItem_=hovered;
   if(pauseItem_!=PauseItem::None&&(click||key({SDL_SCANCODE_RETURN,SDL_SCANCODE_KP_ENTER})||pad(SDL_CONTROLLER_BUTTON_A))){
-   eaten=true;if(pauseItem_==PauseItem::Save)save_menu_open(runtime);else open_graphics_menu();
+   eaten=true;if(pauseItem_==PauseItem::Save)save_menu_open(runtime);else open_graphics_menu(GraphicsHost::Pause);
   }
  }
  if(pauseItem_!=PauseItem::None){bitmap(0,false);bitmap(1,false);}
  return eaten;
 }
 void Engine::pause_overlay(){
- pauseItemRects_={};
- const auto first=global("STMP_Devam");
- if(state.profile!=SemanticProfile::CampaignA6||number("STM_Acik")==0||first.kind!=Value::Kind::Object||!state.get(first.bits)||!field(first.bits,"visible"))return;
+ pauseItemRects_={};settingsItemRect_={};
+ if(state.profile!=SemanticProfile::CampaignA6)return;
  if(graphics_menu_open()){graphics_menu_overlay();return;}
+ settings_overlay();
+ const auto first=global("STMP_Devam");
+ if(number("STM_Acik")==0||first.kind!=Value::Kind::Object||!state.get(first.bits)||!field(first.bits,"visible"))return;
  // SAVE one button height above CONTINUE, GRAPHICS one below MAIN MENU, centred on the 172-wide buttons; the atlas capitals are
  // smaller than their lettering (coop_overlay). Every glyph of SAVE and GRAPHICS is in menu_dildenbagimsiz.tga (character.cpp cells).
  // SmartMenuAc puts the menu at the bottom edge, so GRAPHICS usually has no room below MAIN MENU: it then goes one button above
@@ -147,6 +150,48 @@ void Engine::pause_overlay(){
  static constexpr std::array<std::string_view,2> words{"SAVE","GRAPHICS"};
  for(int i=0;i<2;++i){const float width=draw_menu_word(words[i],0,0,scale,1,true);draw_menu_word(words[i],x+86*sx-width/2,ys[i]-16*(scale-sy),scale,1,false,pauseItem_==(i?PauseItem::Graphics:PauseItem::Save));pauseItemRects_[i]={x,ys[i],172*sx,32*sy};}
  if(saveMenu_)save_menu_overlay();
+}
+int Engine::menu_language()const{return int(number(state.globals.contains("DD_Dil")?"DD_Dil":"GA_Dil"));}
+// The original settings screen (AyarlarMenu.wdl AyarlarMenuAc): AYML_Paneller holds GRAPHICS, SOUND, CONTROLS and, with the
+// patch scripts, LANGUAGE, top to bottom; the visible run of them while the screen is open (the original leaves slot 3 at 0).
+std::vector<ObjectId> Engine::settings_panels()const{
+ std::vector<ObjectId> out;const auto list=global("AYML_Paneller");const auto* o=list.kind==Value::Kind::Object?state.get(list.bits):nullptr;if(!o)return out;
+ for(const auto& e:o->array){if(e.value.kind!=Value::Kind::Object||!state.get(e.value.bits)||!state.get(e.value.bits)->alive||field(e.value.bits,"visible")==0)break;out.push_back(e.value.bits);}
+ return out;
+}
+// Settings-screen RENDERING item: the graphics menu at the main menu (the original GRAPHICS item keeps its own GrafikMenu: colour
+// depth, brightness, blood). It sits one button above GRAPHICS like 2 PLAYER above NEW GAME (coop_menu.cpp): Up from GRAPHICS
+// (AYM_Cursor 0) or Down from the last button selects it, that press hidden from AYM_Kernel; Up/Down hands AYM_Cursor back with
+// the kernel's own bitmap choice (DMIL_AyarlarMenu[lang*8+cursor*2], selected even). Escape on it is AYM_Kernel's (back to the
+// main menu). Enter, pad A/START or a click opens the graphics menu over the screen, which stays open under it, so its Escape lands
+// back here with RENDERING still selected.
+bool Engine::settings_tick(Runtime& runtime,const Input& in){
+ const auto panels=settings_panels();
+ if(panels.empty()||!runtime.running(runtime.function("AYM_Kernel"))){settingsItem_=false;return false;}
+ const int count=int(panels.size()),cursor=std::clamp(int(number("AYM_Cursor")),0,count-1);
+ auto key=[&](std::initializer_list<SDL_Scancode> keys){return std::any_of(keys.begin(),keys.end(),[&](auto k){return bool(in.pressed[k]);});};
+ auto pad=[&](SDL_GameControllerButton b){return legacyPad>=0&&legacyPad<Input::Pads&&in.controllerPressed[legacyPad][b];};
+ auto sound=[&](std::string_view name){const auto s=global(name);if(!s.bits)return;ProcessContext context;std::array<Argument,3> args{{{s,{}},{Value::from_double(number("GA_Efekt")),{}},{Value{},{}}}};builtin(runtime,context,"snd_play",args);}; // Kabusdismenu.wdl DM_TusKontrol
+ auto bitmap=[&](int item,bool selected){auto list=global("DMIL_AyarlarMenu");auto* o=list.kind==Value::Kind::Object?state.get(list.bits):nullptr;const auto i=std::size_t(menu_language()*8+item*2+(selected?0:1));
+  if(o&&i<o->array.size())state.require(panels[std::size_t(item)]).field("bmap").value=o->array[i].value;}; // AYM_Kernel's own BMAP choice
+ const bool up=key({SDL_SCANCODE_UP,SDL_SCANCODE_KP_8})||pad(SDL_CONTROLLER_BUTTON_DPAD_UP),down=key({SDL_SCANCODE_DOWN,SDL_SCANCODE_KP_2})||pad(SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+ const auto& r=settingsItemRect_;const bool hover=r.width>0&&in.mouseX>=r.x&&in.mouseX<r.x+r.width&&in.mouseY>=r.y&&in.mouseY<r.y+r.height,click=hover&&in.mousePressed[SDL_BUTTON_LEFT];
+ bool eaten=false;
+ if(!settingsItem_&&((up&&cursor==0)||(down&&cursor==count-1)||(hover&&(in.mouseDX||in.mouseDY))||click)){settingsItem_=true;eaten=up||down;sound("DMS_Yontus");}
+ else if(settingsItem_&&(up||down)){settingsItem_=false;const int to=up?count-1:0;set_global("AYM_Cursor",Value::from_int(to));bitmap(cursor,false);bitmap(to,true);sound("DMS_Yontus");return true;}
+ else if(settingsItem_&&key({SDL_SCANCODE_ESCAPE})){settingsItem_=false;return false;} // AYM_Kernel saves and returns to the main menu
+ if(settingsItem_)bitmap(cursor,false);
+ // DisMenuCerceve.wdl frame: AyarlarMenuAc's CER_Hedef spans the buttons (Cer_hY2-Cer_hY1 = (count*DM_ButtonH+2*Cer_Kenar)*scale); one more on top.
+ set_global("Cer_hY1",Value::from_double(number("Cer_hY2")-((count+1)*32+2*number("Cer_Kenar"))*field(panels[0],"scale_y")));
+ if(settingsItem_&&(click||key({SDL_SCANCODE_RETURN,SDL_SCANCODE_KP_ENTER})||pad(SDL_CONTROLLER_BUTTON_A)||pad(SDL_CONTROLLER_BUTTON_START))){eaten=true;sound("DMS_Enter");open_graphics_menu(GraphicsHost::Settings);}
+ return eaten;
+}
+void Engine::settings_overlay(){
+ const auto panels=settings_panels();if(panels.empty())return;
+ // One button height above GRAPHICS, centred on the 170-wide button; atlas capitals at 1.15x as 2 PLAYER (coop_overlay).
+ const auto top=panels[0];const float sx=std::max(0.1f,float(field(top,"scale_x"))),sy=std::max(0.1f,float(field(top,"scale_y")));
+ const float x=float(field(top,"pos_x")),y=float(field(top,"pos_y"))-32*sy,scale=1.15f*sy,width=draw_menu_word("RENDERING",0,0,scale,1,true);
+ draw_menu_word("RENDERING",x+85*sx-width/2,y-16*(scale-sy),scale,1,false,settingsItem_);settingsItemRect_={x,y,170*sx,32*sy};
 }
 // The original in-game load is Smartmenu "main menu" (Smartmenu.wdl:208-243) -> YukleMenu -> Yukleme_Kontrol. This performs the same
 // teardown without the menu, then hands the slot to Yukleme_Kontrol exactly as YUM_Kernel does (YukleMenu.wdl:241-247).

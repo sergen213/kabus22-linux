@@ -27,7 +27,7 @@ void Engine::coop_tick(Runtime& runtime,const Input& in){
  auto eat=[&]{coopKeys_|=in.keys|in.pressed;for(int p=0;p<Input::Pads;++p)coopPad_[p]|=in.controllerButtons[p]|in.controllerPressed[p];};
  auto sound=[&](std::string_view name){const auto s=global(name);if(!s.bits)return;ProcessContext context;std::array<Argument,3> args{{{s,{}},{Value::from_double(number("GA_Efekt")),{}},{Value{},{}}}};builtin(runtime,context,"snd_play",args);}; // Kabusdismenu.wdl DM_TusKontrol
  auto key=[&](std::initializer_list<SDL_Scancode> keys){return std::any_of(keys.begin(),keys.end(),[&](auto k){return bool(in.pressed[k]);});};
- auto bitmap=[&](int item,bool selected){auto list=global("DMIL_AnaMenu");auto* o=list.kind==Value::Kind::Object?state.get(list.bits):nullptr;const auto i=std::size_t(int(number("GA_Dil"))*10+item*2+(selected?0:1));
+ auto bitmap=[&](int item,bool selected){auto list=global("DMIL_AnaMenu");auto* o=list.kind==Value::Kind::Object?state.get(list.bits):nullptr;const auto i=std::size_t(menu_language()*10+item*2+(selected?0:1));
   if(o&&i<o->array.size())state.require(global(panels[item]).bits).field("bmap").value=o->array[i].value;}; // AM_Kernel's own BMAP choice
  const auto first=global("AMP_YeniOyun");const auto screen=coopScreen_;
  if(screen==CoopScreen::Off&&first.kind==Value::Kind::Object&&state.get(first.bits)&&field(first.bits,"visible")!=0&&runtime.running(runtime.function("AM_Kernel"))){

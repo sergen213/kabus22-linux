@@ -61,8 +61,10 @@ The in-game menu (Escape, `Smartmenu.wdl`: RESUME over MAIN MENU) gets two nativ
 atlas like the main menu's 2 PLAYER item (`native/console.cpp` `pause_tick`/`pause_overlay`): SAVE one button above RESUME and
 GRAPHICS one button below MAIN MENU (GRAPHICS opens the in-game graphics settings). The original menu sits at the bottom edge of
 the screen, so when there is no room below MAIN MENU, GRAPHICS is drawn one button above SAVE instead, where the ring's wrap lands
-anyway. Campaign only: the Bonus game and the main menu have none, and they hide while the menu's own "return to main menu?"
-question is open.
+anyway. Campaign only: the Bonus game has none, and they hide while the menu's own "return to main menu?" question is open. At the
+main menu the same graphics settings are the RENDERING item of the original settings screen (`settings_tick`/`settings_overlay`,
+one button above its GRAPHICS; [GRAPHICS_MENU.md](GRAPHICS_MENU.md)). The bitmaps the native items hand back to the original
+buttons follow the menus' own language index (`GA_Dil`, or `DD_Dil` with the community patch scripts).
 
 - **Mouse:** hovering selects an item, a left click activates it (the original menu has no mouse input; buttons used by the native
   items stay hidden from the scripts until released, so a mouse-bound fire key cannot also press RESUME).

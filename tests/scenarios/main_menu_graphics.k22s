@@ -1,0 +1,78 @@
+# Main-menu graphics (docs/GRAPHICS_MENU.md): the native RENDERING item one button above GRAPHICS on the original settings screen
+# (AyarlarMenu.wdl AYARLAR: GRAPHICS, SOUND, CONTROLS on AYM_Cursor 0-2). Up from GRAPHICS or Down from CONTROLS reaches it; Return
+# opens the graphics menu over the settings screen with no level loaded. Headless (no renderer, no native display) the cursor starts
+# on PRESET; MSAA (row 8) goes 4X -> 2X -> OFF (msaa 1) and stops there. Escape returns to the settings screen with RENDERING still
+# selected; the original keys still work, Escape on RENDERING is AYM_Kernel's (back to the main menu), and New Game starts.
+realtime off
+wait until ParlaklikMenuAcik == 1 || AMP_YeniOyun.visible == 1 timeout 3600
+press-until Return ParlaklikMenuAcik == 0
+wait until AMP_YeniOyun.visible == 1 && AM_Cursor == 0 timeout 600
+frames 30
+press Down
+press Down
+assert AM_Cursor == 2
+press Return
+wait until AYMP_Grafik.visible == 1 && AMP_YeniOyun.visible == 0 timeout 120
+frames 10
+assert AYM_Cursor == 0 && $setitem == 0 && $gfxrow == -1
+# Up from GRAPHICS reaches RENDERING (the original cursor stays on 0); Down returns; Up, Up wraps to CONTROLS; Down from CONTROLS reaches it.
+press Up
+assert $setitem == 1 && AYM_Cursor == 0
+press Down
+assert $setitem == 0 && AYM_Cursor == 0
+press Up
+press Up
+assert $setitem == 0 && AYM_Cursor == 2
+press Down
+assert $setitem == 1 && AYM_Cursor == 2
+press Down
+assert $setitem == 0 && AYM_Cursor == 0
+# The original Down sequence is unchanged: GRAPHICS -> SOUND.
+press Down
+assert AYM_Cursor == 1
+press Up
+press Up
+assert $setitem == 1
+press Return
+frames 2
+assert $gfxrow == 1 && AYMP_Grafik.visible == 1 && $gfx(msaa) == 4
+press-until Down $gfxrow == 8 timeout 30
+press Left
+frames 2
+assert $gfx(msaa) == 2
+press Left
+frames 2
+assert $gfx(msaa) == 1
+press Left
+frames 2
+assert $gfx(msaa) == 1 && $gfxrow == 8
+press Right
+frames 2
+assert $gfx(msaa) == 2
+press Left
+frames 2
+assert $gfx(msaa) == 1
+# Every press is the menu's: the settings screen stays open behind it, its cursor unchanged.
+assert AYMP_Grafik.visible == 1 && AYM_Cursor == 0 && AMP_YeniOyun.visible == 0
+press Escape
+frames 30
+assert $gfxrow == -1 && $setitem == 1 && AYMP_Grafik.visible == 1 && $gfx(msaa) == 1
+# Back to the original buttons, then Escape on RENDERING returns to the main menu as AYM_Kernel does.
+press Down
+assert $setitem == 0 && AYM_Cursor == 0
+press Up
+assert $setitem == 1
+press Escape
+wait until AMP_YeniOyun.visible == 1 && AYMP_Grafik.visible == 0 timeout 120
+frames 10
+assert $setitem == 0 && $gfxrow == -1 && $gfx(msaa) == 1
+# The main menu still works: New Game starts the campaign.
+assert AM_Cursor == 0 && $coopmenu == 0
+press Return
+wait until YMP_Normal.visible == 1 timeout 120
+press Return
+frames 300
+press Space
+wait until oyun_ilk_basladi == 1 timeout 600
+wait until $level == "start4.wmb" timeout 7200
+assert $gfx(msaa) == 1

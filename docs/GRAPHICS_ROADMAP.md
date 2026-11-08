@@ -132,7 +132,9 @@ world camera; depth-based effects apply only to it.
   cube shadow map under `shadows=shadowmap`; unshadowed under `shadows=rt` (no depth maps are rendered
   just for fog). No original level has fog: all 970 WMBs have fog range 0..0 and no script sets
   `fog_start`/`fog_end`. Original content therefore always gets the haze path (checked on the Start4 test
-  view, light shaft around the script light, and saves 8 and 26).
+  view, light shaft around the script light, and saves 8 and 26). Both backends march at half resolution
+  (alpha keeps each sample's linear depth) and add the result through a depth-aware upsample, so fog does not
+  bleed across silhouettes; OpenGL marched at full resolution up to 0.4.15 ([OpenGL performance](#opengl-performance)).
 - **Composite** (`pbr`, `bloom`, `taa`, `fxaa`, `sharpen`): background views render into an RGBA16F target. With
   PBR off the values stay LDR and the tone curve is identity (bloom/TAA/FXAA work in LDR). Bloom: soft
   threshold 0.7 (knee 0.2), 5-level down/up chain, strength 0.15. On saves 1 and 21 (dark streets) the
@@ -176,8 +178,9 @@ Opt-in (`--graphics frame_generation=on`, launcher Graphics → custom options; 
 or RT, any quality mode including `native`; otherwise `render_policy::admit_features` turns it off with a notice. A device
 without compute subgroup arithmetic, formatless storage-image reads or RGBA16F storage keeps FSR and drops frame generation
 with a notice. The SDK's optical-flow and frame-interpolation components (vendored with the upscaler,
-`third_party/FidelityFX-SDK/KABUS-PROVENANCE.txt`, patches 6 and 7) run in the frame's command buffer; the SDK's Win32-only
-frame-interpolation swapchain is not used. Ported from IKV (`src/fsr_vk.cpp`, `renderer_vk.cpp` present thread).
+`third_party/FidelityFX-SDK/KABUS-PROVENANCE.txt`, patches 6, 7 and 9) run in the frame's command buffer; the SDK's Win32-only
+frame-interpolation swapchain is not used. Contexts ported from IKV (`src/fsr_vk.cpp`); presentation and pacing as
+OpenUnderworld and ETI Yami (below).
 
 - **Inputs:** interpolation reuses the upscaler's dilated depth, dilated motion and reconstructed previous depth of the
   same frame and interpolates the HUD-less upscaled view (`fx.upscaled`, RGBA16F, display size, before the UI/foreground
@@ -193,17 +196,26 @@ frame-interpolation swapchain is not used. Ported from IKV (`src/fsr_vk.cpp`, `r
   (ray-tracing noise) still blend. Geometry stays interpolated: the sample is still placed by the game motion.
 - **Resets:** after an FSR history reset (level load, scene release, resize, a frame without a primary 3D view) only the
   rendered frame is presented; interpolation still runs to keep its previous-frame copy.
-- **Presentation and pacing:** a present thread owns the swapchain while frame generation is on (every queue submit,
-  present and wait goes through one mutex). Per rendered frame it waits for the frame's fence, acquires and blits the
-  generated frame and presents it, sleeps half the measured rendered-frame interval minus a 2 ms compositor lead
-  (`K22_FG_PACING_LEAD_MS`, 0-20, calibrates it), then presents the rendered frame. Presents never wait for display; the
-  present mode is unchanged (FIFO with vsync, so a full swapchain back-pressures the renderer; immediate with
-  `fps_limit=unlimited`). Before a frame reuses its slot's images the render thread waits until the present job two
-  frames back is done (`drain_presents(1)`): about half a rendered frame of extra latency.
+- **Presentation and pacing:** the frame's own command buffer acquires two swapchain images and blits the generated and the
+  rendered frame into them (`State::finish`; the swapchain gets `minImageCount + 3` images while frame generation is on,
+  as the previous frame's pair may still wait for presentation) and signals a timeline semaphore; a present thread only
+  presents them (every queue submit, present and wait goes through one mutex). Per rendered frame it waits for the
+  frame's timeline value, presents the generated image no earlier than half an interval after the previous rendered one,
+  then the rendered image half an interval later; it never sleeps while a further frame is queued. The interval is an EMA
+  of the render thread's period between submissions without its wait on the present thread (GPU, FIFO acquire and
+  `fps_limit` waits count; counting the present-thread wait locked the pacing at whatever it once was). Same scheme as
+  OpenUnderworld (`src/render/vk/VkRenderer.cpp` `presentLoop`) and ETI Yami (`native/vulkan_renderer.cpp`
+  `present_loop`). Before 0.4.16 the IKV-derived thread acquired and blitted after the fence itself: on the single
+  graphics queue those blits ran behind the next frame's rendering, so a GPU-bound frame reached the display together with
+  the next generated one, and the 2 ms "compositor lead" (`K22_FG_PACING_LEAD_MS`, removed) split every interval unevenly
+  (6/10 ms at 60 rendered fps). The present mode is unchanged (FIFO with vsync: a full swapchain back-pressures the render
+  thread's acquire; immediate/mailbox without). Before a frame reuses its slot the render thread waits for the present job
+  two frames back (`drain_presents(1)`): about half a rendered frame of extra latency.
 - **`fps_limit`:** a numeric limit caps the presented rate, so rendering is paced at half of it (240 → 120 rendered);
   `original` keeps the script's `fps_max` pacing of the game ticks and presents twice that; `unlimited` is unchanged.
 - **Log:** `kabus22: frame generation presents=600 generated=… real=… presentedFps=… renderedFps=… presentIntervalMs
-  p50=… p99=… renderedFrameMs=…` every 600 presents (present-call times).
+  p50=… p99=… generatedToRealMs=… realToGeneratedMs=… renderedFrameMs=…` every 600 presents (present-call times; the two
+  medians are equal when the cadence is even). Overlays that hook `vkQueuePresentKHR` (MangoHud) count both presents.
 - **Captures:** `Renderer::capture(F.ppm)` (scenario `capture`, `--capture`) also writes `F-fg-generated.ppm` (the frame
   presented just before F, when this frame produced one) and `F-fg-previous.ppm` (the previous rendered frame).
 - **Checks:** `k22-render-check --vulkan[-rt]` (`frame_generation_checks`): a solid actor sliding at constant speed under a
@@ -248,6 +260,38 @@ off).
 - Cost on the RX 7900 XTX (level5 loaded view, `kayit0.sav`, 2560x1377, immediate present, 500 frames, two runs): user RT
   settings 12.00/12.12 ms before, 12.14/12.17 ms with both upgrades (12.07/12.12 smoothing only); Vulkan raster with
   shadow maps/SSAO/FXAA/TAA/bloom/fog/PBR 5.54/5.56 ms before, 5.60/5.60 ms with both. Within run-to-run noise.
+
+## OpenGL performance
+
+Measured on the RX 7900 XTX (radeonsi, Mesa 26.2), 3840x2160 borderless in a private `kwin_wayland --virtual`,
+`fps_limit=unlimited` (vsync off), 600 steady frames after a save load (`realtime off`): kayit10 (kizic2 café interior)
+and kayit1 (level 7 street). "User" = `pbr=1 anisotropy=16 bloom=1 ssao=1 fxaa=1 volumetric_fog=1 shadows=shadowmap`
+(the Vulkan-only keys of a launcher custom set are dropped on OpenGL). Before and after binaries ran interleaved in one
+session; frame ms is p50/p99 of `K22_FRAME_TIMING`.
+
+| View | Settings | OpenGL 0.4.15 | OpenGL now | Vulkan raster |
+| --- | --- | ---: | ---: | ---: |
+| kizic2 | original | 1.31/3.70 | 1.33/3.75 | 1.08/1.27 |
+| kizic2 | user, MSAA 1 | 13.7/18.6 (70 fps) | 6.6/9.5 (155 fps) | 3.8/8.6 |
+| kizic2, switched from Vulkan in the graphics menu | user, MSAA 1 | 13.6/19.2 | 6.7/11.4 | - |
+| level 7 street | original | 23.0/34.2 | 22.6/31.8 | 22.1/30.2 |
+| level 7 street | user, MSAA 1 | 24.7/33.0 | 24.1/36.0 | 26.1/34.5 |
+
+`K22_GL_TIMINGS=1` prints GPU time per pass (timestamp queries read four frames late) and the CPU completion-fence
+wait, recording and swap times, averaged over 300 frames. What it found and what changed:
+- **Full-resolution volumetric fog** was 70-80% of the GPU frame (kizic2 user: SSAO+fog 8.8 of 10.2 ms; street:
+  16.4 of 20.6 ms). It now marches at half resolution with the Vulkan depth-aware upsample: fog 1.9 ms (kizic2),
+  5.7-6.9 ms (street, many lights in range); GPU frame 10.2 -> 4.5 ms and 20.6 -> 12-13 ms. Captures differ by at
+  most 0.25% of pixels by more than 8/255 (fog noise).
+- **MSAA 1 rendered 2x MSAA**: `glRenderbufferStorageMultisample(1)` means "at least 1" and radeonsi gives 2 samples.
+  Single-sample targets now request 0, and `presentation_state().samples` reports the count the driver allocated.
+- The completion limit bounds submissions, not recording (as the Vulkan slots): the fence of the previous frame is
+  waited on just before the swap instead of before recording.
+- VAOs keep their default attribute pointers; only a mutable pose (`bind_override`) repoints them, and the next draw
+  restores them, instead of six `glVertexAttribPointer` calls per draw. Captures are byte-identical.
+- A renderer recreated by the in-game menu runs as fast as a fresh OpenGL launch (no per-frame re-uploads).
+- The street is bound by the engine tick (19-20 ms of WDL runtime CPU: `Runtime::evaluate` and case-insensitive
+  `Fields` string lookups, 88 live processes) on both backends, not by rendering; GPU frame time there is hidden.
 
 ## Live changes (`Renderer::reconfigure`)
 

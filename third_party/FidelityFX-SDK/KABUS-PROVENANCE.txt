@@ -60,6 +60,13 @@ Local patches (each marked "Kabus22 local patch (shared with IKV)" in the source
      The VK backend advances its view/constant-ring frame slot on every fpUnregisterResources, i.e. once per dispatch;
      Kabus22 runs GenerateReactiveMask and Dispatch each frame, so 4 slots destroyed the previous frame's dynamic image
      views while that frame was still executing (VUID-vkDestroyImageView-imageView-01026, ~1 per frame).
+  9. (Kabus22 only, marked "Kabus22 local patch 9"; after OpenUnderworld's third_party/fidelityfx-sdk "ou patch 7")
+     sdk/src/backends/vk/ffx_vk.cpp, CreateBackendContextVK: the global descriptor pool is sized per type as maxSets x
+     what one set can hold (FFX_MAX_SAMPLERS, FFX_MAX_NUM_SRVS, FFX_MAX_NUM_UAVS, FFX_MAX_NUM_CONST_BUFFERS, SRVs + UAVs for
+     storage buffers) instead of maxSets x FFX_MAX_RESOURCE_COUNT (512) for each of six types (SAMPLER listed twice).
+     RADV places every descriptor pool in one 4 GiB 32-bit address window; with patch 8 the upstream sizes (~1.4 GiB
+     upscaler + ~2.9 GiB frame generation) no longer fit once a second set of contexts exists and frame generation failed
+     with VK_ERROR_OUT_OF_DEVICE_MEMORY (OpenUnderworld, second scene load). Patch 5's comment now covers 5 entries.
 
 Patched files: unmodified upstream sha256 -> Kabus22 sha256
   sdk/include/FidelityFX/gpu/frameinterpolation/ffx_frameinterpolation.h
@@ -73,7 +80,7 @@ Patched files: unmodified upstream sha256 -> Kabus22 sha256
     kabus22  395f22227f6a59b254134b5f1c68e55c250956acb92be70ee476737e08e33890
   sdk/src/backends/vk/ffx_vk.cpp
     upstream 9fa430949184fadb357e6949d7564cf0f8e4653ead683a99755a6f15c4a76589
-    kabus22  33201106c876d01fc86a636f4b2a008d5d901a60a755651b7c1dd7b3317a5aec
+    kabus22  a31a33791d3d6eec1daada2be5841ddb50adf635ec7435dfdb50c56aa11830ff
   sdk/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp
     upstream 0b1f1227535971a818c6367f1c27f115db682aea4371fa0c15e8dbd3b0ba5764
     kabus22  2d40ba406ec223f83d9a1774313584b27f4e898b28a29bba01ff5b4396aa8b1d
