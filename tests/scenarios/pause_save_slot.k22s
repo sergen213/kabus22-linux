@@ -1,0 +1,68 @@
+# requires: saves
+# Pause-menu slot picker (docs/CONSOLE.md "Save from the in-game menu"): overwrite an existing older slot in place. The original index
+# has 27 saves (Aktif_SaveNo 27): picker row 0 is the new save, row 1 slot 0 (01, Ofis), row 2 slot 1 (02, Cami).
+# Row 2, Return asks for confirmation, Escape backs out without writing; row 1, Return, Return overwrites kayit0.sav: Aktif_SaveNo and
+# SLG_KayitSayisi stay, `load 0` then restores kizic2 at the saved spot, `load 1` still gives the untouched Cami save.
+# Demir, kizic2 (level 37), kayit10.sav.
+realtime off
+load-save 10
+wait until LY_AktifLevelID == 37 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+wait until oyun_ilk_basladi == 0 timeout 600
+store saves aktif_kayit_sayisi
+store slot Aktif_SaveNo
+store count SLG_KayitSayisi
+store x player.x
+store y player.y
+press Escape
+wait until STM_Acik == 1 && freeze_mode == 1 timeout 120
+press Up
+frames 2
+press Return
+frames 2
+assert STM_Acik == 1 && STM_Cursor == 0 && Aktif_SaveNo == @slot
+press Down
+frames 2
+press Down
+frames 2
+press Return
+frames 2
+assert aktif_kayit_sayisi == @saves && Aktif_SaveNo == @slot
+# Escape from the confirmation keeps the old save and returns to the list.
+press Escape
+frames 2
+assert aktif_kayit_sayisi == @saves && Aktif_SaveNo == @slot && SLG_KayitSayisi == @count && STM_Acik == 1
+press Up
+frames 2
+press Return
+frames 2
+assert aktif_kayit_sayisi == @saves && STM_Acik == 1
+press Return
+frames 2
+assert aktif_kayit_sayisi == @saves + 1
+assert Aktif_SaveNo == @slot && SLG_KayitSayisi == @count
+assert STM_Acik == 1 && freeze_mode == 1
+# The menu reopened with SAVE selected: Down gives CONTINUE back; Return continues.
+press Down
+frames 2
+assert STM_Cursor == 0 && STM_Acik == 1
+press Return
+wait until STM_Acik == 0 && freeze_mode == 0 timeout 120
+walk-to -420 25 12 timeout 1200
+assert player.x < @x - 100
+press F10
+type load 0
+press Return
+press F10
+wait until LY_AktifLevelID == 0 timeout 60
+wait until LY_AktifLevelID == 37 && level_yuklendi_ok == 1 && oyuncu_pasif == 0 timeout 3600
+frames 2
+assert player.x > @x - 1 && player.x < @x + 1
+assert player.y > @y - 1 && player.y < @y + 1
+assert freeze_mode == 0 && STM_Acik == 0 && oyuncu_pasif == 0
+press F10
+type load 1
+press Return
+press F10
+wait until LY_AktifLevelID == 0 timeout 60
+wait until LY_AktifLevelID != 0 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 3600
+assert LY_AktifLevelID != 37

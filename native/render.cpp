@@ -42,6 +42,7 @@ struct Renderer::Impl {
             if(!window)throw std::runtime_error(SDL_GetError());
             if(options.backend==RendererBackend::OpenGL)gl=std::make_unique<GLBackend>(window,options);
             else vk=std::make_unique<VulkanBackend>(window,options);
+            sync();
             if(FT_Init_FreeType(&freetype))throw std::runtime_error("FreeType initialization failed");if(!FcInit())throw std::runtime_error("Fontconfig initialization failed");
             counter=SDL_GetPerformanceCounter();
             for(int device=0;device<SDL_NumJoysticks();++device)open_joystick(device);
@@ -74,12 +75,25 @@ struct Renderer::Impl {
     ~Impl(){destroy();}
     void drain(){if(gl)gl->drain();else vk->drain();}
     void invalidate(){if(gl)gl->invalidate(options.mode);else vk->invalidate();}
+    // Window state (size/mode/title/hidden) is owned here; the rest mirrors the backend's admitted, clamped copy.
+    void sync(){const auto&b=gl?gl->options():vk->options();options.samples=b.samples;options.anisotropy=b.anisotropy;options.vsync=b.vsync;options.pbr=b.pbr;options.forceAnisotropy=b.forceAnisotropy;options.packs=b.packs;options.features=b.features;if(vk)options.rayTracing=b.rayTracing;}
 };
 Renderer::Renderer(const RenderOptions&o):impl_(std::make_unique<Impl>(o)){set_mode(o.width,o.height,o.mode);}
 Renderer::~Renderer()=default;
 WindowMetrics Renderer::metrics()const{WindowMetrics m;SDL_GetWindowSize(impl_->window,&m.width,&m.height);if(impl_->gl)SDL_GL_GetDrawableSize(impl_->window,&m.drawableWidth,&m.drawableHeight);else SDL_Vulkan_GetDrawableSize(impl_->window,&m.drawableWidth,&m.drawableHeight);m.scaleX=m.width?float(m.drawableWidth)/m.width:1;m.scaleY=m.height?float(m.drawableHeight)/m.height:1;return m;}
 void Renderer::set_mode(int w,int h,WindowMode mode){if(w<1||h<1)throw std::runtime_error("Window resolution must be positive");auto&i=*impl_;i.drain();if(SDL_SetWindowFullscreen(i.window,0))throw std::runtime_error(SDL_GetError());SDL_SetWindowBordered(i.window,mode==WindowMode::Borderless?SDL_FALSE:SDL_TRUE);SDL_SetWindowSize(i.window,w,h);if(mode==WindowMode::Fullscreen){SDL_DisplayMode display{};display.w=w;display.h=h;if(SDL_SetWindowDisplayMode(i.window,&display)||SDL_SetWindowFullscreen(i.window,SDL_WINDOW_FULLSCREEN))throw std::runtime_error(SDL_GetError());}else if(mode==WindowMode::Borderless){if(SDL_SetWindowFullscreen(i.window,SDL_WINDOW_FULLSCREEN_DESKTOP))throw std::runtime_error(SDL_GetError());}i.options.width=w;i.options.height=h;i.options.mode=mode;i.invalidate();}
-void Renderer::set_title(std::string_view title){std::string s(title);SDL_SetWindowTitle(impl_->window,s.c_str());}
+const RenderOptions& Renderer::options()const{return impl_->options;}
+bool Renderer::reconfigure(const RenderOptions& requested){
+    auto&i=*impl_;RenderOptions next=requested;
+    next.width=i.options.width;next.height=i.options.height;next.mode=i.options.mode;next.title=i.options.title;next.hidden=i.options.hidden;
+    if(next.backend!=i.options.backend||(i.vk&&next.rayTracing!=i.options.rayTracing))return false; // another device/context
+    if(i.gl)next.rayTracing=i.options.rayTracing;
+    std::vector<std::string> notices;next.features=admit_features(next.features,i.gl?"opengl":next.rayTracing?"vulkan-rt":"vulkan-raster",notices);
+    if(!(i.gl?i.gl->reconfigure(next):i.vk->reconfigure(next)))return false;
+    for(auto&n:notices)std::cerr<<"kabus22: graphics: "<<n<<'\n';
+    i.sync();return true;
+}
+void Renderer::set_title(std::string_view title){std::string s(title);SDL_SetWindowTitle(impl_->window,s.c_str());impl_->options.title=std::move(s);}
 void Renderer::set_position(int x,int y){SDL_SetWindowPosition(impl_->window,x,y);}
 void Renderer::set_mouse_mode(bool visible,bool relative){SDL_ShowCursor(visible?SDL_ENABLE:SDL_DISABLE);if(SDL_SetRelativeMouseMode(relative?SDL_TRUE:SDL_FALSE))throw std::runtime_error(SDL_GetError());}
 void Renderer::rumble(int pad,float strength,std::uint32_t milliseconds){if(pad>=0&&pad<Input::Pads&&impl_->controllers[pad]){auto level=Uint16(std::clamp(strength,0.f,1.f)*65535);SDL_GameControllerRumble(impl_->controllers[pad],level,level,milliseconds);}}

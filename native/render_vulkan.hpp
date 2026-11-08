@@ -23,6 +23,8 @@ public:
     int shader_version() const;
     std::string description() const;
     PresentationState presentation_state() const;
+    const RenderOptions& options() const;
+    bool reconfigure(const RenderOptions&); // Renderer::reconfigure contract, `next` already admitted for this backend.
 private:
     std::unique_ptr<State> state_;
 };
@@ -66,6 +68,9 @@ struct VulkanBackend::State {
     VkQueue queue{}; std::uint32_t queueFamily{}; bool rayEnabled{};
     std::mutex queueMutex; // every queue submit/present/wait: the frame-generation present thread shares the queue.
     bool bufferAddressEnabled{},swapDirty{};
+    // Device-level capabilities fixed at creation (reconfigure clamps or refuses against them): MSAA counts usable by
+    // every target, tessellationShader supported / enabled on the device, frame generation found unsupported.
+    VkSampleCountFlags sampleSupport{VK_SAMPLE_COUNT_1_BIT}; bool tessellationSupported{},tessellationEnabled{},generationUnsupported{};
     VkSwapchainKHR swapchain{}; VkFormat swapFormat{}; VkPresentModeKHR presentMode{VK_PRESENT_MODE_FIFO_KHR};
     // extent: display (swapchain, UI); render: background views, their effects and RT signals (FSR input size, else extent).
     VkExtent2D extent{},render{}; std::vector<VkImage> swapImages; std::vector<VkImageLayout> swapLayouts;
@@ -99,7 +104,7 @@ struct VulkanBackend::State {
     void upload(vk22::Image&,std::span<const std::byte>,std::span<const VkBufferImageCopy>,bool mipmaps=false);
     VkSampler sampler(bool linear,bool clamp,double mipmapping=0,float anisotropy=1);
     VkShaderModule shader(std::span<const std::uint32_t>);
-    void begin(WindowMetrics,std::int32_t,bool); void finish(); void drain(); void invalidate();
+    void begin(WindowMetrics,std::int32_t,bool); void finish(); void drain(); void invalidate(); bool reconfigure(RenderOptions);
     void ensure_targets(WindowMetrics); void ensure_auxiliary(vk22::Target&,VkExtent2D);
     void immediate(const std::function<void(VkCommandBuffer)>&);
     void readback(std::string_view,WindowMetrics);
@@ -109,6 +114,7 @@ std::unique_ptr<Raster,RasterDelete> raster_create(VulkanBackend::State&);
 void raster_destroy(Raster*);
 void raster_draw(Raster&,const RenderFrame&,WindowMetrics);
 void raster_release(Raster&,std::span<const Model* const> keep={}); void raster_purge_model(Raster&,const Model*); void raster_purge_image(Raster&,const k22::Image*);
+void raster_reconfigure(Raster&); // device idle, State::options already replaced: drop pipelines, effect images and temporal history
 int raster_shader_version(const Raster&);
 std::unique_ptr<RayTracing,RayDelete> rt_create(VulkanBackend::State&);
 void rt_destroy(RayTracing*);

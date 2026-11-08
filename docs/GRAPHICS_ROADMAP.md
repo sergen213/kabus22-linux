@@ -249,6 +249,23 @@ off).
   settings 12.00/12.12 ms before, 12.14/12.17 ms with both upgrades (12.07/12.12 smoothing only); Vulkan raster with
   shadow maps/SSAO/FXAA/TAA/bloom/fog/PBR 5.54/5.56 ms before, 5.60/5.60 ms with both. Within run-to-run noise.
 
+## Live changes (`Renderer::reconfigure`)
+
+`Renderer::reconfigure(next)` admits `next` for the running backend (`render_policy::admit_features`) and either applies
+every difference from the next draw or returns false having changed nothing; the caller then builds a new `Renderer`.
+Window size/mode/title stay on `set_mode`/`set_title`. `Renderer::options()` reports the settings in effect after backend
+clamps (MSAA count, anisotropy limit, dropped tessellation/frame generation).
+
+| Backend | Live | Needs a new renderer |
+| --- | --- | --- |
+| OpenGL | vsync, anisotropy (+force), MSAA, texture packs, `pbr`, bloom, FXAA, SSAO, fog (effect programs build on first enable) | backend, `shadows` original↔shadowmap (`K22_SHADOW_MAPS` is compiled into the scene program) |
+| Vulkan raster/RT | vsync, anisotropy (+force), MSAA, texture packs, `pbr`, every effect toggle, `shadows`, `gi`/`reflections`/`denoise` (RT signal pipelines build on first enable), `fsr` level between non-off modes, `smooth_normals`, `texture_upscale`, `tessellation` off (and back on) when the device was created with it | backend, raster↔RT, `fsr` off↔on (device features), `frame_generation` on↔off, `tessellation` on when the device was created without it |
+
+A Vulkan change drains every frame (and the frame-generation present thread) and idles the queue, then drops the frame
+targets, the FSR context, effect images and pipelines, which rebuild lazily; TAA, FSR, RT-denoiser and frame-generation
+history restart so the previous look does not smear into the new one. Changes that alter uploads (packs, `pbr`, smoothing,
+tessellation, upscaling) release the scene's GPU meshes, poses and textures for re-upload, as a level load does.
+
 ## Not implemented
 
 A prefiltered sky cubemap for IBL, PBR in ray-traced reflection hits, mirrored-UV bitangent signs, TAA on

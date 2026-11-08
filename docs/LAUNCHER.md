@@ -33,3 +33,5 @@ Bonus exposes its five source-consumed settings: authored resolution, shader lev
 ## Where settings are stored
 
 Launcher choices live in `${XDG_CONFIG_HOME:-$HOME/.config}/kabus22/launcher.ini`. Game settings use the engine's existing save root, `${XDG_DATA_HOME:-$HOME/.local/share}/kabus22`, including private Campaign/Bonus records; original installed media and source defaults remain unchanged. Use private XDG directories for experiments.
+
+The in-game **GRAPHICS** menu (pause menu, [GRAPHICS_MENU.md](GRAPHICS_MENU.md)) writes its changes into the same `launcher.ini`: `[Launcher] renderer`, `preset`, `window` and `resolution`, and the `[Graphics]` keys (`fps_limit` and `seamless_doors` under every preset, the other keys under Custom). Every other line, section and comment is kept as it was, and it takes the launcher's settings lock. While the game runs the launcher's settings are locked; when the game exits the launcher reloads the file, so the Rendering tab shows what was chosen in game and the next Apply or Play does not undo it.

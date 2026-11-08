@@ -275,6 +275,10 @@
 !/native/check_physics.cpp
 !/native/check_render.cpp
 !/native/console.cpp
+!/native/save_menu.cpp
+!/native/graphics_menu.cpp
+!/native/launcher_config.cpp
+!/native/launcher_config.hpp
 !/native/embed_spirv.py
 !/native/engine.cpp
 !/native/engine.hpp
@@ -580,6 +584,7 @@
 !/docs/GAMEPLAY_SYSTEMS.md
 !/docs/GAMEPLAY_TESTING.md
 !/docs/GRAPHICS_ROADMAP.md
+!/docs/GRAPHICS_MENU.md
 !/docs/INSTALLER.md
 !/docs/KNOWN_ISSUES.md
 !/docs/MODDING.md

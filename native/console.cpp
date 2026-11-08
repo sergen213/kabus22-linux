@@ -69,51 +69,84 @@ void Engine::read_saved_position(const std::filesystem::path& slot){
 }
 // YukleMenu.wdl LV_LevelKaydeta: SLG_LevelKaydet(Aktif_SaveNo,label) -> YD_OyunuKaydet -> SLG_Kaydet, the original slot writer and
 // load-menu index, with a native label instead of a save-point name (SDN_isim_dizi). save_tga's aktif_kayit_sayisi count is kept.
-std::string Engine::quicksave(Runtime& runtime){
+// slot -1: the ring's next slot (Aktif_SaveNo), exactly the original path. Another slot overwrites that index entry in place:
+// SLG_LevelKaydet(N) rewrites label N (after its SLG_Yukle reloads Aktif_SaveNo/SLG_KayitSayisi from kysd.sav), YD_OyunuKaydet
+// names the file "kayit"+Aktif_SaveNo (Yeni_Oyun_Deger.wdl:1554) so Aktif_SaveNo is N for it, and SLG_Kaydet's own increments
+// (YukleMenu.wdl:123-126) then restore next/count from next-1/count-1 (next 0: -1+1 = 0; count stays <= SLG_MaxKayit 99).
+std::string Engine::save_to_slot(Runtime& runtime,int slot,std::string_view label){
  if(auto why=gameplay_blocked(runtime);!why.empty())return "Cannot save now: "+why;
- const int slot=int(number("Aktif_SaveNo"));
  set_global("aktif_kayit_sayisi",Value::from_int(std::min(255,int(number("aktif_kayit_sayisi"))+1)));
- // Labels are 18 cp1254 characters like the SDN_* save-point names (dil_ceviri_*.wdl); Turkish only with the Turkish script set.
- std::array<Argument,2> args{{{global("Aktif_SaveNo"),{}},{new_string(state.compilerMacros.contains("defdil_tr")?"H\xFDzl\xFD Kay\xFDt       ":"Quicksave         "),{}}}};
+ std::array<Argument,2> args{{{slot<0?global("Aktif_SaveNo"):Value::from_int(slot),{}},{new_string(std::string(label)),{}}}};
  bool saved=false;quickSaving=true;
- try{runtime.start("SLG_LevelKaydet",args);saved=bool(runtime.start("YD_OyunuKaydet"));if(saved)runtime.start("SLG_Kaydet");}catch(...){quickSaving=false;throw;}
+ try{
+  runtime.start("SLG_LevelKaydet",args);
+  const int next=int(number("Aktif_SaveNo")),count=int(number("SLG_KayitSayisi"));const bool overwrite=slot>=0&&slot!=next;
+  if(overwrite&&slot>=count){quickSaving=false;return "Save failed: slot "+std::to_string(slot)+" is no longer in the save list";}
+  if(overwrite)set_global("Aktif_SaveNo",Value::from_int(slot));
+  saved=bool(runtime.start("YD_OyunuKaydet"));
+  if(overwrite){set_global("Aktif_SaveNo",Value::from_int(saved?next-1:next));if(saved)set_global("SLG_KayitSayisi",Value::from_int(count-1));}
+  if(saved)runtime.start("SLG_Kaydet");
+ }catch(...){quickSaving=false;throw;}
  quickSaving=false;
- return saved?"Game saved (slot "+std::to_string(slot)+")":"Save failed";
+ return saved?std::string{}:"Save failed";
 }
-// Pause-menu SAVE item. Smartmenu.wdl has CONTINUE (STM_Cursor 0) over MAIN MENU (1), toggled by Up/Down; SAVE sits one button
-// above CONTINUE. Up (arrow, keypad 8, d-pad) on CONTINUE or Down on MAIN MENU selects it, and that press is hidden from the scripts;
-// Up/Down from SAVE goes back to MAIN MENU/CONTINUE. Hovering selects it; a click, Enter or pad A saves. The menu closes for the save
-// (quicksave refuses freeze_mode, and the slot then records the game rather than the menu) and reopens with SAVE still selected.
+std::string Engine::quicksave(Runtime& runtime){
+ const int slot=int(number("Aktif_SaveNo"));
+ // Labels are 18 cp1254 characters like the SDN_* save-point names (dil_ceviri_*.wdl); Turkish only with the Turkish script set.
+ auto error=save_to_slot(runtime,-1,state.compilerMacros.contains("defdil_tr")?"H\xFDzl\xFD Kay\xFDt       ":"Quicksave         ");
+ return error.empty()?"Game saved (slot "+std::to_string(slot)+")":error;
+}
+// Pause-menu native items. Smartmenu.wdl has CONTINUE (STM_Cursor 0) over MAIN MENU (1), toggled by Up/Down; SAVE sits one button
+// above CONTINUE and GRAPHICS one below MAIN MENU, a ring SAVE, CONTINUE, MAIN MENU, GRAPHICS. Up (arrow, keypad 8, d-pad) on CONTINUE
+// selects SAVE, Down on MAIN MENU selects GRAPHICS, and that press is hidden from the scripts; leaving a native item hands STM_Cursor
+// back with STM_Kernel's own bitmap choice. Hovering selects an item; a click, Enter or pad A activates it: SAVE opens the slot
+// picker (native/save_menu.cpp), GRAPHICS the graphics menu (native/graphics_menu.cpp). Both eat every input while open.
 bool Engine::pause_tick(Runtime& runtime,const Input& in){
+ if(graphics_menu_open())return graphics_menu_tick(runtime,in);
  const auto first=global("STMP_Devam");
- if(number("STM_Acik")==0||first.kind!=Value::Kind::Object||!state.get(first.bits)||!field(first.bits,"visible")){pauseItem_=false;return false;}
+ if(number("STM_Acik")==0||first.kind!=Value::Kind::Object||!state.get(first.bits)||!field(first.bits,"visible")){pauseItem_=PauseItem::None;saveMenu_=false;return false;}
  auto key=[&](std::initializer_list<SDL_Scancode> keys){return std::any_of(keys.begin(),keys.end(),[&](auto k){return bool(in.pressed[k]);});};
  auto pad=[&](SDL_GameControllerButton b){return legacyPad>=0&&legacyPad<Input::Pads&&in.controllerPressed[legacyPad][b];};
  auto bitmap=[&](int item,bool selected){auto list=global("DMIL_SmartMenu");auto* o=list.kind==Value::Kind::Object?state.get(list.bits):nullptr;const auto i=std::size_t(int(number("GA_Dil"))*4+item*2+(selected?0:1));
   if(o&&i<o->array.size())state.require(global(item?"STMP_AnaMenu":"STMP_Devam").bits).field("bmap").value=o->array[i].value;}; // STM_Kernel's own BMAP choice
- const int cursor=int(number("STM_Cursor"));
- const bool up=key({SDL_SCANCODE_UP,SDL_SCANCODE_KP_8})||pad(SDL_CONTROLLER_BUTTON_DPAD_UP),down=key({SDL_SCANCODE_DOWN,SDL_SCANCODE_KP_2})||pad(SDL_CONTROLLER_BUTTON_DPAD_DOWN);
- const auto& r=pauseItemRect_;const bool hover=r.width>0&&in.mouseX>=r.x&&in.mouseX<r.x+r.width&&in.mouseY>=r.y&&in.mouseY<r.y+r.height,click=hover&&in.mousePressed[SDL_BUTTON_LEFT];
  bool eaten=false;
- if(!pauseItem_&&((up&&cursor==0)||(down&&cursor==1)||(hover&&(in.mouseDX||in.mouseDY))||click)){pauseItem_=true;eaten=up||down;}
- else if(pauseItem_&&(up||down)){pauseItem_=false;const int to=up?1:0;set_global("STM_Cursor",Value::from_int(to));bitmap(to,true);bitmap(1-to,false);return true;}
- else if(pauseItem_&&key({SDL_SCANCODE_ESCAPE})){pauseItem_=false;return false;} // STM_Kernel closes the menu
- if(pauseItem_&&(click||key({SDL_SCANCODE_RETURN,SDL_SCANCODE_KP_ENTER})||pad(SDL_CONTROLLER_BUTTON_A))){
-  eaten=true;runtime.start("SmartAcKapat");
-  try{notify(quicksave(runtime));}catch(const std::exception& e){notify(std::string("Error: ")+e.what());}
-  runtime.start("SmartAcKapat");
+ if(saveMenu_){save_menu_tick(runtime,in);eaten=true;}
+ else{
+  const int cursor=int(number("STM_Cursor"));
+  const bool up=key({SDL_SCANCODE_UP,SDL_SCANCODE_KP_8})||pad(SDL_CONTROLLER_BUTTON_DPAD_UP),down=key({SDL_SCANCODE_DOWN,SDL_SCANCODE_KP_2})||pad(SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+  auto inside=[&](const Rect& r){return r.width>0&&in.mouseX>=r.x&&in.mouseX<r.x+r.width&&in.mouseY>=r.y&&in.mouseY<r.y+r.height;};
+  PauseItem hovered=inside(pauseItemRects_[0])?PauseItem::Save:inside(pauseItemRects_[1])?PauseItem::Graphics:PauseItem::None;
+  const bool click=hovered!=PauseItem::None&&in.mousePressed[SDL_BUTTON_LEFT];
+  auto leave=[&](int to){pauseItem_=PauseItem::None;set_global("STM_Cursor",Value::from_int(to));bitmap(to,true);bitmap(1-to,false);};
+  if(pauseItem_==PauseItem::None&&up&&cursor==0){pauseItem_=PauseItem::Save;eaten=true;}
+  else if(pauseItem_==PauseItem::None&&down&&cursor==1){pauseItem_=PauseItem::Graphics;eaten=true;}
+  else if(pauseItem_==PauseItem::Save&&(up||down)){if(down){leave(0);return true;}pauseItem_=PauseItem::Graphics;eaten=true;}
+  else if(pauseItem_==PauseItem::Graphics&&(up||down)){if(up){leave(1);return true;}pauseItem_=PauseItem::Save;eaten=true;}
+  else if(pauseItem_!=PauseItem::None&&key({SDL_SCANCODE_ESCAPE})){pauseItem_=PauseItem::None;return false;} // STM_Kernel closes the menu
+  else if(hovered!=PauseItem::None&&((in.mouseDX||in.mouseDY)||click))pauseItem_=hovered;
+  if(pauseItem_!=PauseItem::None&&(click||key({SDL_SCANCODE_RETURN,SDL_SCANCODE_KP_ENTER})||pad(SDL_CONTROLLER_BUTTON_A))){
+   eaten=true;if(pauseItem_==PauseItem::Save)save_menu_open(runtime);else open_graphics_menu();
+  }
  }
- if(pauseItem_){bitmap(0,false);bitmap(1,false);}
+ if(pauseItem_!=PauseItem::None){bitmap(0,false);bitmap(1,false);}
  return eaten;
 }
 void Engine::pause_overlay(){
- pauseItemRect_={};
+ pauseItemRects_={};
  const auto first=global("STMP_Devam");
  if(state.profile!=SemanticProfile::CampaignA6||number("STM_Acik")==0||first.kind!=Value::Kind::Object||!state.get(first.bits)||!field(first.bits,"visible"))return;
- // One button height above CONTINUE, centred on the 172-wide button; the atlas capitals are smaller than its lettering (coop_overlay).
- const float sx=std::max(0.1f,float(field(first.bits,"scale_x"))),sy=std::max(0.1f,float(field(first.bits,"scale_y")));
- const float x=float(field(first.bits,"pos_x")),y=float(field(first.bits,"pos_y"))-32*sy,scale=1.15f*sy,width=draw_menu_word("SAVE",0,0,scale,1,true);
- draw_menu_word("SAVE",x+86*sx-width/2,y-16*(scale-sy),scale,1,false,pauseItem_);pauseItemRect_={x,y,172*sx,32*sy};
+ if(graphics_menu_open()){graphics_menu_overlay();return;}
+ // SAVE one button height above CONTINUE, GRAPHICS one below MAIN MENU, centred on the 172-wide buttons; the atlas capitals are
+ // smaller than their lettering (coop_overlay). Every glyph of SAVE and GRAPHICS is in menu_dildenbagimsiz.tga (character.cpp cells).
+ // SmartMenuAc puts the menu at the bottom edge, so GRAPHICS usually has no room below MAIN MENU: it then goes one button above
+ // SAVE, where the ring's wrap (Up from SAVE, Down from MAIN MENU) also lands.
+ const float sx=std::max(0.1f,float(field(first.bits,"scale_x"))),sy=std::max(0.1f,float(field(first.bits,"scale_y"))),scale=1.15f*sy,x=float(field(first.bits,"pos_x"));
+ const auto second=global("STMP_AnaMenu");const bool hasSecond=second.kind==Value::Kind::Object&&state.get(second.bits);
+ const float top=float(field(first.bits,"pos_y"))-32*sy,below=hasSecond?float(field(second.bits,"pos_y"))+32*sy:top+96*sy;
+ const std::array<float,2> ys{top,below+32*sy<=float(currentHeight_)?below:top-32*sy};
+ static constexpr std::array<std::string_view,2> words{"SAVE","GRAPHICS"};
+ for(int i=0;i<2;++i){const float width=draw_menu_word(words[i],0,0,scale,1,true);draw_menu_word(words[i],x+86*sx-width/2,ys[i]-16*(scale-sy),scale,1,false,pauseItem_==(i?PauseItem::Graphics:PauseItem::Save));pauseItemRects_[i]={x,ys[i],172*sx,32*sy};}
+ if(saveMenu_)save_menu_overlay();
 }
 // The original in-game load is Smartmenu "main menu" (Smartmenu.wdl:208-243) -> YukleMenu -> Yukleme_Kontrol. This performs the same
 // teardown without the menu, then hands the slot to Yukleme_Kontrol exactly as YUM_Kernel does (YukleMenu.wdl:241-247).

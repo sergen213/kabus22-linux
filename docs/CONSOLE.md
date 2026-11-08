@@ -57,18 +57,37 @@ Messages ("Game saved (slot 27)", "Game loaded", refusals) appear at the top of 
 
 ### Save from the in-game menu
 
-The in-game menu (Escape, `Smartmenu.wdl`: RESUME over MAIN MENU) gets a native SAVE item one button above RESUME, drawn with the
-glyphs of the original menu atlas like the main menu's 2 PLAYER item (`native/console.cpp` `pause_tick`/`pause_overlay`). Campaign
-only: the Bonus game and the main menu have none, and it hides while the menu's own "return to main menu?" question is open.
+The in-game menu (Escape, `Smartmenu.wdl`: RESUME over MAIN MENU) gets two native items drawn with the glyphs of the original menu
+atlas like the main menu's 2 PLAYER item (`native/console.cpp` `pause_tick`/`pause_overlay`): SAVE one button above RESUME and
+GRAPHICS one button below MAIN MENU (GRAPHICS opens the in-game graphics settings). The original menu sits at the bottom edge of
+the screen, so when there is no room below MAIN MENU, GRAPHICS is drawn one button above SAVE instead, where the ring's wrap lands
+anyway. Campaign only: the Bonus game and the main menu have none, and they hide while the menu's own "return to main menu?"
+question is open.
 
-- **Mouse:** hovering selects it, a left click saves (the original menu has no mouse input, so nothing else changes).
-- **Keyboard / pad:** Up (arrow, keypad 8, d-pad) on RESUME or Down on MAIN MENU selects SAVE; that press is hidden from the
-  scripts, so their cursor (`STM_Cursor`) does not move. Up/Down from SAVE goes to MAIN MENU/RESUME. Return, keypad Enter or pad A
-  saves; Escape closes the menu as usual. The left stick and rebound movement keys still move only between the two original items.
-- **Saving:** the menu is closed for the save (`SmartAcKapat`, which clears `freeze_mode`; a quicksave refuses an open menu) and
+- **Mouse:** hovering selects an item, a left click activates it (the original menu has no mouse input; buttons used by the native
+  items stay hidden from the scripts until released, so a mouse-bound fire key cannot also press RESUME).
+- **Keyboard / pad:** the four items form a ring SAVE, RESUME, MAIN MENU, GRAPHICS. Up (arrow, keypad 8, d-pad) on RESUME selects
+  SAVE, Down on MAIN MENU selects GRAPHICS; Up from SAVE wraps to GRAPHICS and Down from GRAPHICS to SAVE. Presses that enter or
+  leave a native item are hidden from the scripts, so their cursor (`STM_Cursor`) does not move until the selection goes back to
+  RESUME/MAIN MENU. Return, keypad Enter or pad A activates; Escape closes the menu as usual. The left stick and rebound movement
+  keys still move only between the two original items.
+- **Slot picker:** SAVE opens a list over the menu (`native/save_menu.cpp`). It reads the original index first (`SLG_Yukle`,
+  `YukleMenu.wdl:19`, the same `kysd.sav` labels the load menu shows, for example `06)Demir - Ofis 09.10.26(N)`). Row 1 is a new
+  save in the ring's next slot (`Aktif_SaveNo`), exactly what F5 writes; below it every existing entry in index order, the newest
+  marked. With a full ring (99 saves) the new save replaces the oldest entry, and the row says so. Up/Down (wrapping), Page Up/Down
+  (pad shoulders), Home/End, the mouse wheel, hover and click move the cursor; Return, pad A or a click picks a row. Overwriting an
+  existing entry (or the oldest, with a full ring) asks first: Return/A (or a click on the question) confirms, Escape/B/right click
+  goes back to the list; from the list Escape returns to the menu. The game sees no input while the picker is open.
+- **Saving:** the menu is closed for the save (`SmartAcKapat`, which clears `freeze_mode`; a save refuses an open menu) and
   reopened right after with SAVE still selected, so the slot holds the game, not the menu (`STM_Acik` is `VAR_NSAVE`, and no
-  menu variable is in the `YD_OyunuKaydet` payload). It is the same quicksave as F5, with the same refusals and message. Loading
-  the slot resumes play with no menu open.
+  menu variable is in the `YD_OyunuKaydet` payload). The save is the F5 quicksave path (`Engine::save_to_slot`, same refusals,
+  position sidecar, rotating backups of the replaced `kayit<N>.sav`/`kysd.sav`), with the label `Saved game` (`Kayıtlı oyun` with
+  the Turkish scripts). The message names the slot by its load-menu number ("Game saved (slot 06)").
+- **Overwriting slot N in place:** `SLG_LevelKaydet(N, label)` rewrites entry N (its `SLG_Yukle` reloads `Aktif_SaveNo` and
+  `SLG_KayitSayisi` from disk), `Aktif_SaveNo` is set to N while `YD_OyunuKaydet` writes `kayit<N>.sav` (it names the file from
+  `Aktif_SaveNo`, `Yeni_Oyun_Deger.wdl:1554`), then `Aktif_SaveNo`/`SLG_KayitSayisi` are set one below their previous values so
+  `SLG_Kaydet`'s own increments (`YukleMenu.wdl:123-126`) restore them while it writes the index. The ring position and the save
+  count do not change; the next new save still goes to the same slot. Loading the slot resumes play with no menu open.
 
 ## Console commands
 
@@ -155,8 +174,13 @@ All 101 campaign levels from the original level table (`LevelYonetim.wdl LVSL_Ol
 
 - `tests/scenarios/quicksave1_roundtrip.k22s`: F5 in kizic2, walk away, change ammo, F9: position (±1), pan and ammo restored;
   F5 refused in the inventory menu.
-- `tests/scenarios/pause_save.k22s`: Escape, Up (script cursor stays on RESUME), Return writes the next slot and reopens the
-  menu; Down, Return resumes; F9 loads that slot at the saved spot with `freeze_mode` 0, `STM_Acik` 0 and the player in control.
+- `tests/scenarios/pause_save.k22s`: Escape; Down, Down, Down, Up, Up, Up, Up walks the ring RESUME → MAIN MENU → GRAPHICS →
+  SAVE → GRAPHICS → MAIN MENU → RESUME → SAVE with `STM_Cursor` moving only on the original items; Return opens the picker (nothing
+  written), Return on "New save" writes the next slot (`Aktif_SaveNo`, `SLG_KayitSayisi` +1) and reopens the menu; Down, Return
+  resumes; F9 loads that slot at the saved spot with `freeze_mode` 0, `STM_Acik` 0 and the player in control.
+- `tests/scenarios/pause_save_slot.k22s`: picker row 02 (Cami), Return, Escape from the confirmation writes nothing; row 01, Return,
+  Return overwrites `kayit0.sav` with `Aktif_SaveNo`/`SLG_KayitSayisi` unchanged; `load 0` restores kizic2 at the saved spot,
+  `load 1` still loads the untouched Cami save.
 - `tests/scenarios/quicksave2_restart.k22s`: after a restart the quicksave loads from the original load menu at its saved spot;
   `load 10` (a save-point slot) keeps the G00 spawn.
 - `tests/scenarios/console_commands.k22s`: every command typed through the real toggle keys, SDL text input and Return, with

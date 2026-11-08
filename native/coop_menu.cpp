@@ -73,7 +73,11 @@ void Engine::coop_tick(Runtime& runtime,const Input& in){
    else{runtime.start("AnaMenuAc");coopItem_=true;bitmap(0,false);}
   }
  }
- if(screen==CoopScreen::Off&&pause_tick(runtime,in))eat(); // pause-menu SAVE item (native/console.cpp)
+ // Pause-menu SAVE/GRAPHICS items, slot picker and graphics menu (native/console.cpp). Their mouse buttons stay hidden too until
+ // released: a mouse-bound fire key (GenelAyarlar.wdl Key_Ates) is STM_TusKontrol's Enter.
+ pauseMouse_&=in.mouseButtons|in.mousePressed;
+ if(screen==CoopScreen::Off&&pause_tick(runtime,in)){eat();pauseMouse_|=in.mouseButtons|in.mousePressed;}
+ input.mouseButtons&=~pauseMouse_;input.mousePressed&=~pauseMouse_;
  coop_models(runtime);
  input.keys&=~coopKeys_;input.pressed&=~coopKeys_;for(int p=0;p<Input::Pads;++p){input.controllerButtons[p]&=~coopPad_[p];input.controllerPressed[p]&=~coopPad_[p];}
 }

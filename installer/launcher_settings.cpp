@@ -1,6 +1,7 @@
 #include "launcher_settings.hpp"
 #include "launcher_text.hpp"
 #include "layout.hpp"
+#include "../native/launcher_config.hpp" // the engine's launcher.ini writer (in-game graphics menu); round-tripped in selfCheck
 #include <glib.h>
 #define CGLTF_IMPLEMENTATION
 #include "cgltf.h"
@@ -802,6 +803,23 @@ void selfCheck() {
         launch.preferences.preset="custom";launch.preferences.graphics={{"pbr","1"},{"msaa","4"},{"rt_only","1"},{"backend","vulkan-rt"},{"stale","1"},{"texture_packs","0"}};launch.preferences.packs={"broken","hd pack","absent"};
         require(tail()==Args{"--renderer","opengl","--preset","custom","--graphics","pbr=1","--texture-pack","hd pack"},"Custom graphics argument composition regression");
         launch.preferences.renderer="vulkan-rt";require(tail()==Args{"--renderer","vulkan","--ray-tracing","on","--preset","custom","--graphics","pbr=1","--graphics","rt_only=1","--texture-pack","hd pack"},"Ray-tracing option composition regression");
+        // In-game graphics menu (native/launcher_config.cpp): the engine's merged launcher.ini parses, keeps every foreign line, and launches as chosen.
+        {namespace lc=k22::launcher_config;const auto saved=launch.preferences;
+            Preferences user=launch.preferences;user.renderer="opengl";user.window="windowed";user.resolution="1920x1080";user.graphics={{"msaa","8"},{"rt_only","1"}};
+            const std::string original="# user comment\n"+encodePreferences(user)+"\n[Other]\nkeep = me\n";
+            lc::Graphics g;g.preset="custom";g.renderer="vulkan-raster";g.window="fullscreen";g.resolution="2560x1440";
+            g.options={{"pbr","1","0"},{"msaa","4","4"},{"rt_only","1","0"},{"fps_limit","144","original"},{"backend","vulkan-raster","opengl"},{"texture_packs","1","0"}};
+            const auto merged=lc::merge(original,lc::edits(g));auto back=parsePreferences(merged);
+            require(merged.starts_with("# user comment\n")&&merged.ends_with("\n[Other]\nkeep = me\n")&&back.renderer=="vulkan-raster"&&back.preset=="custom"&&back.window=="fullscreen"&&back.resolution=="2560x1440"&&back.packs==user.packs&&back.mods==user.mods&&back.language==user.language,"Engine-merged launcher.ini lost or changed launcher keys");
+            require(back.graphics==decltype(back.graphics){{"rt_only","1"},{"pbr","1"},{"fps_limit","144"}}&&lc::merge(merged,lc::edits(g))==merged,"Engine-merged [Graphics] keys regression");
+            launch.preferences=back;auto all=command(launch);auto mode=std::find(all.begin(),all.end(),"--window-mode");
+            require(mode!=all.end()&&*std::next(mode)=="fullscreen"&&std::find(all.begin(),all.end(),"2560x1440")!=all.end()&&tail()==Args{"--renderer","vulkan","--ray-tracing","off","--preset","custom","--graphics","pbr=1","--graphics","fps_limit=144","--texture-pack","hd pack"},"Engine-written graphics settings launch differently");
+            g.preset="enhanced";g.options={{"pbr","0","0"},{"fps_limit","original","original"},{"seamless_doors","off","on"}};back=parsePreferences(lc::merge(merged,lc::edits(g))); // outside custom only fps_limit/seamless_doors are the game's
+            require(back.preset=="enhanced"&&back.graphics==decltype(back.graphics){{"rt_only","1"},{"pbr","1"},{"seamless_doors","off"}},"Engine edits outside the custom preset touched the custom set");
+            require(parsePreferences(lc::merge("",lc::edits(g))).preset=="enhanced","Engine-created launcher.ini rejected");
+            const auto file=scratch/"config/kabus22/launcher.ini";lc::write(g,file,scratch);auto written=snapshot(file,true);require(written.bytes&&parsePreferences(*written.bytes).renderer=="vulkan-raster","Engine launcher.ini publication regression");
+            {Fd held(privateLock(scratch));rejects([&]{lc::write(g,file,scratch);});} // the launcher's lock excludes the engine writer
+            launch.preferences=saved;}
         launch.capabilities->presets={"original","custom"};launch.preferences.preset="ultra";rejects([&]{command(launch);});
         launch.capabilities.reset();launch.preferences=Preferences{};launch.preferences.language="tr";
         Preferences graphics;graphics.preset="custom";graphics.graphics={{"pbr","1"},{"msaa","8"},{"fps_limit","unlimited"}};graphics.packs={"hd pack","semi;colon"};

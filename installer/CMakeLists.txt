@@ -18,7 +18,8 @@ target_link_libraries(kabus22_setup_core PUBLIC PkgConfig::GTK3 PkgConfig::AV Li
 target_compile_options(kabus22_setup_core PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(kabus22-setup main.cpp)
 target_link_libraries(kabus22-setup PRIVATE kabus22_setup_core)
-add_executable(kabus22-launcher launcher.cpp launcher_settings.cpp launcher_text.cpp)
+# ../native/launcher_config.cpp: the engine's GLib-free launcher.ini merge (in-game graphics menu), round-tripped by --self-check.
+add_executable(kabus22-launcher launcher.cpp launcher_settings.cpp launcher_text.cpp ../native/launcher_config.cpp)
 # Mods page 3-D viewer: GtkGLArea drawn through libepoxy (a GTK 3 dependency); cgltf reads glTF.
 pkg_check_modules(EPOXY REQUIRED IMPORTED_TARGET epoxy)
 target_include_directories(kabus22-launcher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cgltf")

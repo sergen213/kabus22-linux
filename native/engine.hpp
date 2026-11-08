@@ -11,6 +11,8 @@
 #include <unordered_map>
 #include <optional>
 #include <unordered_set>
+#include <future>
+#include <map>
 namespace k22 {
 class Runtime;
 struct TextureSample;
@@ -154,6 +156,22 @@ public:
  // keyboard; none → both -1. Off coop the original single-player legacyPad applies (lowest connected slot).
  int coop_pad(int player)const;
  ObjectId coop_body(int player)const; // coop player 0/1's live entity (P1: the bank-0 player), 0 when none (native/coop.cpp)
+ // In-game graphics menu (native/graphics_menu.cpp, docs/GRAPHICS_MENU.md); not in the original. Opened by the pause menu's GRAPHICS
+ // item. The menu edits the launcher's settings model (preset, renderer, every --graphics key) and applies it live: fps_limit,
+ // seamless doors and the window at once, renderer keys through Renderer::reconfigure or a renderer recreation by main.cpp.
+ struct GraphicsChoice {std::string preset{"original"},backend{"opengl"};std::map<std::string,std::string,std::less<>> values;bool vsync=true,packs=false;bool operator==(const GraphicsChoice&)const=default;};
+ // main.cpp after creating the renderer: base = RenderOptions before graphics_cli::apply (the defaults an unset key keeps),
+ // launched = after it; preset/overrides as given on the command line.
+ void configure_graphics(const RenderOptions& base,const RenderOptions& launched,std::string_view preset,std::span<const std::pair<std::string,std::string>> overrides);
+ int fpsLimit=0; // live fps_limit (0 = script fps_max, -1 = unlimited); main.cpp paces every frame by it
+ void open_graphics_menu();bool graphics_menu_open()const{return graphicsOpen_;}
+ bool graphics_menu_tick(Runtime&,const Input&); // while open: true, every input is the menu's; false once the pause menu under it closed
+ void graphics_menu_overlay();
+ void graphics_update(); // main.cpp after tick: applies the debounced renderer change
+ std::optional<RenderOptions> take_renderer_request(); // main.cpp, top of the frame: recreate the renderer with these options
+ void set_renderer(Renderer*); // drops every cache of renderer-owned data, re-applies window title/mode and mouse mode
+ void renderer_recreated(const std::string& error); // after take_renderer_request: empty = applied, else the previous options are back
+ int graphics_row()const{return graphicsOpen_?graphicsRow_:-1;} // scenario $gfxrow
 private:
  enum class DoorPhase {Idle,Opening,Crossing,Holding,Revealing};
  // armed: proactive opening allowed (every body was 128+ quants away since the level is in play or the door last crossed/refused).
@@ -172,7 +190,14 @@ private:
  void console_tick(Runtime&);void console_overlay();void console_print(std::string_view);void notify(std::string);
  std::string gameplay_blocked(const Runtime&)const;ObjectId live_player()const;std::string saved_position()const;void read_saved_position(const std::filesystem::path& slot);
  bool consoleOpen_=false,consoleRelease_=false,god_=false,noclip_=false,fpsOverlay_=false;ObjectId noclipPlayer_=0;
- bool pause_tick(Runtime&,const Input&);void pause_overlay();bool pauseItem_=false;Rect pauseItemRect_{}; // pause-menu SAVE item (native/console.cpp); true: hide this press from the scripts
+ // Pause-menu native items (native/console.cpp): SAVE above CONTINUE, GRAPHICS below MAIN MENU; pauseItem_ is the selected one
+ // (the script cursor's buttons are then shown unselected). pauseMouse_: mouse buttons hidden from the scripts until released.
+ enum class PauseItem {None,Save,Graphics};bool pause_tick(Runtime&,const Input&);void pause_overlay();PauseItem pauseItem_=PauseItem::None;std::array<Rect,2> pauseItemRects_{};std::bitset<8> pauseMouse_;
+ // Save-slot picker opened by SAVE (native/save_menu.cpp): row 0 a new save in slot saveNext_ (the ring's next), rows 1.. the
+ // original index entries 0..saveCount_-1 (SLG_Yukle, YukleMenu.wdl:19). saveConfirm_: row awaiting the overwrite confirmation.
+ bool saveMenu_=false;int saveCursor_=0,saveTop_=0,saveConfirm_=-1,saveNext_=0,saveCount_=0,saveVisible_=10;std::vector<std::string> saveRows_,saveTexts_;std::vector<Rect> saveRowRects_;Rect saveConfirmRect_{};
+ void save_menu_open(Runtime&);void save_menu_tick(Runtime&,const Input&);void save_menu_overlay();
+ std::string save_to_slot(Runtime&,int slot,std::string_view label); // original slot writer; empty on success, else the refusal
  void apply_character_lock(Runtime&,std::vector<std::pair<ObjectId,FunctionId>>& placedActions);
  bool character_tick(Runtime&,const Input&); // true: a switch prompt is open and the scripts stay paused this frame
  void character_weapons(Runtime&,bool spawning);int ebruWeapon_=0;bool ebruSpawn_=false;
@@ -280,5 +305,13 @@ private:
  Vec2 mouseHit_{};
  std::vector<ObjectId> levelEntities_;double time_=0;int currentWidth_=0,currentHeight_=0;bool viewsPrepared_=false;
  Vec2 skySpeed_{1,1}; // SKY_SPEED is copied into the implicit dome when its level is created.
+ // Graphics menu (native/graphics_menu.cpp). want: the menu's values; applied: what runs and what launcher.ini gets; base: the value
+ // of a key left at its fallback. rendererRequest_: options main.cpp recreates the renderer with (backend switch, or reconfigure false).
+ bool graphicsOpen_=false,graphicsDirty_=false,graphicsConfigured_=false;int graphicsRow_=1,graphicsTop_=0;double graphicsDue_=0;
+ GraphicsChoice graphicsWant_,graphicsApplied_,graphicsPending_;RenderOptions graphicsBase_;std::shared_ptr<const TexturePackSet> graphicsPacks_; // pending: the choice rendererRequest_ carries
+ std::optional<RenderOptions> rendererRequest_;std::future<std::string> graphicsProbe_;std::array<int,3> graphicsBackends_{-1,-1,-1};
+ std::vector<Rect> graphicsRects_;std::deque<std::string> graphicsStrings_;std::string windowTitle_{"Kabus 22"};
+ RenderOptions graphics_options(const GraphicsChoice&)const;bool graphics_applicable(int row)const;void graphics_step(Runtime&,int row,int direction,bool wrap);
+ void graphics_renderer_changed();void graphics_persist();std::vector<std::pair<int,int>> graphics_resolutions()const;
 };
 }

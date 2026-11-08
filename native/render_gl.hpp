@@ -15,6 +15,8 @@ public:
     int shader_version() const;
     std::string description() const;
     PresentationState presentation_state() const;
+    const RenderOptions& options() const;
+    bool reconfigure(const RenderOptions&); // Renderer::reconfigure contract, `next` already admitted for OpenGL.
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

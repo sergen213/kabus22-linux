@@ -244,6 +244,10 @@ public:
     void draw(const RenderFrame& frame);
     WindowMetrics metrics() const;
     void set_mode(int width, int height, WindowMode mode);
+    const RenderOptions& options() const; // In effect: backend clamps (MSAA, anisotropy, dropped device features) applied.
+    // Live settings change. true: every difference applies from the next draw (temporal history restarts); false: some
+    // difference needs a new Renderer and nothing changed. width/height/mode/title/hidden are ignored (set_mode/set_title).
+    bool reconfigure(const RenderOptions& next);
     void set_title(std::string_view title);
     void set_position(int x, int y);
     void set_mouse_mode(bool visible, bool relative = false);

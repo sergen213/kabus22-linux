@@ -357,6 +357,7 @@ struct GLBackend::Impl {
     RenderOptions options;GLuint scene{},ui{},post{},white{},uiVao{},uiVbo{},postVao{},lightBuffer{},lightTexture{},gammaTexture{},sceneSampler{},uiNearestSampler{},uiLinearSampler{};
     GLuint particleVbo{},lightmapSampler{},dynamicSceneSampler{};GLint maxTextureSize{};
     GLuint msaaFbo{},msaaColor{},msaaDepth{},resolveFbo{},resolveColor{};int targetWidth{},targetHeight{},samples{1};float preferredAnisotropy{1},anisotropy{1};
+    GLint maxSamples{1};float maxAnisotropy{}; // Context limits (0: no anisotropic filtering), kept for reconfigure clamps.
     GLint minificationFilter{GL_LINEAR_MIPMAP_LINEAR};bool mipsEnabled{true};
     GLuint alphaFbo{},alphaColor{},alphaDepth{};
     GLuint portalFbo{},portalColor{},portalDepth{};
@@ -439,22 +440,17 @@ struct GLBackend::Impl {
             if(SDL_GL_SetSwapInterval(options.vsync?1:0)!=0)std::cerr<<"kabus22: warning: SDL_GL_SetSwapInterval("<<(options.vsync?1:0)<<") failed: "<<SDL_GetError()<<'\n';
             requestedSwapInterval=options.vsync?1:0;
             std::cerr<<"kabus22: GL_VENDOR="<<reinterpret_cast<const char*>(glGetString(GL_VENDOR))<<"\nGL_RENDERER="<<reinterpret_cast<const char*>(glGetString(GL_RENDERER))<<"\nGL_VERSION="<<reinterpret_cast<const char*>(glGetString(GL_VERSION))<<"\nSDL_GL_GetSwapInterval="<<SDL_GL_GetSwapInterval()<<'\n';
-            GLint maxSamples{};glGetIntegerv(GL_MAX_SAMPLES,&maxSamples);samples=std::clamp(options.samples,1,maxSamples);
+            glGetIntegerv(GL_MAX_SAMPLES,&maxSamples);samples=std::clamp(options.samples,1,maxSamples);
             if(options.samples>maxSamples)std::cerr<<"kabus22: graphics: MSAA "<<options.samples<<" unsupported, using "<<maxSamples<<'\n';
+            options.samples=samples;
             glGetIntegerv(GL_MAX_TEXTURE_SIZE,&maxTextureSize);
-            if(epoxy_gl_version()>=46||epoxy_has_gl_extension("GL_EXT_texture_filter_anisotropic")||epoxy_has_gl_extension("GL_ARB_texture_filter_anisotropic")){GLfloat maximum{};glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT,&maximum);preferredAnisotropy=anisotropy=std::clamp(options.anisotropy,1.0f,maximum);if(options.anisotropy>maximum)std::cerr<<"kabus22: graphics: anisotropy "<<options.anisotropy<<" unsupported, using "<<maximum<<'\n';}
+            if(epoxy_gl_version()>=46||epoxy_has_gl_extension("GL_EXT_texture_filter_anisotropic")||epoxy_has_gl_extension("GL_ARB_texture_filter_anisotropic")){glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT,&maxAnisotropy);preferredAnisotropy=anisotropy=std::clamp(options.anisotropy,1.0f,maxAnisotropy);if(options.anisotropy>maxAnisotropy)std::cerr<<"kabus22: graphics: anisotropy "<<options.anisotropy<<" unsupported, using "<<maxAnisotropy<<'\n';options.anisotropy=preferredAnisotropy;}
             else if(options.forceAnisotropy&&options.anisotropy>1)std::cerr<<"kabus22: graphics: anisotropic filtering unsupported by this OpenGL context; disabled\n";
             const auto&fx=options.features;composite=composite_enabled(options.pbr,fx);shadowMapsOn=shadow_maps_enabled(fx);
             const std::string shadowDefine=shadowMapsOn?"#define K22_SHADOW_MAPS 1\n":"";
             scene=program(("#version 330 core\n"+shadowDefine+sceneVS).c_str(),(std::string(sceneFSPrelude)+(shadowMapsOn?shadowDefine+effectsGLSL+"float lightShadow(int i,vec3 p,vec3 n);\n#define K22_PBR_LIGHT_VISIBILITY(i) lightShadow(i,p,Ng)\n":std::string())+pbrGLSL+sceneFS).c_str());ui=program(uiVS,uiFS);post=program(postVS,postFS);
             tonemapProgram=program(postVS,(std::string(tonemapFSPrelude)+pbrGLSL+tonemapFS).c_str());tonemapImage=glGetUniformLocation(tonemapProgram,"image");
-            auto effect=[&](const char*fs){return program(postVS,(std::string(tonemapFSPrelude)+pbrGLSL+effectsGLSL+fs).c_str());};
-            if(composite&&(fx.bloom||!options.pbr))compositeProgram=effect(compositeFS);
-            if(fx.bloom)bloomProgram=effect(bloomFS);
-            if(fx.fxaa)fxaaProgram=effect(fxaaFS);
-            if(fx.ssao||fx.fog)linearizeProgram=effect(linearizeFS);
-            if(fx.ssao){ssaoProgram=effect(ssaoFS);aoApplyProgram=effect(aoApplyFS);}
-            if(fx.fog)fogProgram=program(postVS,(std::string(fogFSPrelude)+effectsGLSL+fogFS).c_str());
+            ensure_programs();
             shadowProgram=program(shadowVS,shadowFS,shadowGS);
 #define S(field,name) shu.field=glGetUniformLocation(shadowProgram,name)
             S(model,"model");S(projection,"projection");S(vp,"viewProjection");S(poses,"poses");S(frame0,"frame0");S(frame1,"frame1");S(vertexCount,"vertexCount");S(interpolation,"interpolation");S(firstOverride,"firstOverride");S(nextOverride,"nextOverride");S(clipPlane,"clipPlane");S(viewport,"viewport");S(areaThreshold,"areaThreshold");S(alpha,"alpha");S(reversed,"reversed");
@@ -551,7 +547,7 @@ struct GLBackend::Impl {
         }
         float factor=effective_anisotropy(options.forceAnisotropy?1:enabledAnisotropy,preferredAnisotropy);
         if(factor!=anisotropy){
-            if(preferredAnisotropy>1)for(GLuint sampler:{sceneSampler,lightmapSampler,skyClampSampler,dynamicSceneSampler})glSamplerParameterf(sampler,GL_TEXTURE_MAX_ANISOTROPY_EXT,factor);
+            if(maxAnisotropy>1)for(GLuint sampler:{sceneSampler,lightmapSampler,skyClampSampler,dynamicSceneSampler})glSamplerParameterf(sampler,GL_TEXTURE_MAX_ANISOTROPY_EXT,factor);
             anisotropy=factor;
         }
     }
@@ -570,6 +566,36 @@ struct GLBackend::Impl {
         for(GLuint*fbo:{&effectDepthFbo,&linearFbo,&aoFbo})glDeleteFramebuffers(1,fbo);
         for(GLuint*texture:{&effectDepth,&linearDepth,&aoTexture})glDeleteTextures(1,texture);
         effectDepthFbo=linearFbo=aoFbo=effectDepth=linearDepth=aoTexture=0;effectWidth=effectHeight=0;
+    }
+    // Effect programs exist only for enabled effects; reconfigure builds newly enabled ones and keeps disabled ones. The
+    // composite program is the exception: its presence selects it over the plain tone-map pass (composite_pass).
+    void ensure_programs(){
+        const auto&fx=options.features;auto effect=[&](const char*fs){return program(postVS,(std::string(tonemapFSPrelude)+pbrGLSL+effectsGLSL+fs).c_str());};
+        const bool blend=composite&&(fx.bloom||!options.pbr);
+        if(blend&&!compositeProgram)compositeProgram=effect(compositeFS);else if(!blend&&compositeProgram){glDeleteProgram(compositeProgram);compositeProgram=0;}
+        if(fx.bloom&&!bloomProgram)bloomProgram=effect(bloomFS);
+        if(fx.fxaa&&!fxaaProgram)fxaaProgram=effect(fxaaFS);
+        if((fx.ssao||fx.fog)&&!linearizeProgram)linearizeProgram=effect(linearizeFS);
+        if(fx.ssao&&!ssaoProgram){ssaoProgram=effect(ssaoFS);aoApplyProgram=effect(aoApplyFS);}
+        if(fx.fog&&!fogProgram)fogProgram=program(postVS,(std::string(fogFSPrelude)+effectsGLSL+fogFS).c_str());
+    }
+    // Renderer::reconfigure. Only shadow maps on<->off needs a new context: K22_SHADOW_MAPS is compiled into the scene
+    // program whose uniform locations are resolved once. Everything else is per-frame state, a lazily rebuilt target or
+    // an effect program built on first enable.
+    bool reconfigure(RenderOptions next,bool&reloadScene){
+        if(shadow_maps_enabled(next.features)!=shadowMapsOn)return false;
+        next.samples=std::clamp(next.samples,1,int(maxSamples));if(maxAnisotropy>0)next.anisotropy=std::clamp(next.anisotropy,1.f,maxAnisotropy);
+        drain_completion();
+        const auto&a=options.features,&b=next.features;
+        const bool rebuildTargets=next.samples!=samples||next.pbr!=options.pbr||a.bloom!=b.bloom||a.fxaa!=b.fxaa||composite_enabled(next.pbr,b)!=composite;
+        const bool rebuildEffects=a.ssao!=b.ssao||a.fog!=b.fog;
+        reloadScene=next.pbr!=options.pbr||next.packs!=options.packs; // pack textures and PBR tangent streams upload lazily
+        if(maxAnisotropy>0&&(next.anisotropy!=preferredAnisotropy||next.forceAnisotropy!=options.forceAnisotropy)){preferredAnisotropy=next.anisotropy;anisotropy=0;} // configure_sampling re-applies next frame
+        options=next;samples=next.samples;composite=composite_enabled(options.pbr,options.features);
+        ensure_programs();
+        if(rebuildTargets)free_targets();else if(rebuildEffects)free_effects();
+        finalFrameValid=retainedColorValid=portalColorValid=false;
+        return true;
     }
     void targets(int w,int h){if(w==targetWidth&&h==targetHeight)return;free_targets();targetWidth=w;targetHeight=h;
         glGenFramebuffers(1,&msaaFbo);glBindFramebuffer(GL_FRAMEBUFFER,msaaFbo);glGenRenderbuffers(1,&msaaColor);glBindRenderbuffer(GL_RENDERBUFFER,msaaColor);glRenderbufferStorageMultisample(GL_RENDERBUFFER,samples,GL_RGBA8,w,h);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_RENDERBUFFER,msaaColor);glGenRenderbuffers(1,&msaaDepth);glBindRenderbuffer(GL_RENDERBUFFER,msaaDepth);glRenderbufferStorageMultisample(GL_RENDERBUFFER,samples,GL_DEPTH24_STENCIL8,w,h);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_RENDERBUFFER,msaaDepth);if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)throw std::runtime_error("Incomplete multisample game framebuffer");
@@ -1228,6 +1254,8 @@ void GLBackend::invalidate(WindowMode mode){impl_->options.mode=mode;impl_->fina
 int GLBackend::shader_version()const{return impl_->scene&&impl_->su.effectKind>=0&&impl_->su.normalSkin>=0&&impl_->su.skillMain>=0&&impl_->su.skillExtra>=0&&impl_->su.preparedAmbient>=0?2020:0;}
 std::string GLBackend::description()const{return std::string("OpenGL ")+reinterpret_cast<const char*>(glGetString(GL_VERSION))+"; "+reinterpret_cast<const char*>(glGetString(GL_RENDERER));}
 PresentationState GLBackend::presentation_state()const{const auto&i=*impl_;return {i.completionLimit,i.completionCount,i.completionSubmissions,i.completionWaits,SDL_GL_GetSwapInterval(),i.samples};}
+const RenderOptions& GLBackend::options()const{return impl_->options;}
+bool GLBackend::reconfigure(const RenderOptions&next){bool reload{};if(!impl_->reconfigure(next,reload))return false;if(reload)release_scene();return true;}
 void GLBackend::purge_model(const Model*model){
     auto&i=*impl_;i.drain_completion();auto found=i.meshes.find(model);
     if(found!=i.meshes.end()){auto&m=found->second;glDeleteVertexArrays(1,&m.vao);glDeleteBuffers(1,&m.vertices);glDeleteBuffers(1,&m.indices);glDeleteBuffers(1,&m.tangents);glDeleteBuffers(1,&m.poseBuffer);glDeleteTextures(1,&m.poses);i.meshes.erase(found);}

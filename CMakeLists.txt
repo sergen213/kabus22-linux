@@ -87,7 +87,7 @@ target_compile_options(kabus22_fsr3 PRIVATE -include "${CMAKE_CURRENT_SOURCE_DIR
 install(FILES "${K22_FFX}/LICENSE.txt" DESTINATION share/doc/kabus22/third_party RENAME FidelityFX-SDK-LICENSE.txt)
 add_library(kabus22_core native/engine.cpp native/wdl.cpp native/assets.cpp native/render.cpp
   native/render_gl.cpp native/render_vulkan.cpp native/render_vulkan_raster.cpp native/render_vulkan_rt.cpp native/vulkan_loader.cpp
-  native/media.cpp native/physics.cpp native/texture_pack.cpp native/controller.cpp native/saves.cpp native/console.cpp native/seamless_doors.cpp
+  native/media.cpp native/physics.cpp native/texture_pack.cpp native/controller.cpp native/saves.cpp native/console.cpp native/save_menu.cpp native/graphics_menu.cpp native/launcher_config.cpp native/seamless_doors.cpp
   native/character.cpp native/coop_menu.cpp native/coop.cpp native/mods.cpp native/model_gltf.cpp "${K22_SHADER_HEADER}")
 target_include_directories(kabus22_core PUBLIC native PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${Vulkan_INCLUDE_DIRS})
 # cgltf v1.15 (MIT): mod glTF model import (native/model_gltf.cpp).

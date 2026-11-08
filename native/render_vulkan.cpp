@@ -297,10 +297,11 @@ VulkanBackend::State::State(SDL_Window* w,const RenderOptions& o):window(w),opti
         VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES}; f13.dynamicRendering=VK_TRUE; f13.synchronization2=VK_TRUE; f13.pNext=rayEnabled?&acceleration:nullptr;
         VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES}; f12.bufferDeviceAddress=bufferAddressEnabled; f12.runtimeDescriptorArray=rayEnabled; f12.shaderSampledImageArrayNonUniformIndexing=rayEnabled; f12.pNext=&f13;
         // tessellation is optional: an unsupported request is dropped with a notice instead of failing device selection.
-        if(options.features.tessellation&&!tessellation){std::fprintf(stderr,"kabus22: graphics: tessellation unsupported by %s; disabling it\n",properties.deviceName);options.features.tessellation=false;}
+        tessellationSupported=tessellation;if(options.features.tessellation&&!tessellation){std::fprintf(stderr,"kabus22: graphics: tessellation unsupported by %s; disabling it\n",properties.deviceName);options.features.tessellation=false;}
+        tessellationEnabled=options.features.tessellation;
         VkPhysicalDeviceFeatures features{}; features.geometryShader=VK_TRUE; features.shaderClipDistance=VK_TRUE; features.samplerAnisotropy=VK_TRUE; features.shaderInt64=rayEnabled; features.shaderSampledImageArrayDynamicIndexing=rayEnabled; features.tessellationShader=options.features.tessellation;
         // Frame generation interpolates the RGBA16F upscaled view; unsupported devices keep FSR without it.
-        if(options.features.frameGeneration)if(auto why=vk22::Fsr3::generation_unsupported(physical,VK_FORMAT_R16G16B16A16_SFLOAT)){std::fprintf(stderr,"kabus22: graphics: FSR 3.1.4 frame generation unsupported by %s (%s); disabling it\n",properties.deviceName,why);options.features.frameGeneration=false;}
+        if(options.features.frameGeneration)if(auto why=vk22::Fsr3::generation_unsupported(physical,VK_FORMAT_R16G16B16A16_SFLOAT)){std::fprintf(stderr,"kabus22: graphics: FSR 3.1.4 frame generation unsupported by %s (%s); disabling it\n",properties.deviceName,why);options.features.frameGeneration=false;generationUnsupported=true;}
         if(options.features.fsr){vk22::Fsr3::enable_features(features,options.features.frameGeneration);options.features.taa=false;} // FSR replaces TAA.
         const float priority=1; VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}; queueInfo.queueFamilyIndex=queueFamily; queueInfo.queueCount=1; queueInfo.pQueuePriorities=&priority;
         std::vector<const char*> deviceExtensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
@@ -319,6 +320,7 @@ VulkanBackend::State::State(SDL_Window* w,const RenderOptions& o):window(w),opti
         for(auto sample:{VK_SAMPLE_COUNT_64_BIT,VK_SAMPLE_COUNT_32_BIT,VK_SAMPLE_COUNT_16_BIT,VK_SAMPLE_COUNT_8_BIT,VK_SAMPLE_COUNT_4_BIT,VK_SAMPLE_COUNT_2_BIT,VK_SAMPLE_COUNT_1_BIT}) if(static_cast<int>(sample)<=std::max(o.samples,1)&&(supported&sample)){samples=sample;break;}
         if(static_cast<int>(samples)<o.samples) std::fprintf(stderr,"kabus22: graphics: MSAA %d unsupported, using %d\n",o.samples,static_cast<int>(samples));
         if(o.anisotropy>properties.limits.maxSamplerAnisotropy) std::fprintf(stderr,"kabus22: graphics: anisotropy %g unsupported, using %g\n",double(o.anisotropy),double(properties.limits.maxSamplerAnisotropy));
+        sampleSupport=supported;options.samples=static_cast<int>(samples);options.anisotropy=std::clamp(options.anisotropy,1.f,properties.limits.maxSamplerAnisotropy);
         for(auto& slot:slots) {
             VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO}; pool.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; pool.queueFamilyIndex=queueFamily;
             require(vkCreateCommandPool(device,&pool,nullptr,&slot.pool),"Creating Vulkan frame pool");
@@ -472,7 +474,7 @@ void VulkanBackend::State::ensure_targets(WindowMetrics metrics){
         if(options.features.fsr){
             const VkFormat generation=options.features.frameGeneration?VK_FORMAT_R16G16B16A16_SFLOAT:VK_FORMAT_UNDEFINED;
             try{fsr=std::make_unique<vk22::Fsr3>(physical,device,render,extent,generation);}
-            catch(const std::exception& e){if(!generation)throw;std::fprintf(stderr,"kabus22: graphics: FSR 3.1.4 frame generation unavailable (%s); disabling it\n",e.what());options.features.frameGeneration=false;fsr=std::make_unique<vk22::Fsr3>(physical,device,render,extent);}
+            catch(const std::exception& e){if(!generation)throw;std::fprintf(stderr,"kabus22: graphics: FSR 3.1.4 frame generation unavailable (%s); disabling it\n",e.what());options.features.frameGeneration=false;generationUnsupported=true;fsr=std::make_unique<vk22::Fsr3>(physical,device,render,extent);}
         }
         generating=fsr&&fsr->generates();
         if(generating){
@@ -591,6 +593,34 @@ void VulkanBackend::State::drain_presents(std::uint64_t outstanding){
     if(p.error)std::rethrow_exception(std::exchange(p.error,nullptr));
 }
 void VulkanBackend::State::invalidate(){drain();finalValid=false;swapDirty=true;}
+// Renderer::reconfigure. Device creation fixes ray queries, tessellationShader (enabling it later), the FSR device
+// features with the frame-generation presenter (fsr off<->on) and frame generation on<->off: those need a new Renderer.
+// Everything else applies after a full drain and queue idle: targets, the FSR context (new render size), effect images
+// and pipelines rebuild lazily, and every temporal history (TAA, FSR, RT denoiser, frame-generation previous frame)
+// restarts so the old look does not smear into the new one.
+bool VulkanBackend::State::reconfigure(RenderOptions next){
+    const auto&a=options.features;auto&b=next.features;
+    if(b.tessellation&&!tessellationSupported)b.tessellation=false; // same drop as device creation
+    if(generationUnsupported)b.frameGeneration=false;
+    if(b.fsr)b.taa=false; // FSR replaces TAA
+    if(next.rayTracing!=options.rayTracing||(b.tessellation&&!tessellationEnabled)||bool(b.fsr)!=bool(a.fsr)||b.frameGeneration!=a.frameGeneration)return false;
+    VkSampleCountFlagBits count=VK_SAMPLE_COUNT_1_BIT;
+    for(auto sample:{VK_SAMPLE_COUNT_64_BIT,VK_SAMPLE_COUNT_32_BIT,VK_SAMPLE_COUNT_16_BIT,VK_SAMPLE_COUNT_8_BIT,VK_SAMPLE_COUNT_4_BIT,VK_SAMPLE_COUNT_2_BIT,VK_SAMPLE_COUNT_1_BIT}) if(static_cast<int>(sample)<=std::max(next.samples,1)&&(sampleSupport&sample)){count=sample;break;}
+    next.samples=static_cast<int>(count);next.anisotropy=std::clamp(next.anisotropy,1.f,properties.limits.maxSamplerAnisotropy);
+    // Pack/upscaled textures, smoothed or PN poses and PBR tangent streams are built at upload: drop them to re-upload.
+    const bool reload=next.pbr!=options.pbr||next.packs!=options.packs||a.smoothNormals!=b.smoothNormals||a.tessellation!=b.tessellation||a.upscale!=b.upscale;
+    const bool rebuild=count!=samples||next.pbr!=options.pbr||a!=b;
+    drain();{std::scoped_lock lock(queueMutex);require(vkQueueWaitIdle(queue),"Idling Vulkan queue for reconfiguration");}
+    options=std::move(next);
+    if(rebuild){
+        samples=count;destroy_target(*this,scene);destroy_target(*this,alpha);destroy_target(*this,portal);destroy_target(*this,hdr);destroy(finalImage);fsr.reset();
+        for(auto* i:{&generated[0],&generated[1],&real[0],&real[1]}) destroy(*i);
+        generating=generatedValid=retainedColorValid=portalColorValid=finalValid=false; // ensure_targets rebuilds at the next begin
+        vk22::raster_reconfigure(*raster);
+    }
+    if(reload){vk22::raster_release(*raster);vk22::rt_release(*rays);}
+    return true;
+}
 // With frame generation the capture also writes <stem>-fg-generated.ppm (the frame presented before this one, when this
 // frame produced one) and <stem>-fg-previous.ppm (the previous rendered frame).
 void VulkanBackend::State::readback(std::string_view path,WindowMetrics metrics) {
@@ -695,6 +725,8 @@ void VulkanBackend::draw(const RenderFrame& frame,WindowMetrics metrics) {
 void VulkanBackend::capture(std::string_view path,WindowMetrics metrics)const{state_->readback(path,metrics);}
 void VulkanBackend::drain(){state_->drain();}
 void VulkanBackend::invalidate(){state_->invalidate();}
+const RenderOptions& VulkanBackend::options()const{return state_->options;}
+bool VulkanBackend::reconfigure(const RenderOptions& next){return state_->reconfigure(next);}
 void VulkanBackend::release_scene(std::span<const Model* const> keep){state_->drain();vk22::raster_release(*state_->raster,keep);vk22::rt_release(*state_->rays,keep);state_->retainedColorValid=false;state_->portalColorValid=false;}
 void VulkanBackend::purge_model(const Model* model) {
     state_->drain();

@@ -1,6 +1,8 @@
 # requires: saves
 # Pause-menu SAVE item (docs/CONSOLE.md): Escape opens the original Smartmenu; Up on CONTINUE selects the native SAVE row above it
-# without moving the script cursor, Return saves through Engine::quicksave (menu closed for the save) and reopens the menu.
+# without moving the script cursor, Return opens the native slot picker (nothing written yet), Return on its first row ("New save")
+# saves through Engine::save_to_slot into the ring's next slot (menu closed for the save) and reopens the menu.
+# Down from MAIN MENU selects the native GRAPHICS row below it (script cursor stays 1), Down again wraps to SAVE (not activated).
 # F9 then loads that newest slot: same level and spot, player in control, nothing frozen. Demir, kizic2 (level 37), kayit10.sav.
 realtime off
 load-save 10
@@ -8,21 +10,45 @@ wait until LY_AktifLevelID == 37 && level_yuklendi_ok == 1 && player != 0 && oyu
 wait until oyun_ilk_basladi == 0 timeout 600
 store saves aktif_kayit_sayisi
 store slot Aktif_SaveNo
+store count SLG_KayitSayisi
 store x player.x
 store y player.y
 press Escape
 wait until STM_Acik == 1 && freeze_mode == 1 timeout 120
 assert STM_Cursor == 0
+# Ring: CONTINUE -Down-> MAIN MENU (script) -Down-> GRAPHICS (native) -Down-> SAVE (native, wraps) -Up-> GRAPHICS -Up-> MAIN MENU.
+press Down
+frames 2
+assert STM_Cursor == 1
+press Down
+frames 2
+assert STM_Cursor == 1 && STM_Acik == 1
+press Down
+frames 2
+assert STM_Cursor == 1 && STM_Acik == 1
+press Up
+frames 2
+assert STM_Cursor == 1
+press Up
+frames 2
+assert STM_Cursor == 1 && STM_Acik == 1
+press Up
+frames 2
+assert STM_Cursor == 0
 press Up
 frames 2
 assert STM_Cursor == 0
 assert Aktif_SaveNo == @slot
+# Return on SAVE opens the picker: nothing written, the script menu untouched.
+press Return
+frames 2
+assert aktif_kayit_sayisi == @saves && Aktif_SaveNo == @slot && STM_Acik == 1 && STM_Cursor == 0
 press Return
 frames 2
 assert aktif_kayit_sayisi == @saves + 1
-assert Aktif_SaveNo == @slot + 1
+assert Aktif_SaveNo == @slot + 1 && SLG_KayitSayisi == @count + 1
 assert STM_Acik == 1 && freeze_mode == 1
-# Down from SAVE gives CONTINUE back to the script cursor; Return continues the game.
+# The picker closed with SAVE selected: Down gives CONTINUE back to the script cursor; Return continues the game.
 press Down
 frames 2
 assert STM_Cursor == 0 && STM_Acik == 1

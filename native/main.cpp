@@ -160,6 +160,7 @@ int main(int argc,char** argv){try{
  auto source=[&](std::string_view name){auto key=lower(name);auto it=sourceFiles.find(key);if(it!=sourceFiles.end()){std::ifstream in(it->second,std::ios::binary);if(!in)throw std::runtime_error("cannot read script "+it->second.string());auto size=std::filesystem::file_size(it->second);if(size>16*1024*1024)throw std::runtime_error("script exceeds16MiB safety bound");std::string text(size,'\0');if(size&&!in.read(text.data(),std::streamsize(size)))throw std::runtime_error("truncated script read");return text;}return bonus||entry.empty()?assets.archive_text(name):assets.text(name);};
  // K22.wdl original:580-584 / ISO:649-653: legacy campaign gate, not a D3D backend declaration.
  k22::RenderOptions renderOptions;renderOptions.backend=rendererName=="vulkan"?k22::RendererBackend::Vulkan:k22::RendererBackend::OpenGL;renderOptions.rayTracing=rayTracing!="off";if(bonus){constexpr int samples[]={0,1,4,9};renderOptions.samples=samples[bonusAnti];}
+ const auto renderBase=renderOptions; // what a graphics key left at its fallback keeps (in-game graphics menu)
  k22::graphics_cli::apply(renderOptions,graphics);
  std::unique_ptr<k22::Renderer> renderer;if(!headless)renderer=k22::graphics_cli::create(renderOptions,graphics);k22::Media media(assets,!headless);k22::State state;if(bonus)state.profile=k22::SemanticProfile::BonusA7;k22::Engine engine(assets,renderer.get(),media,state);
  engine.controller=k22::load_controller_config(std::cerr);if(engine.controller.modern)std::cerr<<"kabus22: controller mode modern (deadzone "<<engine.controller.deadzone<<", sensitivity "<<engine.controller.sensitivity<<", vibration "<<engine.controller.vibration<<")\n";
@@ -169,6 +170,7 @@ int main(int argc,char** argv){try{
  if(!bonus)engine.configure_language(runtime,language,explicitLanguage);
  if(cameraName=="first-person"){if(bonus||lower(entryName)=="k22widescreen.wdl")throw std::runtime_error("--camera first-person applies to the original campaign scripts (patched scripts provide their own F5 camera)");engine.cameraMode=k22::Engine::CameraMode::FirstPerson;}
  engine.seamlessDoors=graphics.seamlessDoors&&!bonus; // --graphics seamless_doors=on|off (docs/SEAMLESS_DOORS.md)
+ engine.configure_graphics(renderBase,renderOptions,graphics.preset,graphics.overrides); // in-game graphics menu (docs/GRAPHICS_MENU.md); sets engine.fpsLimit
  const bool originalCampaign=!bonus&&entry.empty()&&lower(entryName)=="k22.wdl";
  if((!headless||displayDimensions)&&originalCampaign){const bool admitted=engine.configure_display(runtime,true,display=="native",displayWidth,displayHeight,windowMode);if(display=="native"&&(displayDimensions||displayMode)&&!admitted)throw std::runtime_error("native display overrides require the original campaign resolution/UI function graph");}
  else if(displayDimensions||displayMode)throw std::runtime_error("native display overrides require the auto-selected original campaign (headless also requires explicit resolution)");
@@ -185,7 +187,7 @@ int main(int argc,char** argv){try{
    // A6 00414650: floor(1000*1024*1024 / max(FPS_MAX raw,1024)) raw milliseconds, unless fps_limit overrides it.
    // Frame generation presents two frames per rendered frame: a numeric fps_limit caps the presented rate (renders at half
    // of it); the script's own fps_max (original) keeps pacing the rendered game ticks.
-   const auto periodRaw=(scenario&&!graphics.fpsLimit?1000LL*1024*1024/(60*1024):k22::render_policy::frame_period_raw(graphics.fpsLimit,engine.global("fps_max").raw()))*(graphics.fpsLimit>0&&renderer&&renderer->presentation_state().frameGeneration?2:1);
+   const auto periodRaw=(scenario&&!engine.fpsLimit?1000LL*1024*1024/(60*1024):k22::render_policy::frame_period_raw(engine.fpsLimit,engine.global("fps_max").raw()))*(engine.fpsLimit>0&&renderer&&renderer->presentation_state().frameGeneration?2:1); // engine.fpsLimit: the graphics menu changes it live
    const auto deadline=frameStart+std::chrono::nanoseconds(periodRaw*1'000'000/1024);
    if(std::chrono::steady_clock::now()<deadline)std::this_thread::sleep_until(deadline);
    // Anchor to the actual start, not completion or an overdue scheduled start.
@@ -194,10 +196,19 @@ int main(int argc,char** argv){try{
   // K22_FRAME_TIMING=FILE: one line per frame, microseconds: frame poll+scenario tick draw finish_frame, then live particles, door phase, held (seamless doors).
   static std::FILE* timingLog=[]{const char* p=std::getenv("K22_FRAME_TIMING");return p&&*p?std::fopen(p,"w"):nullptr;}();
   const auto t0=timingLog?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+  // In-game graphics menu (docs/GRAPHICS_MENU.md): a change Renderer::reconfigure cannot apply live gets a new renderer here, before
+  // poll, keeping the window mode/size. A chosen backend fails hard (no preset degradation); then the previous options come back.
+  if(auto next=renderer?engine.take_renderer_request():std::optional<k22::RenderOptions>{}){
+   auto previous=renderer->options();previous.width=next->width;previous.height=next->height;previous.mode=next->mode;previous.title=next->title;
+   std::string error;const k22::graphics_cli::Request chosen;engine.set_renderer(nullptr);renderer.reset();
+   try{renderer=k22::graphics_cli::create(*next,chosen);}catch(const std::exception& e){error=e.what();std::cerr<<"kabus22: graphics: "<<k22::graphics_cli::backend_name(*next)<<" failed ("<<error<<"); restoring "<<k22::graphics_cli::backend_name(previous)<<'\n';renderer=k22::graphics_cli::create(previous,chosen);}
+   engine.set_renderer(renderer.get());engine.renderer_recreated(error);frameStart=std::chrono::steady_clock::now();
+  }
   if(renderer)renderer->poll(input);else input.dt=1.0/60;
   if(scenario){input.dt=step;if(!scenario->step(engine,runtime,renderer.get(),input,count))break;if(scenario->realtime())media.real_clock();else media.advance_clock(step);}
   const auto t1=timingLog?std::chrono::steady_clock::now():t0;
   engine.tick(runtime,engine.skip_intro(runtime,engine.console(runtime,input)));
+  engine.graphics_update(); // debounced graphics-menu renderer change: reconfigure now, or a recreation next frame
   const auto t2=timingLog?std::chrono::steady_clock::now():t0;
   // Seamless doors: the frames between the destination's Level_Load and its Giris placement are not presented.
   if(renderer&&!engine.hold_presentation())renderer->draw(engine.frame());

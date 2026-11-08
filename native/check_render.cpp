@@ -2110,6 +2110,76 @@ void door_portal_checks(k22::RendererBackend backend,bool rayTracing) {
     renderer.release_scene();
     if(shot()!=swapped)throw std::runtime_error("Door portal: kept and reuploaded door world differ");
 }
+// Renderer::reconfigure (docs/GRAPHICS_ROADMAP.md "Live changes"): a live change returns true and the next frames still
+// show the scene (backdrop, moving actor, HUD) at the new settings; a change that needs a new renderer returns false and
+// leaves options() exactly as before. K22_CAPTURE_DIR keeps the captures.
+void reconfigure_checks(k22::RendererBackend backend,bool rayTracing) {
+    using namespace k22;
+    TempDirectory captures;
+    const bool vulkan=backend==RendererBackend::Vulkan;const std::string name=vulkan?rayTracing?"vulkan-rt":"vulkan-raster":"opengl";
+    auto solid=[](std::array<std::uint8_t,3>c){auto image=std::make_shared<Image>();image->width=image->height=8;for(unsigned i=0;i<64;++i)image->rgba.insert(image->rgba.end(),{c[0],c[1],c[2],255});return image;};
+    auto plane=[](Model&m,float x,float half,std::shared_ptr<const Image>image){m.formatVersion=4;m.vertices={{{x,-half,-half},{-1,0,0},{0,0},{}},{{x,half,-half},{-1,0,0},{1,0},{}},{{x,half,half},{-1,0,0},{1,1},{}},{{x,-half,half},{-1,0,0},{0,1},{}}};m.triangles={{{0,1,2},0,0},{{0,2,3},0,0}};m.materials.resize(1);m.materials[0].texture=std::move(image);};
+    World backdrop;Model actor;
+    plane(backdrop.mesh,40,60,solid({40,60,160}));backdrop.mesh.formatVersion=6;backdrop.mesh.materials[0].flags=3;backdrop.mesh.materials[0].raw.resize(64);
+    plane(actor,9,1.5f,solid({230,30,20}));
+    std::array<DrawInstance,1> actors{};actors[0].model=&actor;actors[0].objectId=501;actors[0].doubleSided=actors[0].noFog=true;
+    Camera camera;camera.nativeAmbient=-127;camera.widescreen=false;camera.noShadow=true;camera.perDrawOpacity=true;
+    std::array<UICommand,1> hud{};hud[0].kind=UICommand::Kind::Solid;hud[0].rect={8,8,48,24};hud[0].color={.1f,.9f,.2f,1};
+    RenderFrame frame;frame.cameras=std::span(&camera,1);frame.world=&backdrop;frame.sunDirection={-1,0,1};frame.instances=actors;frame.ui=hud;
+    RenderOptions options;options.backend=backend;options.rayTracing=rayTracing;options.width=320;options.height=180;options.samples=4;options.anisotropy=8;options.vsync=false;options.title="Kabus 22 reconfigure consumer";
+    if(vulkan&&!rayTracing){options.features.fsr=2;options.features.ssao=true;}
+    Renderer renderer(options);
+    int shots=0;
+    auto fail=[&](const std::string&what){throw std::runtime_error(name+" reconfigure: "+what);};
+    auto visible=[&](const std::string&what){
+        for(int i=0;i<8;++i){actors[0].position.y=-3+.4f*i;renderer.draw(frame);}
+        const auto file=std::to_string(shots++)+".ppm";const auto p=captured_pixels(renderer,frame,captures.path/file);
+        if(auto*keep=std::getenv("K22_CAPTURE_DIR"))std::filesystem::copy_file(captures.path/file,std::filesystem::path(keep)/("reconfigure-"+name+"-"+file),std::filesystem::copy_options::overwrite_existing);
+        std::size_t red=0,green=0;for(std::size_t i=0;i<p.size();i+=3){const int r=p[i],g=p[i+1],b=p[i+2];red+=r>150&&g<100&&b<100;green+=g>150&&r<100&&b<100;}
+        std::cout<<name<<" reconfigure "<<what<<": actor "<<red<<", HUD "<<green<<" of "<<p.size()/3<<" px, MSAA "<<renderer.presentation_state().samples<<std::endl;
+        if(red<1000||green<1000)fail(what+" frame lost the scene"); // actor ~4800 px, HUD 48x24 = 1152 px (the unlit backdrop stays black)
+    };
+    auto same=[](const RenderOptions&a,const RenderOptions&b){return a.samples==b.samples&&a.anisotropy==b.anisotropy&&a.vsync==b.vsync&&a.pbr==b.pbr&&a.forceAnisotropy==b.forceAnisotropy&&a.backend==b.backend&&a.rayTracing==b.rayTracing&&a.packs==b.packs&&a.features==b.features&&a.width==b.width&&a.height==b.height&&a.mode==b.mode;};
+    // live: expected result; a refused change must leave options() untouched, an applied one must still render.
+    auto change=[&](const std::string&what,auto&&edit,bool live){
+        const RenderOptions before=renderer.options();RenderOptions next=before;edit(next);
+        if(renderer.reconfigure(next)!=live)fail(what+(live?" was refused":" was applied live"));
+        if(!live){if(!same(before,renderer.options()))fail(what+" was refused but changed options()");}else visible(what);
+    };
+    visible("initial");
+    change("vsync on",[](RenderOptions&o){o.vsync=true;},true);if(!renderer.options().vsync)fail("vsync not stored");
+    change("vsync off",[](RenderOptions&o){o.vsync=false;},true);
+    change("anisotropy 2",[](RenderOptions&o){o.anisotropy=2;},true);if(renderer.options().anisotropy!=2)fail("anisotropy not stored");
+    change("MSAA 1",[](RenderOptions&o){o.samples=1;},true);if(renderer.options().samples!=1||renderer.presentation_state().samples!=1)fail("MSAA 1 not in effect");
+    change("MSAA 8",[](RenderOptions&o){o.samples=8;},true);if(renderer.options().samples<2||renderer.presentation_state().samples!=renderer.options().samples)fail("MSAA 8 not in effect (clamped value must be reported)");
+    change("window fields ignored",[](RenderOptions&o){o.width=17;o.height=19;o.title="ignored";},true);if(renderer.options().width!=320)fail("reconfigure changed the window size");
+    if(!vulkan){
+        change("bloom+fxaa+ssao+fog+pbr",[](RenderOptions&o){auto&f=o.features;f.bloom=f.fxaa=f.ssao=f.fog=true;o.pbr=true;},true);
+        change("effects off",[](RenderOptions&o){auto&f=o.features;f.bloom=f.fxaa=f.ssao=f.fog=false;o.pbr=false;},true);
+        change("taa dropped by OpenGL admission",[](RenderOptions&o){o.features.taa=true;},true);if(renderer.options().features.taa)fail("OpenGL stored taa");
+        change("shadows=shadowmap",[](RenderOptions&o){o.features.shadows=ShadowMode::ShadowMap;},false);
+        change("backend vulkan",[](RenderOptions&o){o.backend=RendererBackend::Vulkan;},false);
+        return;
+    }
+    change("backend opengl",[](RenderOptions&o){o.backend=RendererBackend::OpenGL;},false);
+    change(rayTracing?"ray tracing off":"ray tracing on",[&](RenderOptions&o){o.rayTracing=!rayTracing;},false);
+    if(!rayTracing){
+        change("FSR quality->balanced",[](RenderOptions&o){o.features.fsr=3;},true);if(renderer.options().features.fsr!=3)fail("FSR balanced not stored");
+        change("effects on",[](RenderOptions&o){auto&f=o.features;f.bloom=f.fxaa=f.fog=f.sharpen=f.taa=true;f.shadows=ShadowMode::ShadowMap;o.pbr=true;},true);if(renderer.options().features.taa)fail("taa stored under FSR");
+        change("smooth normals+texture upscale",[](RenderOptions&o){o.features.smoothNormals=o.features.upscale=true;},true);
+        change("FSR off",[](RenderOptions&o){o.features.fsr=0;},false);
+        change("frame generation on",[](RenderOptions&o){o.features.frameGeneration=true;},false);
+        // Device created without tessellationShader: enabling needs a new device unless the device lacks it (dropped, live).
+        {RenderOptions next=renderer.options();next.features.tessellation=true;if(renderer.reconfigure(next)){if(renderer.options().features.tessellation)fail("tessellation enabled without the device feature");visible("tessellation dropped");}}
+        change("effects off",[](RenderOptions&o){auto&f=o.features;f.bloom=f.fxaa=f.fog=f.sharpen=f.ssao=f.smoothNormals=f.upscale=false;f.shadows=ShadowMode::Original;o.pbr=false;},true);
+        return;
+    }
+    change("RT shadows+GI+reflections+denoise on",[](RenderOptions&o){auto&f=o.features;f.shadows=ShadowMode::RayTraced;f.gi=f.roughReflections=f.denoise=true;},true);
+    change("RT + pbr/taa/bloom",[](RenderOptions&o){o.pbr=true;o.features.taa=o.features.bloom=true;},true);
+    change("GI off",[](RenderOptions&o){o.features.gi=false;},true);
+    change("RT signals off",[](RenderOptions&o){auto&f=o.features;f.shadows=ShadowMode::Original;f.roughReflections=f.denoise=f.taa=f.bloom=false;o.pbr=false;},true);
+    change("FSR on",[](RenderOptions&o){o.features.fsr=2;},false);
+}
 }
 
 // Asset-free Contract D/E policy: presets, CLI extraction, fallback, tangents, tone curve.
@@ -2241,7 +2311,13 @@ void graphics_policy_checks() {
 }
 int main(int argc,char** argv) {
     if(argc==2&&std::string_view(argv[1])=="--policy"){graphics_policy_checks();std::cout<<"Graphics preset/pack/tangent/tone-map policy checks passed\n";return 0;}
-    if(argc!=2&&argc!=3)throw std::runtime_error("Usage: k22-render-check <recovered FX directory> [--gl|--vulkan|--vulkan-rt] | --policy");
+    // Live reconfiguration alone (asset-free; run under VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation for Vulkan).
+    if(argc==2&&std::string_view(argv[1]).starts_with("--reconfigure-")){
+        const std::string_view which=std::string_view(argv[1]).substr(14);
+        if(which!="gl"&&which!="vulkan"&&which!="vulkan-rt")throw std::runtime_error("Unknown render check option: "+std::string(argv[1]));
+        reconfigure_checks(which=="gl"?k22::RendererBackend::OpenGL:k22::RendererBackend::Vulkan,which=="vulkan-rt");std::cout<<"Actual renderer live reconfiguration checks passed\n";return 0;
+    }
+    if(argc!=2&&argc!=3)throw std::runtime_error("Usage: k22-render-check <recovered FX directory> [--gl|--vulkan|--vulkan-rt] | --policy | --reconfigure-gl|--reconfigure-vulkan|--reconfigure-vulkan-rt");
     const auto mode=argc==3?std::string_view(argv[2]):std::string_view{};
     if(!mode.empty()&&mode!="--gl"&&mode!="--vulkan"&&mode!="--vulkan-rt")
         throw std::runtime_error("Unknown render check option: "+std::string(mode));
@@ -2276,6 +2352,7 @@ int main(int argc,char** argv) {
     Renderer::boundary_check();
     std::cout<<"Renderer material/effect boundary checks passed\n";
     if(argc==3) {
+        reconfigure_checks(mode=="--gl"?k22::RendererBackend::OpenGL:k22::RendererBackend::Vulkan,mode=="--vulkan-rt");std::cout<<"Actual renderer live reconfiguration checks passed\n";
         if(mode!="--gl"){vulkan_door_portal_checks(mode=="--vulkan-rt");std::cout<<"Actual Vulkan seamless door portal checks passed\n";}
         if(mode=="--vulkan-rt"){
             temporal_ghosting_checks(true);temporal_ghosting_checks(true,2);frame_generation_checks(true);gl_checks(bytes(mix),bytes(sunMix),k22::RendererBackend::Vulkan,true);

@@ -124,17 +124,7 @@ struct Raster {
         const std::array<std::span<const std::uint32_t>,14>code{spirv::scene_vert,s.rayEnabled?std::span<const std::uint32_t>(spirv::scene_rt_frag):std::span<const std::uint32_t>(spirv::scene_frag),spirv::shadow_vert,spirv::shadow_geom,spirv::shadow_frag,spirv::ui_vert,spirv::ui_frag,spirv::post_vert,spirv::post_frag,spirv::sky_frag,spirv::warp_frag,spirv::cloud_frag,spirv::tonemap_frag,spirv::effects_frag};
         for(std::size_t i=0;i<code.size();++i)shaders[i]=s.shader(code[i]);
         if(s.options.features.tessellation){shaders[14]=s.shader(spirv::scene_tesc);shaders[15]=s.shader(spirv::scene_tese);}
-        if(rtSignals()){
-            // Compute set: 0 uniform, 1 lights, 2-9 sampled images, 10-20 storage images; set 1 is the ray-query scene.
-            std::array<VkDescriptorSetLayoutBinding,21>cb{};for(unsigned i=0;i<cb.size();++i){cb[i].binding=i;cb[i].descriptorCount=1;cb[i].descriptorType=i==0?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:i==1?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:i<10?VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;cb[i].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT;}
-            VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};ci.bindingCount=cb.size();ci.pBindings=cb.data();require(vkCreateDescriptorSetLayout(s.device,&ci,nullptr,&computeSetLayout),"RT signal descriptor layout");
-            std::array<VkDescriptorSetLayout,2>sets{computeSetLayout,rt_layout(*s.rays)};VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT,0,8};
-            VkPipelineLayoutCreateInfo cp{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};cp.setLayoutCount=2;cp.pSetLayouts=sets.data();cp.pushConstantRangeCount=1;cp.pPushConstantRanges=&push;require(vkCreatePipelineLayout(s.device,&cp,nullptr,&computeLayout),"RT signal pipeline layout");
-            for(auto [pipeline,words]:{std::pair{&signalsPipeline,std::span<const std::uint32_t>(spirv::rt_signals_comp)},{&filterPipeline,std::span<const std::uint32_t>(spirv::rt_filter_comp)}}){
-                auto module=s.shader(words);VkComputePipelineCreateInfo pc{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};pc.layout=computeLayout;pc.stage={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};pc.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT;pc.stage.module=module;pc.stage.pName="main";
-                auto status=vkCreateComputePipelines(s.device,VK_NULL_HANDLE,1,&pc,nullptr,pipeline);vkDestroyShaderModule(s.device,module,nullptr);require(status,"RT signal compute pipeline");
-            }
-        }
+        if(rtSignals())ensure_rt_pipelines();
         const std::array<std::uint8_t,4>w{255,255,255,255},b{0,0,0,255};
         white=s.image(1,1,VK_FORMAT_R8G8B8A8_UNORM,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);black=s.image(1,1,VK_FORMAT_R8G8B8A8_UNORM,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={1,1,1};s.upload(white,std::as_bytes(std::span(w)),std::span(&copy,1));s.upload(black,std::as_bytes(std::span(b)),std::span(&copy,1));
@@ -143,6 +133,26 @@ struct Raster {
         s.upload(flatNormal,std::as_bytes(std::span(n)),std::span(&copy,1));s.upload(defaultOrm,std::as_bytes(std::span(o)),std::span(&copy,1));
         gamma=s.image(256,3,VK_FORMAT_R16_UNORM,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);copy.imageExtent={256,3,1};s.upload(gamma,std::as_bytes(std::span(adjustment.gammaRamp)),std::span(&copy,1));
         }catch(...){destroy_owned();throw;}
+    }
+    // RT signal compute pipelines (shadows=rt, gi, reflections=rough), built on first use so reconfigure can enable them.
+    void ensure_rt_pipelines(){
+        if(signalsPipeline)return;
+        // Compute set: 0 uniform, 1 lights, 2-9 sampled images, 10-20 storage images; set 1 is the ray-query scene.
+        std::array<VkDescriptorSetLayoutBinding,21>cb{};for(unsigned i=0;i<cb.size();++i){cb[i].binding=i;cb[i].descriptorCount=1;cb[i].descriptorType=i==0?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:i==1?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:i<10?VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;cb[i].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT;}
+        VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};ci.bindingCount=cb.size();ci.pBindings=cb.data();require(vkCreateDescriptorSetLayout(s.device,&ci,nullptr,&computeSetLayout),"RT signal descriptor layout");
+        std::array<VkDescriptorSetLayout,2>sets{computeSetLayout,rt_layout(*s.rays)};VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT,0,8};
+        VkPipelineLayoutCreateInfo cp{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};cp.setLayoutCount=2;cp.pSetLayouts=sets.data();cp.pushConstantRangeCount=1;cp.pPushConstantRanges=&push;require(vkCreatePipelineLayout(s.device,&cp,nullptr,&computeLayout),"RT signal pipeline layout");
+        for(auto [pipeline,words]:{std::pair{&signalsPipeline,std::span<const std::uint32_t>(spirv::rt_signals_comp)},{&filterPipeline,std::span<const std::uint32_t>(spirv::rt_filter_comp)}}){
+            auto module=s.shader(words);VkComputePipelineCreateInfo pc{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};pc.layout=computeLayout;pc.stage={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};pc.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT;pc.stage.module=module;pc.stage.pName="main";
+            auto status=vkCreateComputePipelines(s.device,VK_NULL_HANDLE,1,&pc,nullptr,pipeline);vkDestroyShaderModule(s.device,module,nullptr);require(status,"RT signal compute pipeline");
+        }
+    }
+    // State::reconfigure with the device idle: pipelines (sample count, smooth-normal specialization), every effect image
+    // and the temporal state (TAA/FSR/denoiser history, motion matrices) start over; shadow maps rebuild on first use.
+    void reconfigure(){
+        for(auto&[k,p]:pipelines)vkDestroyPipeline(s.device,p,nullptr);pipelines.clear();
+        free_effects(true);fx.previousModels.clear();fx.currentModels.clear();fx.motionValid=fx.shadowsValid=fx.opaqueValid=fx.upscaledNow=fx.fsrReset=false;fx.fsrTime={};fx.taaIndex=fx.historyIndex=0;
+        if(rtSignals())ensure_rt_pipelines();
     }
     ~Raster(){destroy_owned();}
     void destroy_owned(){
@@ -885,6 +895,7 @@ std::unique_ptr<Raster,RasterDelete> raster_create(VulkanBackend::State&s){retur
 void raster_destroy(Raster*r){delete r;}
 void raster_draw(Raster&r,const RenderFrame&f,WindowMetrics m){r.draw(f,m);}
 void raster_release(Raster&r,std::span<const Model* const> keep){r.release(keep);}
+void raster_reconfigure(Raster&r){r.reconfigure();}
 void raster_purge_model(Raster&r,const Model*model){auto it=r.meshes.find(model);if(it!=r.meshes.end()){r.s.destroy(it->second.indices);r.meshes.erase(it);}for(auto it=r.overrideBounds.begin();it!=r.overrideBounds.end();)if(it->second.model==model)it=r.overrideBounds.erase(it);else ++it;}
 void raster_purge_image(Raster&r,const k22::Image*image){for(auto&[id,effect]:r.effects)for(auto&bank:effect.banks)if(bank.identity==image)bank={};auto found=r.textures.find(image);if(found!=r.textures.end()){for(auto&t:found->second){r.s.destroy(t.image);r.s.destroy(t.normal);r.s.destroy(t.orm);}r.textures.erase(found);}auto warp=r.warps.find(image);if(warp!=r.warps.end()){r.s.destroy(warp->second.image);r.warps.erase(warp);}auto sky=r.skies.find(image);if(sky!=r.skies.end()){r.s.destroy(sky->second.image);r.skies.erase(sky);}r.turbulent.erase(image);}
 int raster_shader_version(const Raster&r){return r.shaders[0]&&r.shaders[1]?2020:0;}

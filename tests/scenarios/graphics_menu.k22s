@@ -1,0 +1,56 @@
+# requires: saves
+# In-game graphics menu (docs/GRAPHICS_MENU.md): Escape opens the original Smartmenu; Down twice from CONTINUE reaches the native
+# GRAPHICS item below MAIN MENU and Return opens the menu over it. Headless there is no renderer (RENDERER greyed) and no native
+# display (WINDOW MODE, RESOLUTION greyed): the cursor starts on PRESET, Down skips to VSYNC then FRAME LIMIT; Up wraps through
+# BACK to SEAMLESS DOORS. fps_limit and seamless doors apply at once and are merged into $XDG_CONFIG_HOME/kabus22/launcher.ini.
+# Escape closes the menu back to the still-open pause menu; Escape again resumes the game. Demir, kizic2 (level 37), kayit10.sav.
+realtime off
+load-save 10
+wait until LY_AktifLevelID == 37 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 7200
+wait until oyun_ilk_basladi == 0 timeout 600
+assert $fpslimit == 0 && $doors == 1 && $gfxrow == -1
+press Escape
+wait until STM_Acik == 1 && freeze_mode == 1 timeout 120
+press Down
+frames 2
+press Down
+frames 2
+assert $gfxrow == -1
+press Return
+frames 2
+assert $gfxrow == 1 && STM_Acik == 1
+press Down
+frames 2
+assert $gfxrow == 4
+press Down
+frames 2
+assert $gfxrow == 5
+press Right
+frames 2
+assert $fpslimit == 30
+press Right
+frames 2
+assert $fpslimit == 60
+press Up
+frames 2
+press Up
+frames 2
+press Up
+frames 2
+assert $gfxrow == 26
+press Up
+frames 2
+assert $gfxrow == 25 && $doors == 1
+press Right
+frames 2
+assert $doors == 0
+# Every press is the menu's: the pause menu stays open behind it.
+assert STM_Acik == 1 && freeze_mode == 1
+press Escape
+frames 2
+assert $gfxrow == -1 && STM_Acik == 1 && freeze_mode == 1
+assert $fpslimit == 60 && $doors == 0
+press Escape
+wait until STM_Acik == 0 && freeze_mode == 0 timeout 120
+assert $fpslimit == 60 && $doors == 0
+walk-to -420 25 12 timeout 1200
