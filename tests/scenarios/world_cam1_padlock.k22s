@@ -46,7 +46,11 @@ wait until $movieframe >= 380 timeout 600
 frames 3
 assert VST_AltText.visible == 1 && VidSub_AltYazi != @s1
 capture cam1_movie_subtitle
+# Decoded frames 599-604 carry no subtitle. A step runs before the tick: it reads the movie frame of now and the line the script
+# set on the previous tick, so one engine frame longer than a movie frame (40 ms, e.g. a busy test machine) can show frame 600
+# while the line of frame 598 is still up. The line has to be seen hidden before the gap ends.
 wait until $movieframe >= 600 timeout 1200
+wait until VST_AltText.visible == 0 || $movieframe >= 605 timeout 60
 assert VST_AltText.visible == 0
 wait until $movieframe >= 963 timeout 1800
 store w963 $wall

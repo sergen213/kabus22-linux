@@ -12,7 +12,12 @@
   tangent, 13 floats per vertex. Animated frames, interpolation and mutable mesh overrides are
   resolved on the GPU. One BLAS is built per pose. The TLAS is rebuilt per camera from the admitted
   opaque and translucent draws in source order, with per-instance clip planes. The instance custom
-  index is capped at 24 bits and enforced with an error.
+  index is capped at 24 bits and enforced with an error. Triangles whose material hit never depends on
+  the texel (no colour key, no flare alpha, a texture whose alpha is 1 everywhere, or an FX effect) are
+  opaque geometry: rays commit them inside the traversal, and only colour-keyed, alpha-textured,
+  translucent, faded or clipped surfaces reach the shader's hit test (`rtMaterialHit`). One-sided
+  instances are culled by the rays' cull flags (flip-facing for clockwise models) instead of by that test.
+  All BLAS builds and refits of a frame go into one build command, and the pose deforms share one barrier.
 - **Materials in hits**: one `RtMaterial` record per batch, carrying UV transform, tint, alpha,
   sprite frames, flags (overlay/flare/alpha test/additive/blend/explicit material/unlit/effect) and
   the prepared script-material terms. Hit textures come from a bindless `sampler2D[1024]` array,
@@ -123,6 +128,10 @@ Screen-space signals of the primary view (`native/render_vulkan_raster.cpp` `rt_
    so a shadow or bounce does not linger where its caster left; alpha max(1/(n+1), 0.15 shadows/reflections,
    0.06 GI)), then three a-trous B3 iterations (strides 1/2/4) with depth/normal edge stopping; mirror-smooth
    reflections and the lightmapped actor-shadow alpha are not blurred (model-pixel alpha is, among model pixels).
+   The a-trous taps read one packed guide texel (linear depth, octahedral normal, lightmapped bit) written by the
+   temporal pass. The reflection signal is traced, accumulated and filtered on reflective pixels only. Where no pixel
+   within 16 pixels has a shadow/occlusion mask other than exactly 1 (8x8 tiles marked by the temporal pass), the
+   iterations write 1 without reading the mask taps: the same value the filter computes there.
 4. **Motion vectors** (`taa=1`, or `denoise=1` with signals): after the G-buffer, entities whose transform
    (keyed by entity id, previous frame only) or GPU-deformed pose (the same actor's pose in the other frame
    slot, `rt_previous_pose`) changed are drawn again (scene pass 3) into an RGBA16F target: previous-minus-current
@@ -355,6 +364,61 @@ Validation (Khronos layer, sync validation; kriz bench with and without frame ge
 `VUID-vkDestroyImageView-imageView-01026` (FidelityFX local patch 8: the backend recycles dynamic views per dispatch,
 and reactive mask + upscale per frame freed the previous frame's views while it ran).
 
+### Third pass (2026-11-09)
+
+Same RX 7900 XTX/RADV, private headless `kwin_wayland --virtual` at 3840x2160, the user's settings (`vulkan-rt`, MSAA off,
+PBR, `shadows=rt`, `gi=1`, `reflections=rough`, `denoise=1`, bloom, SSAO, FXAA, volumetric fog, smooth normals, tessellation,
+texture upscale, sharpen, `fsr=balanced` = 2259x1271 internal), frame generation off, `fps_limit=unlimited`, 900 steady
+frames after a save load. GPU ms from `K22_GPU_TIMING=1`. 0.4.16 against 0.4.17 (this pass together with the release's
+other changes: world-batch culling in the raster passes, the script runtime), one run at a time on an otherwise idle
+machine, both builds interleaved, three runs each; medians, the three runs of a build within 1%.
+
+| View (save) | GPU ms | fps | rt_signals | rt_denoise | depth_fx | as_build | prepare | rt_gbuffer | scene |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| street, level 7, rain (1) | 12.54 -> 6.82 | 42 -> 138 | 4.29 -> 2.85 | 2.31 -> 1.30 | 0.99 -> 0.39 | 1.03 -> 0.19 | 0.72 -> 0.08 | 0.77 -> 0.19 | 1.04 -> 0.50 |
+| street, level 7, no rain (5) | 10.60 -> 6.82 | 89 -> 138 | 3.20 -> 2.87 | 2.09 -> 1.30 | 0.99 -> 0.39 | 0.65 -> 0.19 | 0.68 -> 0.07 | 0.67 -> 0.19 | 0.98 -> 0.50 |
+| kriz (9) | 9.24 -> 7.65 | 102 -> 123 | 3.30 -> 2.91 | 1.82 -> 1.34 | 0.90 -> 0.38 | 0.29 -> 0.18 | 0.15 -> 0.09 | 0.33 -> 0.32 | 1.23 -> 1.21 |
+| kizic2 (10) | 8.66 -> 6.96 | 109 -> 135 | 3.50 -> 2.69 | 2.11 -> 1.58 | 0.70 -> 0.42 | 0.21 -> 0.20 | 0.04 -> 0.03 | 0.30 -> 0.26 | 0.55 -> 0.53 |
+| tunnel (14) | 8.08 -> 5.84 | 116 -> 160 | 2.52 -> 2.08 | 2.08 -> 1.27 | 0.97 -> 0.40 | 0.16 -> 0.15 | 0.04 -> 0.03 | 0.35 -> 0.15 | 0.71 -> 0.51 |
+
+The rain street was limited by the script runtime at 42 fps in 0.4.16 (its GPU passes read slow there because the GPU
+idled between frames); it is GPU-bound now. `rt_gbuffer` and `scene` fall where a level has many world batches outside
+the view (docs/GRAPHICS_ROADMAP.md "Vulkan CPU recording").
+
+What changed:
+- **Opaque geometry.** Every triangle was non-opaque to the ray queries, so each candidate returned to the shader, which
+  fetched indices, vertices and a texel (`rtMaterialHit`) to decide a hit that cannot fail for most geometry. Materials
+  whose result never depends on the texel are opaque BLAS geometry; instances that are translucent, faded or clipped this
+  frame are forced non-opaque in the TLAS; one-sided culling uses ray cull flags. Forcing every instance back through
+  the shader gives a byte-identical capture (`fsr=off`) and costs 0.6 ms (`rt_signals` 2.69 -> 3.29 ms, save 10).
+- **Batched acceleration-structure work.** One barrier pair around a frame's pose deforms and one build command for all
+  BLAS builds/refits (disjoint scratch ranges, cut at 64 MB) instead of a barrier pair and a build command per pose.
+- **Volumetric fog.** Lights whose range the view segment never enters are dropped before the 24-step march (0.37 -> 0.04 ms).
+- **Denoiser.** Reflection signal on reflective pixels only; one packed guide fetch per a-trous tap; the iterations skip
+  the mask taps in 8x8 tiles where the mask is exactly 1 within their 14-pixel reach.
+
+Quality: the same rays and samples are traced. With `fsr=off` two runs of one build are byte-identical; base against this
+build differs by a mean 0.008-0.016/255 on saves 1, 5, 9, 10 and 14, with 0.001% of pixels above 8/255 (isolated pixels,
+largest 16-32/255) and none above 32/255: the mask shortcut writes exactly 1 where the filter's weighted mean of ones,
+stored as a half float, came out one step below 1. `K22_RT_SHADER_HITS=1` sends every hit through `rtMaterialHit` again
+(no opaque geometry): 24 walking/turning captures (saves 1 and 5) and a capture through an open seamless doorway (clipped
+door world) are byte-identical with and without it. At the user's settings 24 captures while walking and turning differ
+from base by a mean 0.008-0.014/255 (largest single pixel 27/255, none of the 100% crops shows a difference; base against
+base: 0). Per-pixel luma standard deviation over 30 consecutive captures (save 10): 0.0862 before and after.
+
+Other configurations (save 10, one run each, base -> this build, GPU ms): `fsr=quality` 10.71 -> 8.60, `fsr=native`
+22.21 -> 17.74, `--preset ultra` 10.57 -> 8.45, Vulkan raster with `shadows=shadowmap` and fog 2.61 -> 2.31 (capture
+byte-identical), frame generation on at `fps_limit=240` 11.29 -> 9.65 (165 -> 191 presented fps). The OpenGL capture with
+`volumetric_fog=1` is byte-identical to base. Khronos validation (save 9, frame generation off and on): no message, as on
+base. `k22-render-check --gl/--vulkan/--vulkan-rt` pass; `--vulkan-rt` now also changes an occluder's material after its
+BLAS was built (colour key off and on, an opaque skin replaced by a transparent one and back, fade, fade-out, TRANSPARENT,
+one-sided, mirrored scale) and requires each state to shade like a renderer started in it.
+
+Opaque flags are not cached: every frame each instance's material ranges and opaque bits are derived from that frame's
+materials (texture alpha is recorded when the bound image is uploaded; dynamic and warped textures never count as opaque),
+a BLAS is only reused for identical ranges and bits (otherwise rebuilt), translucent, faded or clipped instances are
+flagged no-opaque in that frame's TLAS, and a change of instance flags makes the TLAS a full build instead of a refit.
+
 ## Limits
 
 - Sun shadows (`shadows=rt` and `shadows=shadowmap` alike) make non-lightmapped models indoors much darker
@@ -365,6 +429,7 @@ and reactive mask + upscale per frame freed the previous frame's views while it 
   `shadows=rt` for receivers whose path crosses another brush toward it.
 - One bounce, one sample per pixel; reflections hit with legacy shading.
 - The TLAS is rebuilt per camera when its instance count changes (else updated), BLAS refit for changed poses, without compaction.
+  A BLAS is rebuilt (not refit) when one of its materials changes between opaque and texel-dependent (texture swap, colour key, flare).
 - Particles, view-space entities and billboards are not in the acceleration structure.
 - With `tessellation=1` the BLAS still holds the base mesh: ray-traced shadows, GI and reflections see model
   silhouettes without the PN bulge.

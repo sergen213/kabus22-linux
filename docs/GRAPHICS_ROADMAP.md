@@ -200,17 +200,30 @@ OpenUnderworld and ETI Yami (below).
   rendered frame into them (`State::finish`; the swapchain gets `minImageCount + 3` images while frame generation is on,
   as the previous frame's pair may still wait for presentation) and signals a timeline semaphore; a present thread only
   presents them (every queue submit, present and wait goes through one mutex). Per rendered frame it waits for the
-  frame's timeline value, presents the generated image no earlier than half an interval after the previous rendered one,
-  then the rendered image half an interval later; it never sleeps while a further frame is queued. The interval is an EMA
-  of the render thread's period between submissions without its wait on the present thread (GPU, FIFO acquire and
-  `fps_limit` waits count; counting the present-thread wait locked the pacing at whatever it once was). Same scheme as
-  OpenUnderworld (`src/render/vk/VkRenderer.cpp` `presentLoop`) and ETI Yami (`native/vulkan_renderer.cpp`
-  `present_loop`). Before 0.4.16 the IKV-derived thread acquired and blitted after the fence itself: on the single
-  graphics queue those blits ran behind the next frame's rendering, so a GPU-bound frame reached the display together with
-  the next generated one, and the 2 ms "compositor lead" (`K22_FG_PACING_LEAD_MS`, removed) split every interval unevenly
-  (6/10 ms at 60 rendered fps). The present mode is unchanged (FIFO with vsync: a full swapchain back-pressures the render
-  thread's acquire; immediate/mailbox without). Before a frame reuses its slot the render thread waits for the present job
-  two frames back (`drain_presents(1)`): about half a rendered frame of extra latency.
+  frame's timeline value, presents the generated image and, half a rendered-frame period later, the rendered image.
+  The period is measured on the present thread between those frame completions (the last 8, without the smallest and the
+  largest: a hitch or a skipped present does not move it, a stall of 250 ms or more is not sampled, a new frame rate is
+  followed within 8 frames), so every wait of the render thread counts: GPU, FIFO acquire, `fps_limit`, CPU. Small
+  frame-time differences are absorbed: a generated image is held until one period (less 0.1%) after the previous generated
+  one, but never more than 1/16 period after its frame completed, so a period measured too long cannot hold the rendered
+  rate down, and no pacing wait starts once a later frame is already complete. There is no compositor lead and no
+  dependence on the refresh rate; the thread's timer slack is 1 ns (the default 50 µs is 1.2% of a 240 Hz refresh).
+  History: before 0.4.16 the IKV-derived thread acquired and blitted after the fence itself: on the single graphics queue
+  those blits ran behind the next frame's rendering, so a GPU-bound frame reached the display together with the next
+  generated one, and the 2 ms "compositor lead" (`K22_FG_PACING_LEAD_MS`, removed) split every interval unevenly. 0.4.16
+  measured the period on the render thread between submissions minus its wait on the present thread; GPU-bound that wait
+  hid about a third of the period, so the rendered image followed the generated one after a third of the real period
+  instead of half (4.0/7.1 ms at 90 rendered fps). The present mode is unchanged (FIFO with vsync: a full swapchain
+  back-pressures the render thread's acquire; immediate/mailbox without). Before a frame acquires its two images
+  (`State::finish`, after recording) the render thread waits for the present job two frames back (`drain_presents(1)`).
+- **Latency:** the rendered image is presented half a rendered-frame period after the generated one, which follows the
+  frame's completion by the jitter hold of at most 1/16 period: at most 9/16 of a rendered frame (6.2 ms at 90 rendered
+  fps) after the frame would have been shown without frame generation, plus the interpolation's GPU time. 0.4.16 had no
+  bound on that hold (its generated image waited a full half period after the previous rendered one).
+- **Trace:** `K22_FG_TRACE=FILE` writes one line per present call (`microseconds G|R frame periodMs
+  msSinceFrameCompletion`); `tools/check_frame_pacing.py --fg-trace FILE [--tail N] [--max-split F] [--max-p99 F]`
+  prints the distribution (interval percentiles, both halves, the split, completion-to-present delays). With
+  `K22_GPU_TIMING=1`, `present_ms` is the render thread's wait on the present thread and `acquire_ms` the two acquires.
 - **`fps_limit`:** a numeric limit caps the presented rate, so rendering is paced at half of it (240 → 120 rendered);
   `original` keeps the script's `fps_max` pacing of the game ticks and presents twice that; `unlimited` is unchanged.
 - **Log:** `kabus22: frame generation presents=600 generated=… real=… presentedFps=… renderedFps=… presentIntervalMs
@@ -230,6 +243,33 @@ OpenUnderworld and ETI Yami (below).
 - **Measured** (private virtual KWin 2560x1440 at 60 Hz, FIFO, RX 7900 XTX RADV, all `ultra`-like effects, `fsr=quality`,
   level5 walk from `kayit0.sav`): RT `presents=600 generated=300 real=300 presentedFps=60.0 renderedFps=30.0`,
   present interval p50 16.68 ms, p99 16.81 ms; rendered frames are bit-identical with frame generation on and off.
+- **Measured pacing** (private virtual KWin 3840x2160 at 240 Hz, RX 7900 XTX RADV, vulkan-rt, `fsr=balanced`, all effects,
+  engine log line, medians of clean runs, 0.4.16 → now; `tools/check_frame_pacing.py --fg-trace` for the delays):
+
+  | Condition | presented fps | interval p50 / p99 ms | generated→real / real→generated ms |
+  | --- | --- | --- | --- |
+  | `fps_limit=unlimited` (no vsync), tunnel save, rendering-bound | 175.4 → 175.8 | 5.92 / 10.32 → 5.52 / 8.78 | 4.00 / 6.88 → 5.57 / 5.43 |
+  | same, kizic2 save | 166.0 → 166.0 | 6.12 / 10.15 → 5.90 / 8.30 | 4.34 / 7.15 → 5.93 / 5.78 |
+  | `fps_limit=240` (FIFO), tunnel save, rendering-bound | 172.9 → 172.3 | 6.46 / 9.61 → 5.67 / 8.19 | 4.12 / 6.92 → 5.69 / 5.59 |
+  | `fps_limit=240`, raster `fsr=performance` (120 rendered) | 237.7 → 237.8 | 4.17 / 5.92 → 4.17 / 5.92 | 4.05 / 4.21 → 4.17 / 4.16 |
+  | `fps_limit=original` (scenario: 60 rendered) | 119.9 → 119.9 | 8.35 / 8.48 → 8.34 / 9.59 | 8.35 / 8.35 → 8.34 / 8.32 |
+  | 60 Hz output, `fps_limit=240` (FIFO, refresh-bound) | 59.9 → 60.0 | 16.60 / 20.76 → 16.69 / 19.84 | 16.52 / 16.68 → 16.70 / 16.65 |
+
+  Rendering-bound at about 87 rendered fps (11.4 ms) and 240 Hz, each image is on screen for one or two whole refreshes
+  under FIFO whatever the present cadence; the present calls themselves are now 5.7 ms apart both ways. The rendered frame
+  is presented 6.0 ms after its GPU work completes (0.4 ms hold + half a period; 0.4.16: 4.0 ms, the uneven split), and
+  4.5 ms after it at 120 rendered fps (0.3 ms + 4.2 ms; 0.4.16: 4.3–5.3 ms).
+- **0.4.16 → 0.4.17 at the same settings** (the pacing above together with the release's faster rendering; one run at a time
+  on an otherwise idle machine, both builds interleaved, two runs each, medians; the two runs of a build agree within 1%
+  on the rates and within 1.6 ms on p99):
+
+  | Condition | presented fps | rendered fps | interval p50 / p99 ms | generated→real / real→generated ms |
+  | --- | --- | --- | --- | --- |
+  | `fps_limit=240`, street with rain (kayit1) | 100.3 → 197.2 | 50.2 → 98.6 | 9.97 / 10.11 → 4.95 / 7.54 | 9.97 / 9.97 → 4.96 / 4.88 |
+  | `fps_limit=240`, tunnel (kayit14) | 173.0 → 218.4 | 86.5 → 109.2 | 5.97 / 9.59 → 4.42 / 7.13 | 4.12 / 6.88 → 4.43 / 4.36 |
+  | `fps_limit=240`, kizic2 (kayit10) | 164.4 → 194.2 | 82.2 → 97.1 | 6.43 / 9.89 → 5.03 / 6.85 | 4.46 / 7.11 → 5.04 / 4.98 |
+  | `fps_limit=unlimited`, tunnel | 176.1 → 222.9 | 88.1 → 111.5 | 6.11 / 9.07 → 4.34 / 7.40 | 4.00 / 6.88 → 4.37 / 4.29 |
+  | `fps_limit=unlimited`, kizic2 | 166.8 → 197.4 | 83.4 → 98.7 | 5.94 / 9.68 → 4.91 / 8.25 | 4.34 / 7.13 → 4.93 / 4.87 |
 
 ## Geometry upgrades (`smooth_normals`, `tessellation`; Vulkan only)
 
@@ -290,8 +330,93 @@ wait, recording and swap times, averaged over 300 frames. What it found and what
 - VAOs keep their default attribute pointers; only a mutable pose (`bind_override`) repoints them, and the next draw
   restores them, instead of six `glVertexAttribPointer` calls per draw. Captures are byte-identical.
 - A renderer recreated by the in-game menu runs as fast as a fresh OpenGL launch (no per-frame re-uploads).
-- The street is bound by the engine tick (19-20 ms of WDL runtime CPU: `Runtime::evaluate` and case-insensitive
-  `Fields` string lookups, 88 live processes) on both backends, not by rendering; GPU frame time there is hidden.
+- The street rows above were bound by the engine tick (18-20 ms of WDL runtime CPU with rain), not by rendering. 0.4.17
+  removed that limit (docs/ENGINE_ARCHITECTURE.md §3.4): OpenGL with the user set runs the rain street (kayit1) at 216 fps
+  instead of 44 and kizic2 (kayit10) at 381 instead of 215 (frame p99 23.9 -> 5.1 ms and 6.3 -> 4.4 ms; one run at a
+  time, two runs per build, runs of a build within 1%). OpenGL captures of both saves are byte-identical to 0.4.16.
+
+## Vulkan CPU recording
+
+`cpu_record_ms` in the `K22_GPU_TIMING=1` line is the CPU time `Raster::draw` spends recording one frame. Measured on a
+Ryzen 9 9950X3D + RX 7900 XTX (RADV), 3840x2160 borderless in a private `kwin_wayland --virtual`, the launcher's
+vulkan-rt custom set (`fsr=balanced`, PBR, RT shadows/GI/reflections, denoise, all effects), `fps_limit=unlimited`,
+900 frames after a save load (`realtime off`). 0.4.16 against 0.4.17, one run at a time on an otherwise idle machine,
+both builds interleaved, three runs each for Vulkan RT and two for raster (medians of the last two 300-frame lines; the
+runs of a build within 5%). "Raster" is the same set with `--ray-tracing off` (shadow maps). The GPU and fps columns
+include the release's other changes (ray-tracing passes, script runtime).
+
+| View | Backend | `cpu_record_ms` 0.4.16 | 0.4.17 | GPU frame ms 0.4.16 | 0.4.17 | fps 0.4.16 | 0.4.17 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| kayit1, level 7 street (rain) | Vulkan RT | 5.63 | 1.07 | 12.5 | 6.8 | 42 | 138 |
+| kayit5, level 7 street | Vulkan RT | 5.11 | 1.10 | 10.6 | 6.8 | 89 | 138 |
+| kayit9, kriz | Vulkan RT | 2.23 | 1.40 | 9.2 | 7.7 | 102 | 123 |
+| kayit10, kizic2 | Vulkan RT | 1.18 | 0.56 | 8.7 | 7.0 | 109 | 135 |
+| kayit14, tunnel | Vulkan RT | 2.27 | 0.64 | 8.1 | 5.8 | 116 | 161 |
+| kayit1, level 7 street (rain) | Vulkan raster | 6.55 | 1.46 | 9.5 | 3.0 | 40 | 305 |
+| kayit10, kizic2 | Vulkan raster | 0.82 | 0.36 | 2.6 | 2.3 | 353 | 407 |
+
+Captures of kayit1 and kayit10 on Vulkan raster, `--preset original` and OpenGL are byte-identical to 0.4.16 (the changes
+of this section alone leave Vulkan RT captures byte-identical too; 0.4.17's RT image differs by the denoiser rounding
+described in docs/RAYTRACING.md "Third pass").
+
+What a draw costs now, and what it may assume:
+
+- **Scene descriptor sets are cached, not built per draw.** Set 0 binds the per-draw `Uniform` block (binding 0) and the
+  light and instance/previous-pose storage buffers (5, 6) as *dynamic* descriptors: a draw copies its block into the
+  frame slot's uniform buffer and passes three offsets to `vkCmdBindDescriptorSets`. The set depends only on the six
+  material images and samplers, the six global images (shadow maps, RT signals, G-buffer depth) and the three buffers
+  with their ranges, so draws that share them share one set, and the set outlives the frame (`SetCache`, one per frame
+  slot). The shader interface is unchanged.
+- **Identity, not handles.** `vk22::Image::id` and `Buffer::id` (assigned by `State::image`/`State::buffer`, never
+  reused) are part of the key next to the view handle, so a cached set is never found again for a recreated texture
+  whose Vulkan handle the driver reused. Sets naming destroyed resources are never bound. A slot's cache is emptied
+  after a scene release (level change, reload), after `reconfigure`, and when it holds 8192 sets; the emptying happens
+  at that slot's next frame start, when its previous frame has retired. A resource not created by
+  `State::image`/`buffer` (id 0) gets a set for one frame only.
+- **Binds are skipped while a rendering scope stays open**: the pipeline when it is already bound, the ray-query set
+  (set 1) after its first bind. `Raster::end()` forgets both, so every scope starts clean. Consecutive UI commands share
+  one scope.
+- **Per-frame lookups are flat.** `prepared` (per-instance pose, lights, replay admission, model matrix, batch
+  visibility), the actor-light map and the motion-vector matrices are insertion-ordered open-addressing maps cleared
+  every frame; `mesh()` and `texture()` consult a direct-mapped pointer index in front of their maps, valid for one
+  frame (nothing is erased while a frame draws). A model's material textures are visited once per frame, not once per
+  instance.
+- **Static world batches outside a view are not drawn.** A WMB mesh has one batch per material (about 3900 on the
+  level 7 street, about 300 of them in view). Each batch has the bounds of its own triangles, and the G-buffer, motion
+  and colour passes of a view skip a batch that fails `render_policy::geometry_eligible` against that view's
+  view-projection and clip plane: the test that already admits whole instances. The result is computed once per view
+  and reused by its passes; a mirror, portal or seamless-door view has its own view-projection and its own result.
+  What is never culled this way: the ray-tracing acceleration structure and its materials (rays reach off-screen
+  geometry), sky mask passes, script-deformed or script-material draws, models other than WMB (animated and
+  PN-tessellated models keep the per-instance test), and water (type 9), whose raster encounter advances the shared
+  warp bitmap. The motion pass rasterizes at the current position, so a batch off-screen now writes no vector.
+- **Shadow-map casters are culled per face.** A caster is prepared and drawn only for the sun map and the cube faces
+  whose frustum (the matrix pushed for that face) its bounds intersect: static WMB batches by batch bounds, other
+  models by instance bounds; PN-tessellated models are always drawn.
+- **Particles** are sorted through 16-byte keys (blend group, squared distance, index) instead of through particle
+  pointers; the comparison, and so the order, is the old one.
+
+### Pipeline cache and diagnostics
+
+- The `VkPipelineCache` is saved to `$XDG_CACHE_HOME/kabus22/vulkan-pipelines-<vendor>-<device>.bin` (default
+  `~/.cache/kabus22`) at a level change and at exit, through a temporary file renamed over the target. The file has a
+  checksum; the driver data is used only when its header names this vendor, device and `pipelineCacheUUID` (another
+  GPU or a driver update starts empty). `K22_PIPELINE_CACHE=0` disables the file.
+- The file also lists the raster pipeline keys built so far, tagged with a hash of the SPIR-V and of the options
+  compiled into pipelines. `Raster` builds the matching ones at start and after `reconfigure`, so from the second run
+  a pipeline is not compiled at its first draw. Records with another signature, an unusable sample count or a field the
+  renderer cannot produce are ignored. A missing, truncated, corrupted or unwritable file only costs a cold start (one
+  notice when it cannot be saved).
+- `K22_RENDER_EVENTS=1` prints a `render-event` line for every frame that created resources (`pipeline`, `texture`,
+  `mesh`, in ms) or recorded for more than three times the running typical time, with the CPU time between GPU-timing
+  marks, and a `render-stats` line every 600 frames (average recording ms, scene binds, culled batches, sets written).
+- Measured with it (vulkan-rt custom set, save 14): first run without a cache file 19 pipelines compiled at first draw
+  (largest 1.6 ms); second run none; with the file of another build, a truncated or a corrupted file 19 created at
+  first draw from the driver's own caches (largest 0.2 ms).
+- First-use costs that remain (the same in 0.4.16): an entity that was `invisible` is not in the frame packet, so its
+  mesh and textures upload on the first frame it is shown, and a world (level load, or the destination world of a
+  seamless door while the player approaches it) is prepared in one or two frames. With `texture_upscale=1` a texture
+  costs 3-18 ms of CPU there: those frames record for 60-190 ms (`world_door_tunnel`, `world_door_kizic`).
 
 ## Live changes (`Renderer::reconfigure`)
 
