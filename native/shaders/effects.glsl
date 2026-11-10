@@ -109,10 +109,17 @@ float k22Phase(float cosine){float g2=k22FogG*k22FogG;return (1.0-g2)/pow(1.0+g2
 #ifdef K22_FOG_VISIBILITY
 vec3 k22FogInscatter(vec3 eye,vec3 surface,vec2 fogSpan,float noise){
     vec3 ray=surface-eye;float total=min(length(ray),k22FogMaxDistance);if(total<=0.0)return vec3(0);vec3 dir=normalize(ray);
+    // A light scatters only at samples inside its range: lights whose range the marched segment never enters (and
+    // the synthetic and directional ones the loop skips) are left out of all 24 steps. Bits cover the first 32 lights.
+    uint reach=0u;
+    for(int i=0;i<lightCount&&i<32;++i){vec4 a=K22_LIGHT(i*5);vec3 rel=a.xyz-eye,off=rel-dir*clamp(dot(rel,dir),0.0,total);
+        if(dot(off,off)<=a.w*a.w*1.002+0.01&&K22_LIGHT(i*5+4).z<=0.5&&K22_LIGHT(i*5+2).w!=3.0)reach|=1u<<uint(i);}
+    if(reach==0u&&lightCount<=32)return vec3(0);
     float ds=total/float(k22FogSteps),transmittance=1.0;vec3 result=vec3(0);
     for(int s=0;s<k22FogSteps;++s){
         float t=(float(s)+noise)*ds,sigma=k22FogDensity(t,fogSpan);if(sigma<=0.0)continue;vec3 x=eye+dir*t;vec3 radiance=vec3(0);
         for(int i=0;i<lightCount;++i){
+            if(i<32&&(reach&(1u<<uint(i)))==0u)continue;
             vec4 a=K22_LIGHT(i*5),b=K22_LIGHT(i*5+1),d=K22_LIGHT(i*5+2),e=K22_LIGHT(i*5+3),c=K22_LIGHT(i*5+4);
             if(c.z>0.5||d.w==3.0)continue;
             vec3 delta=a.xyz-x;float distance=length(delta);if(distance>a.w)continue;vec3 L=delta/max(distance,0.0001);

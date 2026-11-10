@@ -10,7 +10,7 @@
 layout(local_size_x=8,local_size_y=8) in;
 layout(set=0,binding=0,std140) uniform Signals { mat4 inverseViewProjection,previousViewProjection; vec4 eye,sun,params,camera; ivec4 config; vec4 actor,planar; } g;
 // eye: xyz position, w far; sun: xyz direction, w angular radius (rad); params: x frame, y GI distance, z occlusion distance, w near;
-// camera: xyz forward, w light count; config: x signal bits (1 shadows, 2 GI, 4 reflections), yz size, w history valid;
+// camera: xyz forward, w light count; config: x signal bits (1 shadows, 2 GI, 4 reflections, 8 the denoiser follows), yz size, w history valid;
 // actor: x first, y count of the actor-shadow light records appended after the shading lights (render_policy::actor_shadow_lights),
 // z SHADOW_ALPHA / 100; planar: xyz direction toward the planar shadow's light (render_policy::planar_light_direction),
 // w 1 when the frame has SHADOW casters.
@@ -50,7 +50,7 @@ vec3 hitRadiance(uint instanceIndex,uint geometryIndex,uint triangle,bool front,
     uint ia=indices.words[m.frames.z+triangle*3u],ib=indices.words[m.frames.z+triangle*3u+1u],ic=indices.words[m.frames.z+triangle*3u+2u];vec3 w=vec3(1.0-bary.x-bary.y,bary);
     vec3 p=transform*vec4(rtPosition(vertices,ia)*w.x+rtPosition(vertices,ib)*w.y+rtPosition(vertices,ic)*w.z,1);
     mat3 normalTransform=mat3(transform);for(int j=0;j<3;++j){float s=dot(normalTransform[j],normalTransform[j]);normalTransform[j]=s>0.0?normalTransform[j]/s:vec3(0);}
-    vec3 n=rtSafeNormal(normalTransform*(rtNormal(vertices,ia)*w.x+rtNormal(vertices,ib)*w.y+rtNormal(vertices,ic)*w.z));if(!front)n=-n;
+    vec3 n=rtSafeNormal(normalTransform*(rtNormal(vertices,ia)*w.x+rtNormal(vertices,ib)*w.y+rtNormal(vertices,ic)*w.z));if(front==((flags&48u)==32u))n=-n; // The geometric back face (flip-facing instances report it as front).
     vec3 illumination;
     if((flags&8192u)!=0u){uint a=ia*13u+8u,b=ib*13u+8u,c=ic*13u+8u;vec2 lm=vec2(vertices.words[a],vertices.words[a+1u])*w.x+vec2(vertices.words[b],vertices.words[b+1u])*w.y+vec2(vertices.words[c],vertices.words[c+1u])*w.z;
         illumination=2.0*clamp(textureLod(rtTextures[nonuniformEXT(uint(m.lightState.z))],lm,0).rgb+vec3(m.factors.z),0.0,1.0);}
@@ -86,7 +86,7 @@ float actorWeight(int i,vec3 p,vec3 n,out vec3 L){
 // Any alpha-tested (as the contact rays) SHADOW caster up to reach: its TLAS instance index, else -1.
 int casterHit(vec3 origin,vec3 direction,float reach){
     if(reach<=0.001)return -1;
-    rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsTerminateOnFirstHitEXT,4,origin,0.001,direction,reach);
+    rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsTerminateOnFirstHitEXT|gl_RayFlagsCullBackFacingTrianglesEXT,4,origin,0.001,direction,reach);
     while(rayQueryProceedEXT(q))if(rayQueryGetIntersectionTypeEXT(q,false)==gl_RayQueryCandidateIntersectionTriangleEXT&&!rtAdditive(rayQueryGetIntersectionInstanceCustomIndexEXT(q,false),rayQueryGetIntersectionGeometryIndexEXT(q,false))&&rtHitColor(q,false).a>=0.5)rayQueryConfirmIntersectionEXT(q);
     return rayQueryGetIntersectionTypeEXT(q,true)!=gl_RayQueryCommittedIntersectionNoneEXT?int(rayQueryGetIntersectionInstanceCustomIndexEXT(q,true)):-1;
 }
@@ -137,7 +137,7 @@ float bakedVisibility(vec3 p,vec3 origin,vec3 n){
 vec4 reflectionLayers(vec3 origin,vec3 direction,float maxDistance){
     vec3 radiance=vec3(0);float visibility=1.0,minDistance=.001;
     for(uint layer=0u;layer<rtInstances[0].padding&&minDistance<=maxDistance;++layer){
-        rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsNoneEXT,255,origin,minDistance,direction,maxDistance);
+        rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsCullBackFacingTrianglesEXT,255,origin,minDistance,direction,maxDistance);
         while(rayQueryProceedEXT(q))if(rayQueryGetIntersectionTypeEXT(q,false)==gl_RayQueryCandidateIntersectionTriangleEXT){vec4 color=rtHitColor(q,false);if(color.a>0.0)rayQueryConfirmIntersectionEXT(q);}
         if(rayQueryGetIntersectionTypeEXT(q,true)==gl_RayQueryCommittedIntersectionNoneEXT)break;
         vec4 color=rtHitColor(q,true);float alpha=clamp(color.a,0.0,1.0);
@@ -154,7 +154,7 @@ vec4 reflectionLayers(vec3 origin,vec3 direction,float maxDistance){
 // tangent plane, weighted by the barycentrics), then offset along the camera-facing geometric normal against acne.
 vec3 terminatorOrigin(vec3 p,float bias,vec3 fallback){
     vec3 toward=p-g.eye.xyz;float len=length(toward),slack=max(bias*4.0,len*0.004);if(len<=slack)return fallback;
-    rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsNoneEXT,255,g.eye.xyz,len-slack,toward/len,len+slack);
+    rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsCullBackFacingTrianglesEXT,255,g.eye.xyz,len-slack,toward/len,len+slack);
     while(rayQueryProceedEXT(q))if(rayQueryGetIntersectionTypeEXT(q,false)==gl_RayQueryCandidateIntersectionTriangleEXT&&rtHitColor(q,false).a>=0.5)rayQueryConfirmIntersectionEXT(q);
     if(rayQueryGetIntersectionTypeEXT(q,true)==gl_RayQueryCommittedIntersectionNoneEXT)return fallback;
     RtInstance instance=rtInstances[rayQueryGetIntersectionInstanceCustomIndexEXT(q,true)];RtMaterial m=rtMaterials[instance.materialBase+rayQueryGetIntersectionGeometryIndexEXT(q,true)];
@@ -195,13 +195,13 @@ void main(){
             // vertex-lit receivers see everything within reach, themselves included, with a quadratic falloff that keeps
             // the darkening to creases and contacts (scene.frag scales their ambient term).
             bool mapped=(flags&1)!=0;
-            rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsNoneEXT,mapped?2:255,origin,0.01,cosineDirection(n),g.params.z);
+            rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsCullBackFacingTrianglesEXT,mapped?2:255,origin,0.01,cosineDirection(n),g.params.z);
             while(rayQueryProceedEXT(q))if(rayQueryGetIntersectionTypeEXT(q,false)==gl_RayQueryCandidateIntersectionTriangleEXT&&!rtAdditive(rayQueryGetIntersectionInstanceCustomIndexEXT(q,false),rayQueryGetIntersectionGeometryIndexEXT(q,false))&&rtHitColor(q,false).a>=0.5)rayQueryConfirmIntersectionEXT(q);
             if(rayQueryGetIntersectionTypeEXT(q,true)!=gl_RayQueryCommittedIntersectionNoneEXT){float t=rayQueryGetIntersectionTEXT(q,true)/g.params.z;mask.b=mapped?mix(0.3,1.0,t):1.0-(1.0-t)*(1.0-t);}
             mask.a=mapped?actorShadow(origin,n):ordinary?1.0:bakedVisibility(p,origin,n); // Baked lights do not light ordinary materials.
         }
         if((g.config.x&2)!=0&&(flags&(4|16))==0){ // scene.frag adds GI to its own lighting model only.
-            rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsNoneEXT,255,origin,0.01,cosineDirection(n),g.params.y);
+            rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsCullBackFacingTrianglesEXT,255,origin,0.01,cosineDirection(n),g.params.y);
             while(rayQueryProceedEXT(q))if(rayQueryGetIntersectionTypeEXT(q,false)==gl_RayQueryCandidateIntersectionTriangleEXT){vec4 color=rtHitColor(q,false);if(color.a>=0.5)rayQueryConfirmIntersectionEXT(q);}
             if(rayQueryGetIntersectionTypeEXT(q,true)!=gl_RayQueryCommittedIntersectionNoneEXT)
                 gi.rgb=hitRadiance(rayQueryGetIntersectionInstanceCustomIndexEXT(q,true),rayQueryGetIntersectionGeometryIndexEXT(q,true),rayQueryGetIntersectionPrimitiveIndexEXT(q,true),rayQueryGetIntersectionFrontFaceEXT(q,true),rayQueryGetIntersectionBarycentricsEXT(q,true),rayQueryGetIntersectionObjectToWorldEXT(q,true));
@@ -214,5 +214,6 @@ void main(){
     }
     if((g.config.x&1)!=0)imageStore(outMask,pixel,mask);
     if((g.config.x&2)!=0)imageStore(outGi,pixel,gi);
-    if((g.config.x&4)!=0)imageStore(outReflect,pixel,reflection);
+    // The denoiser reads the reflection of reflective pixels only (rt_filter.comp); without it scene.frag samples this image.
+    if((g.config.x&4)!=0&&((g.config.x&8)==0||(depth<1.0&&(flags&8)!=0)))imageStore(outReflect,pixel,reflection);
 }

@@ -3,6 +3,7 @@
 #include "render_vulkan_spirv.hpp"
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -12,6 +13,7 @@ namespace k22::vk22 {
 namespace {
 constexpr VkBufferUsageFlags endpointUsage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 constexpr std::uint32_t textureLimit=1024;
+constexpr VkDeviceSize blasScratchBudget=VkDeviceSize{64}<<20;
 struct PackedVertex { Vertex vertex; Vec3 tangent; };
 static_assert(sizeof(PackedVertex)==sizeof(Vertex)+sizeof(Vec3));
 static_assert(sizeof(PackedVertex)==13*sizeof(float));
@@ -36,10 +38,10 @@ struct OverrideData {
 };
 struct Blas {
     Acceleration acceleration; PoseRecord* pose{}; VkBuffer indices{};
-    std::vector<std::array<std::uint32_t,2>> ranges; std::uint64_t poseVersion{};
+    std::vector<std::array<std::uint32_t,3>> ranges; std::uint64_t poseVersion{},epoch{}; // ranges: first index, index count, opaque (1/0).
 };
 struct DescriptorPools { std::vector<VkDescriptorPool> pools; std::size_t used{}; };
-struct SceneResources { Buffer instances,records,materials; Acceleration tlas; std::uint32_t count{}; std::vector<VkDescriptorImageInfo> textures; };
+struct SceneResources { Buffer instances,records,materials; Acceleration tlas; std::uint32_t count{}; std::vector<VkDescriptorImageInfo> textures; std::vector<std::uint8_t> flags; }; // flags: the instance flags of the last TLAS build.
 struct SlotData {
     std::uint64_t epoch{}; DescriptorPools poseDescriptors,rayDescriptors;
     std::vector<std::unique_ptr<PoseRecord>> poses;
@@ -50,6 +52,7 @@ struct SlotData {
     std::vector<Acceleration> garbage;
     std::vector<SceneResources> scenes; std::size_t sceneUsed{}; Buffer scratch;
     VkDescriptorSet set{};
+    bool deforming{}; // Deform dispatches recorded since the last pose barrier (rt_poses_ready).
 };
 struct alignas(16) GpuMaterial {
     std::array<float,4> uv,tint,factors;
@@ -62,6 +65,17 @@ static_assert(sizeof(GpuMaterial)==288);
 struct alignas(16) GpuInstance { std::uint64_t vertices,indices; std::uint32_t materialBase,padding{}; std::array<std::uint32_t,2> alignmentPadding{}; std::array<float,4> clipPlane{}; };
 static_assert(sizeof(GpuInstance)==48);
 std::array<float,4> color(Color c){return {c.r,c.g,c.b,c.a};}
+// A material whose rtMaterialHit result does not depend on the texel: FX effects, or no colour key, no flare alpha and a
+// texture whose alpha is 1 everywhere (RayMaterial flag 16384). Its triangles are opaque geometry: a ray commits them
+// without returning to the shader. Blend, fade and clip planes are decided per instance and frame (FORCE_NO_OPAQUE).
+bool static_opaque(std::uint32_t flags){return (flags&64u)!=0u||((flags&(1u|2u))==0u&&(flags&16384u)!=0u);}
+// rtMaterialHit of a static_opaque material returns full opacity this frame: an FX effect that is not blended; else alpha
+// (texel 1 x tint x opacity, as the shader multiplies it) of at least 1 when blended, or above the 0.01 rejection (with margin) when not.
+// Additive surfaces never occlude (rtAdditive).
+bool opaque_now(const RayMaterial& m){
+    const bool blend=(m.flags&1024u)!=0u;if((m.flags&64u)!=0u)return !blend;if(blend&&(m.flags&512u)!=0u)return false;
+    float alpha=m.tint.a;alpha*=m.alpha;return blend?alpha>=1.f:alpha>=.02f;
+}
 void barrier(VkCommandBuffer command,VkPipelineStageFlags source,VkPipelineStageFlags destination,VkAccessFlags from,VkAccessFlags to){
     VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};b.srcAccessMask=from;b.dstAccessMask=to;
     vkCmdPipelineBarrier(command,source,destination,0,1,&b,0,nullptr,0,nullptr);
@@ -77,10 +91,15 @@ struct RayTracing {
     std::vector<VkAccelerationStructureInstanceKHR> instanceData;
     std::vector<GpuInstance> recordData; std::vector<GpuMaterial> materialData;
     std::vector<VkDescriptorImageInfo> textureData;
-    std::vector<std::array<std::uint32_t,2>> rangeData;
+    std::vector<std::array<std::uint32_t,3>> rangeData;
     std::vector<VkAccelerationStructureGeometryKHR> geometryData;
     std::vector<VkAccelerationStructureBuildRangeInfoKHR> buildRangeData;
-    std::vector<std::uint32_t> countData;
+    std::vector<std::uint32_t> countData; std::vector<std::uint8_t> flagData;
+    // BLAS builds of one rt_scene, submitted as one vkCmdBuildAccelerationStructuresKHR per scratch-budget batch.
+    struct BlasBuild { VkAccelerationStructureBuildGeometryInfoKHR info; std::size_t first; VkDeviceSize scratch; };
+    std::vector<BlasBuild> blasBuilds; std::vector<VkAccelerationStructureBuildGeometryInfoKHR> buildInfoData; std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> buildRangePointers;
+    VkDeviceSize blasScratch{};
+    void flush_blas();
     VkDeviceSize scratchAlignment{1};
     PFN_vkCreateAccelerationStructureKHR createAs{};PFN_vkDestroyAccelerationStructureKHR destroyAs{};
     PFN_vkGetAccelerationStructureBuildSizesKHR buildSizes{};PFN_vkGetAccelerationStructureDeviceAddressKHR asAddress{};
@@ -110,7 +129,7 @@ SlotData& RayTracing::slot(){
     if(slot.epoch!=epoch){
         slot.sceneUsed=0;for(auto& a:slot.garbage)destroy(a);slot.garbage.clear();
         for(auto* pools:{&slot.poseDescriptors,&slot.rayDescriptors}){for(auto pool:pools->pools)require(vkResetDescriptorPool(s.device,pool,0),"reset Vulkan pose/ray descriptors");pools->used=0;}
-        slot.set={};slot.epoch=epoch;
+        slot.set={};slot.deforming=false;slot.epoch=epoch;
     }
     return slot;
 }
@@ -143,6 +162,17 @@ Acceleration RayTracing::acceleration(VkAccelerationStructureTypeKHR type,VkDevi
     VkAccelerationStructureDeviceAddressInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};info.accelerationStructure=result.handle;result.address=asAddress(s.device,&info);return result;
 }
 Buffer RayTracing::scratch(VkDeviceSize size){auto& buffer=slot().scratch;auto required=std::max<VkDeviceSize>(size,1)+scratchAlignment-1;if(buffer.size<required){s.retire(buffer);buffer=s.buffer(required,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);}return buffer;}
+// The pending builds write distinct structures from distinct scratch ranges, so one barrier and one build command cover
+// them (the driver runs each build phase for the whole batch instead of serializing every structure behind a barrier).
+void RayTracing::flush_blas(){
+    if(blasBuilds.empty())return;
+    auto buffer=scratch(blasScratch);const auto base=(buffer.address+scratchAlignment-1)/scratchAlignment*scratchAlignment;
+    buildInfoData.clear();buildRangePointers.clear();
+    for(auto& b:blasBuilds){b.info.pGeometries=geometryData.data()+b.first;b.info.scratchData.deviceAddress=base+b.scratch;buildInfoData.push_back(b.info);buildRangePointers.push_back(buildRangeData.data()+b.first);}
+    barrier(s.command,VK_PIPELINE_STAGE_HOST_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,VK_ACCESS_HOST_WRITE_BIT|VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR|VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR|VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
+    buildAs(s.command,static_cast<std::uint32_t>(buildInfoData.size()),buildInfoData.data(),buildRangePointers.data());
+    blasBuilds.clear();geometryData.clear();buildRangeData.clear();blasScratch=0;
+}
 Buffer& RayTracing::upload(Buffer& buffer,VkDeviceSize size,VkBufferUsageFlags usage,const void* data){if(buffer.size<size){s.retire(buffer);buffer=s.buffer(size,usage,true);}if(data)std::memcpy(buffer.mapped,data,size);return buffer;}
 ModelData& RayTracing::model(const Model& source,std::span<const Vertex> vertices,std::span<const Vec3> tangents){
     auto& map=vertices.empty()?models:expandedModels;auto [it,inserted]=map.try_emplace(&source);auto& result=it->second;if(!inserted)return result;
@@ -220,10 +250,16 @@ Pose& rt_pose(RayTracing& rt,const DrawInstance& d,std::span<const Vertex> expan
     if(!m.frameCount&&d.nextPositions.empty()&&d.nextNormals.empty())b=a;
     VkDescriptorSet set=rt.descriptors(rt.poseLayout,false);std::array<VkDescriptorBufferInfo,4> infos{{{m.base.handle,0,VK_WHOLE_SIZE},{a.first.handle,0,VK_WHOLE_SIZE},{b.first.handle,0,VK_WHOLE_SIZE},{record->pose.vertices.handle,0,VK_WHOLE_SIZE}}};std::array<VkWriteDescriptorSet,4> writes{};for(unsigned i=0;i<4;++i){writes[i]={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};writes[i].dstSet=set;writes[i].dstBinding=i;writes[i].descriptorCount=1;writes[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;writes[i].pBufferInfo=&infos[i];}vkUpdateDescriptorSets(rt.s.device,writes.size(),writes.data(),0,nullptr);
     // VERTEX_SHADER: the motion-vector pass of the next frame reads this slot's poses as storage (rt_previous_pose).
-    barrier(rt.s.command,VK_PIPELINE_STAGE_HOST_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_VERTEX_INPUT_BIT|VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_HOST_WRITE_BIT|VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);
+    // Deforms of one frame write distinct pose buffers: one barrier before the first, one after the last (rt_poses_ready).
+    if(!slot.deforming){slot.deforming=true;
+        barrier(rt.s.command,VK_PIPELINE_STAGE_HOST_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_VERTEX_INPUT_BIT|VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_HOST_WRITE_BIT|VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);}
     vkCmdBindPipeline(rt.s.command,VK_PIPELINE_BIND_POINT_COMPUTE,rt.compute);vkCmdBindDescriptorSets(rt.s.command,VK_PIPELINE_BIND_POINT_COMPUTE,rt.computeLayout,0,1,&set,0,nullptr);struct Push{std::uint32_t count,first,next;float blend;std::uint32_t nextFallback;}push{m.count,a.second,b.second,std::clamp(d.interpolation,0.f,1.f),!m.frameCount?((d.nextPositions.empty()?1u:0u)|(d.nextNormals.empty()?2u:0u)):0u};vkCmdPushConstants(rt.s.command,rt.computeLayout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(push),&push);if(m.count)vkCmdDispatch(rt.s.command,(m.count+63)/64,1,1);
-    auto destination=VK_PIPELINE_STAGE_VERTEX_INPUT_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;if(rt.s.rayEnabled)destination|=VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;auto access=VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT|VK_ACCESS_SHADER_READ_BIT;if(rt.s.rayEnabled)access|=VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;barrier(rt.s.command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,destination,VK_ACCESS_SHADER_WRITE_BIT,access);
     record->signature=signature;++record->version;return record->pose;
+}
+// Makes the poses deformed since the last call readable by draws, the motion pass and acceleration-structure builds.
+void rt_poses_ready(RayTracing& rt){
+    auto& slot=rt.slot();if(!slot.deforming)return;slot.deforming=false;
+    auto destination=VK_PIPELINE_STAGE_VERTEX_INPUT_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;if(rt.s.rayEnabled)destination|=VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;auto access=VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT|VK_ACCESS_SHADER_READ_BIT;if(rt.s.rayEnabled)access|=VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;barrier(rt.s.command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,destination,VK_ACCESS_SHADER_WRITE_BIT,access);
 }
 // The same actor's pose from the immediately preceding frame (other slot), when it differs from `current`; shared rigid
 // or ambiguous (several poses per actor) records have none.
@@ -237,6 +273,7 @@ Pose* rt_previous_pose(RayTracing& rt,Pose& current){
 void rt_scene(RayTracing& rt,std::span<const RayGeometry> scene){
     if(!rt.s.rayEnabled)return;auto& s=rt.s;auto& slot=rt.slot();if(!s.command)throw std::runtime_error("Ray scene requires admitted Vulkan frame");
     auto& instances=rt.instanceData;auto& records=rt.recordData;auto& materials=rt.materialData;auto& textures=rt.textureData;
+    rt_poses_ready(rt);rt.blasBuilds.clear();rt.geometryData.clear();rt.buildRangeData.clear();rt.blasScratch=0;
     instances.clear();records.clear();materials.clear();textures.clear();textures.push_back({rt.whiteSampler,rt.white.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
     auto texture=[&](VkImageView view,VkSampler sampler){if(!view)return 0u;if(!sampler)throw std::runtime_error("Ray material texture has no sampler");for(std::uint32_t i=0;i<textures.size();++i)if(textures[i].imageView==view&&textures[i].sampler==sampler)return i;if(textures.size()==textureLimit)throw std::runtime_error("Ray scene exceeds 1024 distinct material sampler bindings");textures.push_back({sampler,view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});return static_cast<std::uint32_t>(textures.size()-1);};
     std::uint64_t triangleCount=0;
@@ -244,25 +281,39 @@ void rt_scene(RayTracing& rt,std::span<const RayGeometry> scene){
         if(!geometry.draw||!geometry.pose||!geometry.indices)throw std::runtime_error("Ray display geometry is incomplete");const auto& d=*geometry.draw;if(d.viewSpace||d.billboard||!d.visible)continue;
         if(!geometry.pose->count||!geometry.indices->size)continue;
         auto poseFound=slot.poseLookup.find(geometry.pose);if(poseFound==slot.poseLookup.end())throw std::runtime_error("Ray geometry does not use shared GPU deformed pose");auto* pose=poseFound->second;
-        auto& ranges=rt.rangeData;ranges.clear();for(const auto& material:geometry.materials)if(material.count){if(material.count%3||static_cast<VkDeviceSize>(material.first+static_cast<std::uint64_t>(material.count))*4>geometry.indices->size)throw std::runtime_error("Ray material references invalid display triangle range");ranges.push_back({material.first,material.count});triangleCount+=material.count/3;}
+        // shaded: a hit on this instance's opaque geometry needs rtMaterialHit this frame (translucent or faded material, clip plane).
+        // K22_RT_SHADER_HITS=1 (diagnosis): every hit goes through rtMaterialHit, as before opaque geometry; the image must not change.
+        static const bool shaderHits=[]{const char* v=std::getenv("K22_RT_SHADER_HITS");return v&&*v=='1';}();
+        bool shaded=shaderHits||geometry.clipPlane!=std::array<float,4>{};auto& ranges=rt.rangeData;ranges.clear();for(const auto& material:geometry.materials)if(material.count){if(material.count%3||static_cast<VkDeviceSize>(material.first+static_cast<std::uint64_t>(material.count))*4>geometry.indices->size)throw std::runtime_error("Ray material references invalid display triangle range");ranges.push_back({material.first,material.count,static_opaque(material.flags)?1u:0u});triangleCount+=material.count/3;if(static_opaque(material.flags)&&!opaque_now(material))shaded=true;}
         if(ranges.empty())continue;if(!geometry.pose->vertices.address||!geometry.indices->address)throw std::runtime_error("Ray display buffers lack device addresses");
         if(triangleCount>std::numeric_limits<std::uint32_t>::max())throw std::runtime_error("Ray scene exceeds 32-bit reflection traversal bound");
-        auto& candidateBlas=slot.blasLookup[pose];Blas* blas{};for(auto index:candidateBlas)if(slot.blas[index].indices==geometry.indices->handle){blas=&slot.blas[index];break;}if(!blas){candidateBlas.push_back(slot.blas.size());slot.blas.emplace_back();blas=&slot.blas.back();blas->pose=pose;blas->indices=geometry.indices->handle;}
+        // One structure per (pose, index buffer, material ranges with their opaque bits); a structure whose ranges are no longer drawn is rebuilt for new ones.
+        auto& candidateBlas=slot.blasLookup[pose];Blas* blas{};for(auto index:candidateBlas)if(slot.blas[index].indices==geometry.indices->handle&&slot.blas[index].ranges==ranges){blas=&slot.blas[index];break;}
+        if(!blas)for(auto index:candidateBlas)if(slot.blas[index].indices==geometry.indices->handle&&slot.blas[index].epoch!=slot.epoch){blas=&slot.blas[index];break;}
+        if(!blas){candidateBlas.push_back(slot.blas.size());slot.blas.emplace_back();blas=&slot.blas.back();blas->pose=pose;blas->indices=geometry.indices->handle;}
+        blas->epoch=slot.epoch;
         bool topologyChanged=blas->ranges!=ranges;bool changed=topologyChanged||!blas->acceleration.handle||blas->poseVersion!=pose->version;
         if(changed){
-            auto& geometries=rt.geometryData;auto& buildRanges=rt.buildRangeData;auto& counts=rt.countData;geometries.clear();buildRanges.clear();counts.clear();
-            for(auto range:ranges){VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};g.geometryType=VK_GEOMETRY_TYPE_TRIANGLES_KHR;g.geometry.triangles={VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR};auto& t=g.geometry.triangles;t.vertexFormat=VK_FORMAT_R32G32B32_SFLOAT;t.vertexData.deviceAddress=geometry.pose->vertices.address;t.vertexStride=sizeof(PackedVertex);t.maxVertex=geometry.pose->count-1;t.indexType=VK_INDEX_TYPE_UINT32;t.indexData.deviceAddress=geometry.indices->address+range[0]*sizeof(std::uint32_t);geometries.push_back(g);buildRanges.push_back({range[1]/3,0,0,0});counts.push_back(range[1]/3);}
-            VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};info.type=VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;info.flags=VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR|VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;info.geometryCount=geometries.size();info.pGeometries=geometries.data();
+            auto& geometries=rt.geometryData;auto& buildRanges=rt.buildRangeData;auto& counts=rt.countData;counts.clear();const std::size_t first=geometries.size();
+            for(auto range:ranges){VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};g.geometryType=VK_GEOMETRY_TYPE_TRIANGLES_KHR;g.geometry.triangles={VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR};auto& t=g.geometry.triangles;t.vertexFormat=VK_FORMAT_R32G32B32_SFLOAT;t.vertexData.deviceAddress=geometry.pose->vertices.address;t.vertexStride=sizeof(PackedVertex);t.maxVertex=geometry.pose->count-1;t.indexType=VK_INDEX_TYPE_UINT32;t.indexData.deviceAddress=geometry.indices->address+range[0]*sizeof(std::uint32_t);g.flags=range[2]?VK_GEOMETRY_OPAQUE_BIT_KHR:0;geometries.push_back(g);buildRanges.push_back({range[1]/3,0,0,0});counts.push_back(range[1]/3);}
+            VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};info.type=VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;info.flags=VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR|VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;info.geometryCount=static_cast<std::uint32_t>(ranges.size());info.pGeometries=geometries.data()+first;
             VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};rt.buildSizes(s.device,VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,&info,counts.data(),&sizes);
             bool update=!topologyChanged&&blas->acceleration.handle; if(!update){if(blas->acceleration.handle)slot.garbage.push_back(blas->acceleration);blas->acceleration=rt.acceleration(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,sizes.accelerationStructureSize);}
-            info.mode=update?VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR:VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;info.srcAccelerationStructure=update?blas->acceleration.handle:VK_NULL_HANDLE;info.dstAccelerationStructure=blas->acceleration.handle;auto scratch=rt.scratch(update?sizes.updateScratchSize:sizes.buildScratchSize);info.scratchData.deviceAddress=(scratch.address+rt.scratchAlignment-1)/rt.scratchAlignment*rt.scratchAlignment;
-            barrier(s.command,VK_PIPELINE_STAGE_HOST_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,VK_ACCESS_HOST_WRITE_BIT|VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR|VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR|VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
-            auto* rangePointer=buildRanges.data();rt.buildAs(s.command,1,&info,&rangePointer);blas->ranges=ranges;blas->poseVersion=pose->version;
+            info.mode=update?VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR:VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;info.srcAccelerationStructure=update?blas->acceleration.handle:VK_NULL_HANDLE;info.dstAccelerationStructure=blas->acceleration.handle;
+            // Scratch ranges of one batch are disjoint; a batch is cut at blasScratchBudget so a level's first frame does not size the scratch for every structure at once.
+            const auto need=((update?sizes.updateScratchSize:sizes.buildScratchSize)+rt.scratchAlignment-1)/rt.scratchAlignment*rt.scratchAlignment;
+            if(!rt.blasBuilds.empty()&&rt.blasScratch+need>blasScratchBudget){const std::vector<VkAccelerationStructureGeometryKHR> own(geometries.begin()+first,geometries.end());const std::vector<VkAccelerationStructureBuildRangeInfoKHR> ownRanges(buildRanges.begin()+first,buildRanges.end());geometries.resize(first);buildRanges.resize(first);rt.flush_blas();geometries=own;buildRanges=ownRanges;rt.blasBuilds.push_back({info,0,0});}
+            else rt.blasBuilds.push_back({info,first,rt.blasScratch});
+            rt.blasScratch+=need;blas->ranges=ranges;blas->poseVersion=pose->version;
         }
         if(instances.size()>=0xffffffu)throw std::runtime_error("Ray TLAS instance index exceeds Vulkan 24-bit custom index");VkAccelerationStructureInstanceKHR instance{};for(unsigned row=0;row<3;++row)for(unsigned column=0;column<4;++column)instance.transform.matrix[row][column]=geometry.transform[column*4+row];instance.instanceCustomIndex=instances.size();instance.mask=d.model&&d.model->formatVersion==6?1:d.shadowRequested?6:2; // 1 level/map geometry, 2 models and sprites (contact shadows), 4 SHADOW-flag casters (actor shadows).
-        instance.flags=VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;instance.accelerationStructureReference=blas->acceleration.address;instances.push_back(instance);records.push_back({geometry.pose->vertices.address,geometry.indices->address,static_cast<std::uint32_t>(materials.size()),0,{},geometry.clipPlane});
+        // Facing (ray_query.glsl): a one-sided instance is culled by the rays' cull flags, flipped when its model winds clockwise, so every
+        // shader sees `front` as "the side that is drawn"; double-sided instances are never culled.
+        const auto sides=geometry.materials.front().flags&48u;instance.flags=(sides&16u)?VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR:(sides&32u)?VK_GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR:0;if(shaded)instance.flags|=VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
+        instance.accelerationStructureReference=blas->acceleration.address;instances.push_back(instance);records.push_back({geometry.pose->vertices.address,geometry.indices->address,static_cast<std::uint32_t>(materials.size()),0,{},geometry.clipPlane});
         for(const auto& m:geometry.materials)if(m.count){GpuMaterial packed{};packed.uv=m.uvTransform;packed.tint=color(m.tint);packed.factors={m.alpha,std::clamp(m.interpolation,0.f,1.f),0,0};packed.metadata={m.flags,texture(m.texture,m.sampler),texture(m.normalTexture,m.normalSampler),std::max(m.spriteFrames,1u)};packed.frames={m.frame0,m.frame1,m.first,m.count};packed.normalUv=m.normalUvTransform;packed.ambient=color(m.effectAmbient);packed.skillMain=m.skillMain;packed.skillExtra=m.skillExtra;packed.sun={m.effectSunDirection.x,m.effectSunDirection.y,m.effectSunDirection.z,0};packed.camera={m.effectCameraPosition.x,m.effectCameraPosition.y,m.effectCameraPosition.z,0};packed.preparedAmbient=m.preparedAmbient;packed.preparedDiffuse=m.preparedDiffuse;packed.preparedSpecular=m.preparedSpecular;packed.preparedEmissive=m.preparedEmissive;packed.ambientLight=m.ambientLight;packed.viewer={m.infiniteViewer.x,m.infiniteViewer.y,m.infiniteViewer.z,0};packed.lightState={static_cast<std::int32_t>(m.lightCount),m.selectedLight,static_cast<std::int32_t>(texture(m.lightmap,m.lightmapSampler)),0};if(m.lightmap)packed.metadata[0]|=8192u;packed.factors[2]=m.surfaceAmbient;packed.factors[3]=m.materialAmbient;materials.push_back(packed);}
     }
+    rt.flush_blas();
     // The existing GPU padding word carries the finite, scene-topology reflection layer bound.
     if(!records.empty())records.front().padding=static_cast<std::uint32_t>(triangleCount);
     if(slot.sceneUsed==slot.scenes.size())slot.scenes.emplace_back();auto& packet=slot.scenes[slot.sceneUsed++];
@@ -270,7 +321,9 @@ void rt_scene(RayTracing& rt,std::span<const RayGeometry> scene){
     VkAccelerationStructureGeometryKHR geometry{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};geometry.geometryType=VK_GEOMETRY_TYPE_INSTANCES_KHR;geometry.geometry.instances={VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};geometry.geometry.instances.data.deviceAddress=input.address;
     VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};info.type=VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;info.flags=VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR|VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;info.geometryCount=1;info.pGeometries=&geometry;
     std::uint32_t count=instances.size();VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};rt.buildSizes(s.device,VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,&info,&count,&sizes);
-    bool update=packet.tlas.handle&&packet.count==count;auto& tlas=packet.tlas;
+    // An instance whose flags changed (opaque <-> shaded, culling) gets a full TLAS build, not a refit.
+    auto& flags=rt.flagData;flags.clear();for(const auto& i:instances)flags.push_back(static_cast<std::uint8_t>(i.flags));
+    bool update=packet.tlas.handle&&packet.count==count&&packet.flags==flags;packet.flags=flags;auto& tlas=packet.tlas;
     if(!update){if(tlas.handle)slot.garbage.push_back(tlas);tlas=rt.acceleration(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,sizes.accelerationStructureSize);}
     info.mode=update?VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR:VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;info.srcAccelerationStructure=update?tlas.handle:VK_NULL_HANDLE;info.dstAccelerationStructure=tlas.handle;
     auto scratch=rt.scratch(update?sizes.updateScratchSize:sizes.buildScratchSize);info.scratchData.deviceAddress=(scratch.address+rt.scratchAlignment-1)/rt.scratchAlignment*rt.scratchAlignment;

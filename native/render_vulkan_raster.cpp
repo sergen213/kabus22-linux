@@ -41,7 +41,7 @@ struct Batch{std::uint32_t first{},count{},material{},centroidFirst{},centroidCo
 // batchBounds: per batch, the bounds of its triangles' vertices (WMB models only; empty otherwise).
 struct Mesh { Buffer indices;std::vector<Batch>batches;std::vector<Vertex>expanded;std::vector<Vec3>tangents;Bounds bounds;std::vector<Bounds>frames;int primaryMax{},skinLayers{};std::uint64_t texturesFrame{};std::vector<Bounds>batchBounds; };
 // width/height are the original image's (UV policy); image may hold a larger texture-pack replacement.
-struct Texture { Image image;std::uint64_t serial{},submission{~0ull};bool dynamic{},alpha{},mipsValid{};std::uint32_t width{},height{};Image normal,orm;bool roughness{}; };
+struct Texture { Image image;std::uint64_t serial{},submission{~0ull};bool dynamic{},alpha{},mipsValid{};std::uint32_t width{},height{};Image normal,orm;bool roughness{};bool opaque{}; };
 struct Warp { Image image;std::uint64_t serial{~0ull};int phase{-1};float range{};bool mipsValid{}; };
 struct Sky { Image image;std::uint32_t frames{}; };
 struct EffectBank { const k22::Image* identity{};std::uint32_t width{},height{};bool dynamic{},alpha{}; };
@@ -167,6 +167,7 @@ struct Raster {
         Image interpolated;bool upscaledNow{},fsrReset{};float fsrMs{16.7f};std::uint64_t generationFrame{};
         Image sun,cube;std::array<VkImageView,6>faces{};
         std::array<Image,2>gdata,gdepth,length;std::array<Image,3>raw,tmp;std::array<std::array<Image,3>,2>history;
+        Image guide,maskTiles,maskNear; // rt_filter.comp: the a-trous taps' packed depth/normal; 8x8 tiles holding a mask that is not 1, and their surroundings.
         Image motion,motionDepth; // Motion vectors of moving/animated entities (scene pass 3) for TAA and the denoiser.
         DenseMap<std::uint32_t,Matrix>previousModels,currentModels;std::uint64_t motionFrame{};
         Matrix sunMatrix{},previousVP{},unjittered{},inverseVP{};float sunTexel{},shadowRange{},nearPlane{1},farPlane{1};Vec3 shadowLight{},eye{},forward{};int shadowIndex{-1};
@@ -213,8 +214,8 @@ struct Raster {
     // RT signal compute pipelines (shadows=rt, gi, reflections=rough), built on first use so reconfigure can enable them.
     void ensure_rt_pipelines(){
         if(signalsPipeline)return;
-        // Compute set: 0 uniform, 1 lights, 2-9 sampled images, 10-20 storage images; set 1 is the ray-query scene.
-        std::array<VkDescriptorSetLayoutBinding,21>cb{};for(unsigned i=0;i<cb.size();++i){cb[i].binding=i;cb[i].descriptorCount=1;cb[i].descriptorType=i==0?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:i==1?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:i<10?VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;cb[i].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT;}
+        // Compute set: 0 uniform, 1 lights, 2-9 sampled images, 10-23 storage images; set 1 is the ray-query scene.
+        std::array<VkDescriptorSetLayoutBinding,24>cb{};for(unsigned i=0;i<cb.size();++i){cb[i].binding=i;cb[i].descriptorCount=1;cb[i].descriptorType=i==0?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:i==1?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:i<10?VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;cb[i].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT;}
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};ci.bindingCount=cb.size();ci.pBindings=cb.data();require(vkCreateDescriptorSetLayout(s.device,&ci,nullptr,&computeSetLayout),"RT signal descriptor layout");
         std::array<VkDescriptorSetLayout,2>sets{computeSetLayout,rt_layout(*s.rays)};VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT,0,8};
         VkPipelineLayoutCreateInfo cp{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};cp.setLayoutCount=2;cp.pSetLayouts=sets.data();cp.pushConstantRangeCount=1;cp.pPushConstantRanges=&push;require(vkCreatePipelineLayout(s.device,&cp,nullptr,&computeLayout),"RT signal pipeline layout");
@@ -260,7 +261,7 @@ struct Raster {
     // Extent-dependent effect images are retired (fence-safe) on resize; shadow maps only on teardown.
     void free_effects(bool all){
         auto drop=[&](Image&i){if(all)s.destroy(i);else s.retire(i);};auto dropView=[&](VkImageView&v){if(!v)return;if(all)vkDestroyImageView(s.device,v,nullptr);else arenas[s.slotIndex].views.push_back(v);v=VK_NULL_HANDLE;};
-        dropView(fx.depthView);fx.depthSampled={};drop(fx.depth);drop(fx.linear);drop(fx.ao);drop(fx.fog);drop(fx.ldr);drop(fx.motion);drop(fx.motionDepth);for(auto*set:{&fx.taa,&fx.gdata,&fx.gdepth,&fx.length})for(auto&i:*set)drop(i);for(auto&i:fx.bloom)drop(i);for(auto&i:fx.raw)drop(i);for(auto&i:fx.tmp)drop(i);for(auto&h:fx.history)for(auto&i:h)drop(i);
+        dropView(fx.depthView);fx.depthSampled={};drop(fx.depth);drop(fx.linear);drop(fx.ao);drop(fx.fog);drop(fx.ldr);drop(fx.motion);drop(fx.motionDepth);for(auto*set:{&fx.taa,&fx.gdata,&fx.gdepth,&fx.length})for(auto&i:*set)drop(i);for(auto&i:fx.bloom)drop(i);drop(fx.guide);drop(fx.maskTiles);drop(fx.maskNear);for(auto&i:fx.raw)drop(i);for(auto&i:fx.tmp)drop(i);for(auto&h:fx.history)for(auto&i:h)drop(i);
         drop(fx.sharp);drop(fx.fsrDepth);drop(fx.fsrMotion);drop(fx.upscaled);drop(fx.opaque);drop(fx.reactive);drop(fx.interpolated);
         fx.taaValid=fx.historyValid=fx.linearValid=fx.fsrValid=false;fx.extent={};
         if(all){for(auto&v:fx.faces)dropView(v);drop(fx.sun);drop(fx.cube);}
@@ -392,6 +393,7 @@ struct Raster {
             auto levels=!dynamic&&mode==UICommand::TextureMode::Default?std::bit_width(std::max(upload->width,upload->height)):1u;
             bool generate=levels>1&&frame&&frame->mipmapping>=1;
             t.image=s.image(upload->width,upload->height,format,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT,levels);VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={upload->width,upload->height,1};s.upload(t.image,pixels,std::span(&copy,1),generate);t.serial=serial;t.dynamic=dynamic;t.mipsValid=generate;t.alpha=dynamic||mode!=UICommand::TextureMode::Default;for(std::size_t i=3;!t.alpha&&i<source->rgba.size();i+=4)t.alpha=source->rgba[i]!=255;
+            t.opaque=!dynamic&&format==VK_FORMAT_R8G8B8A8_UNORM;for(std::size_t i=3;t.opaque&&i<pixels.size();i+=4)t.opaque=pixels[i]==std::byte{255}; // Every uploaded texel (pack, upscale) has alpha 1.
             t.width=source->width;t.height=source->height;
             auto map=[&](const std::shared_ptr<const k22::Image>&image,Image&target){if(!image)return;target=s.image(image->width,image->height,VK_FORMAT_R8G8B8A8_UNORM,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT,std::bit_width(std::max(image->width,image->height)));VkBufferImageCopy region{};region.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.imageExtent={image->width,image->height,1};s.upload(target,std::as_bytes(std::span(image->rgba)),std::span(&region,1),true);};
             if(pack){map(pack->normal,t.normal);map(pack->orm,t.orm);t.roughness=pack->roughness;}
@@ -489,6 +491,7 @@ struct Raster {
         if(result.blend)ray.flags|=1024u;
         if(live&&!effect&&frame->hardwareLighting)ray.flags|=2048u;
         if(d.unlit)ray.flags|=4096u;
+        if(!image||(!turbulent.contains(image)&&result.images[0]==&textures.at(image)[0].image&&textures.at(image)[0].opaque))ray.flags|=16384u; // Warped (turbulent) surfaces never: their bound image changes when the warp appears.
         ray.preparedAmbient=u.preparedAmbient;ray.preparedDiffuse=u.preparedDiffuse;ray.preparedSpecular=u.preparedSpecular;ray.preparedEmissive=u.preparedEmissive;ray.ambientLight=u.ambientLight;
         ray.infiniteViewer={u.parameters[2][1],u.parameters[2][2],u.parameters[2][3]};ray.lightCount=u.flags[0][0];ray.selectedLight=static_cast<std::int32_t>(u.preparedDiffuse[3]);
         return result;
@@ -688,6 +691,7 @@ struct Raster {
         if(motionVectors()){fx.motion=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);fx.motionDepth=s.image(w,h,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);readable(fx.motion);}
         if(rt){
             for(unsigned k=0;k<2;++k){fx.gdata[k]=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);fx.gdepth[k]=s.image(w,h,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);fx.length[k]=s.image(w,h,VK_FORMAT_R32_SFLOAT,storage);readable(fx.gdata[k]);readable(fx.gdepth[k]);general(fx.length[k]);}
+            if(f.denoise){fx.guide=s.image(w,h,VK_FORMAT_R16G16B16A16_UINT,storage);general(fx.guide);for(auto*image:{&fx.maskTiles,&fx.maskNear}){*image=s.image((w+7)/8,(h+7)/8,VK_FORMAT_R32_UINT,storage);general(*image);}}
             // Disabled signals keep 1x1 placeholders so every statically used storage binding stays valid.
             const std::array<bool,3>on{f.shadows==ShadowMode::RayTraced,f.gi,f.roughReflections};
             for(unsigned i=0;i<3;++i)for(auto*image:{&fx.raw[i],&fx.tmp[i],&fx.history[0][i],&fx.history[1][i]}){*image=s.image(on[i]?w:1,on[i]?h:1,VK_FORMAT_R16G16B16A16_SFLOAT,storage);general(*image);}
@@ -787,16 +791,16 @@ struct Raster {
     // Compute set: 0 uniform, 1 lights, 2.. sampled images, 10.. storage images (GENERAL); null entries stay unwritten.
     VkDescriptorSet compute_set(const ComputeUniform&cu,std::span<const std::pair<Image*,VkSampler>>sampledImages,std::span<Image* const>storage){
         auto set=allocate_set(computeSetLayout);auto uniform=allocate(sizeof(cu),std::max<VkDeviceSize>(16,s.properties.limits.minUniformBufferOffsetAlignment),&cu);auto lights=lightAllocation.buffer?lightAllocation:zeroAllocation;
-        std::array<VkDescriptorBufferInfo,2>bi{{{uniform.buffer->handle,uniform.offset,uniform.size},{lights.buffer->handle,lights.offset,lights.size}}};std::array<VkDescriptorImageInfo,20>ii{};std::vector<VkWriteDescriptorSet>w;
+        std::array<VkDescriptorBufferInfo,2>bi{{{uniform.buffer->handle,uniform.offset,uniform.size},{lights.buffer->handle,lights.offset,lights.size}}};std::array<VkDescriptorImageInfo,22>ii{};std::vector<VkWriteDescriptorSet>w;
         auto write=[&](std::uint32_t binding,VkDescriptorType type){VkWriteDescriptorSet x{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};x.dstSet=set;x.dstBinding=binding;x.descriptorCount=1;x.descriptorType=type;w.push_back(x);return &w.back();};
         w.reserve(24);write(0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)->pBufferInfo=&bi[0];write(1,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)->pBufferInfo=&bi[1];
         for(std::size_t i=0;i<sampledImages.size();++i){ii[i]={sampledImages[i].second,sampledImages[i].first->view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};write(2+i,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)->pImageInfo=&ii[i];}
         for(std::size_t i=0;i<storage.size();++i)if(storage[i]){ii[8+i]={VK_NULL_HANDLE,storage[i]->view,VK_IMAGE_LAYOUT_GENERAL};write(10+i,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)->pImageInfo=&ii[8+i];}
         vkUpdateDescriptorSets(s.device,w.size(),w.data(),0,nullptr);return set;
     }
-    void dispatch(VkPipeline pipeline,VkDescriptorSet set,int mode,int stride){
+    void dispatch(VkPipeline pipeline,VkDescriptorSet set,int mode,int stride,std::uint32_t divide=1){
         vkCmdBindPipeline(s.command,VK_PIPELINE_BIND_POINT_COMPUTE,pipeline);std::array<VkDescriptorSet,2>sets{set,rt_set(*s.rays)};vkCmdBindDescriptorSets(s.command,VK_PIPELINE_BIND_POINT_COMPUTE,computeLayout,0,2,sets.data(),0,nullptr);
-        const std::array<std::int32_t,2>push{mode,stride};vkCmdPushConstants(s.command,computeLayout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(push),push.data());vkCmdDispatch(s.command,(s.render.width+7)/8,(s.render.height+7)/8,1);
+        const std::array<std::int32_t,2>push{mode,stride};vkCmdPushConstants(s.command,computeLayout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(push),push.data());vkCmdDispatch(s.command,((s.render.width+7)/8+divide-1)/divide,((s.render.height+7)/8+divide-1)/divide,1);
     }
     void compute_barrier(VkPipelineStageFlags source=VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VkAccessFlags written=VK_ACCESS_SHADER_WRITE_BIT){VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};b.srcAccessMask=written;b.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;vkCmdPipelineBarrier(s.command,source,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,1,&b,0,nullptr,0,nullptr);}
     // One depth-tested prepass draw (G-buffer pass 2, motion-vector pass 3); `previous` and `before` supply the motion pass's
@@ -846,14 +850,14 @@ struct Raster {
         // The TLAS and the GPU-deformed poses written this frame are read by compute ray queries.
         compute_barrier(VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_HOST_BIT,VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR|VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_HOST_WRITE_BIT);
         ComputeUniform cu;cu.inverseViewProjection=inverse(view.viewProjection);cu.previousViewProjection=fx.previousVP;cu.eye=vec(camera.position,camera.farClip);cu.sun=vec(unit(frame->sunDirection),0.02f);
-        cu.params={float(frameIndex&0xffff),1500.f,40.f,camera.nearClip};cu.camera=vec(fx.forward,float(std::min<std::size_t>(frame->lights.size(),32)));cu.config={bits,int(s.render.width),int(s.render.height),fx.historyValid?1:0};cu.actor={float(actorShadowFirst),float(actorShadowCount),std::clamp(frame->shadowAlpha*.01f,0.f,1.f),0};cu.planar=vec(planar_light_direction(frame->shadowSun),actorShadowCasters?1.f:0.f);
+        cu.params={float(frameIndex&0xffff),1500.f,40.f,camera.nearClip};cu.camera=vec(fx.forward,float(std::min<std::size_t>(frame->lights.size(),32)));cu.config={bits|(f.denoise?8:0),int(s.render.width),int(s.render.height),fx.historyValid?1:0};cu.actor={float(actorShadowFirst),float(actorShadowCount),std::clamp(frame->shadowAlpha*.01f,0.f,1.f),0};cu.planar=vec(planar_light_direction(frame->shadowSun),actorShadowCasters?1.f:0.f);
         const auto nearest=sampler(false,true);const std::array<std::pair<Image*,VkSampler>,5>edges{{{&fx.gdepth[cur],nearest},{&fx.gdata[cur],nearest},{&fx.gdepth[prev],nearest},{&fx.gdata[prev],nearest},{&fx.motion,nearest}}};
         dispatch(signalsPipeline,compute_set(cu,std::span(edges).first(2),std::array<Image*,3>{&fx.raw[0],&fx.raw[1],&fx.raw[2]}),0,0);s.mark("rt_signals");
         std::array<Image,3>*result=&fx.raw;
         if(f.denoise){
             auto&history=fx.history[cur];auto&before=fx.history[prev];
-            auto filter=[&](int mode,int stride,std::array<Image,3>&in,std::array<Image,3>&out){compute_barrier();dispatch(filterPipeline,compute_set(cu,edges,std::array<Image*,11>{&in[0],&in[1],&in[2],&before[0],&before[1],&before[2],&fx.length[prev],&out[0],&out[1],&out[2],&fx.length[cur]}),mode,stride);};
-            filter(0,0,fx.raw,history);filter(1,1,history,fx.tmp);filter(1,2,fx.tmp,fx.raw);filter(1,4,fx.raw,fx.tmp);result=&fx.tmp;s.mark("rt_denoise");
+            auto filter=[&](int mode,int stride,std::array<Image,3>&in,std::array<Image,3>&out){compute_barrier();dispatch(filterPipeline,compute_set(cu,edges,std::array<Image*,14>{&in[0],&in[1],&in[2],&before[0],&before[1],&before[2],&fx.length[prev],&out[0],&out[1],&out[2],&fx.length[cur],&fx.guide,&fx.maskTiles,&fx.maskNear}),mode,stride,mode>=3?8:1);};
+            filter(4,0,fx.raw,history);filter(0,0,fx.raw,history);filter(3,0,fx.raw,history);filter(1,1,history,fx.tmp);filter(1,2,fx.tmp,fx.raw);filter(2,4,fx.raw,fx.tmp);result=&fx.tmp;s.mark("rt_denoise");
         }
         for(auto&image:*result)s.transition(image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
         globals[2]={&(*result)[0],nearest};globals[3]={&(*result)[1],nearest};globals[4]={&(*result)[2],nearest};globals[5]={&fx.gdepth[cur],nearest};view.effects[1]=float(bits|int(view.effects[1]));
@@ -1039,7 +1043,7 @@ struct Raster {
         for(auto&c:f.ui){if(c.kind==UICommand::Kind::Image&&c.image)texture(c.image,c.dynamicImage,c.imageSerial,c.textureMode);if(c.kind==UICommand::Kind::Text&&c.font)texture(&c.font->image);}
         if(f.video){check_image(*f.video);if(!video.handle||video.width!=f.video->width||video.height!=f.video->height||videoSerial!=f.videoSerial){end();if(video.handle)s.retire(video);video=s.image(f.video->width,f.video->height,VK_FORMAT_R8G8B8A8_UNORM,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={f.video->width,f.video->height,1};s.upload(video,std::as_bytes(std::span(f.video->rgba)),std::span(&copy,1));videoSerial=f.videoSerial;}}
         if(f.adjustment.enabled&&(!gammaUploaded||adjustment.gammaRamp!=f.adjustment.gammaRamp)){end();s.retire(gamma);gamma=s.image(256,3,VK_FORMAT_R16_UNORM,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={256,3,1};s.upload(gamma,std::as_bytes(std::span(f.adjustment.gammaRamp)),std::span(&copy,1));adjustment=f.adjustment;gammaUploaded=true;}adjustment.enabled=f.adjustment.enabled;
-        s.mark("prepare");if(primary&&shadow_maps_enabled(s.options.features)){shadow_maps(*primary);s.mark("shadow_maps");}reset_globals();
+        rt_poses_ready(*s.rays);s.mark("prepare");if(primary&&shadow_maps_enabled(s.options.features)){shadow_maps(*primary);s.mark("shadow_maps");}reset_globals();
         const bool composited=composite_enabled(s.options.pbr,s.options.features);
         begin(composited?s.hdr:s.scene);set_region(full());auto seed=[&](Color c){return s.options.pbr?inverse_tone_map(c):c;};bool native=std::any_of(f.cameras.begin(),f.cameras.end(),[](auto&c){return c.perDrawOpacity;});if(!native||!s.retainedColorValid){clear(seed(f.clearColor),true,true,true,full());s.retainedColorValid=true;}if(native&&f.clearScreen){const Camera*first=nullptr;for(auto&c:f.cameras)if(!c.foreground&&!c.portalTarget){first=&c;break;}if(!first)for(auto&c:f.cameras)if(c.foreground&&!c.portalTarget){first=&c;break;}Rect v=first?first->viewport:Rect{};bool fullScreen=first&&(v.width<=0||v.height<=0||(v.x<=0&&v.y<=0&&v.x+v.width>=m.width&&v.y+v.height>=m.height));if(!fullScreen)clear(seed(f.screenColor),true,false,false,full());}
         for(auto&c:f.cameras)if(!c.foreground&&!c.portalTarget)camera(c);s.mark("views");composite();s.mark("composite");

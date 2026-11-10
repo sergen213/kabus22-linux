@@ -40,10 +40,16 @@ void rtOrdinaryVertex(RtMaterial m,vec3 p,vec3 n,out vec3 diffuse,out vec3 specu
     }
     diffuse=clamp(diffuse,0,1);specular=clamp(specular,0,1);
 }
+// Facing: one-sided instances whose model winds clockwise carry the TLAS flip-facing flag, so `front` (the ray query's
+// front-face bit) always means the side that is drawn. Rays cull the other side themselves: gl_RayFlagsCullBackFacingTrianglesEXT,
+// or CullFrontFacing for visibility rays, which judge an occluder from the light (they pass !front). Double-sided
+// instances disable culling. Opaque geometry (render_vulkan_rt.cpp static_opaque/opaque_now: this function would return
+// alpha 1 or more for every texel, and the instance is not clipped) is committed by the traversal without reaching the
+// shader, so candidate loops only ever see colour-keyed, alpha-textured, translucent, faded or clipped triangles.
 vec4 rtMaterialHit(uint instanceIndex,uint geometryIndex,uint triangle,bool front,vec2 bary,mat4x3 transform){
     RtInstance instance=rtInstances[instanceIndex];
     RtMaterial m=rtMaterials[instance.materialBase+geometryIndex];
-    if((m.metadata.x&16u)==0u && front==((m.metadata.x&32u)!=0u))return vec4(0);
+    if((m.metadata.x&16u)==0u && !front)return vec4(0);
     RtIndices indices=RtIndices(instance.indices);RtVertices vertices=RtVertices(instance.vertices);
     uint a=indices.words[m.frames.z+triangle*3u],b=indices.words[m.frames.z+triangle*3u+1u],c=indices.words[m.frames.z+triangle*3u+2u];
     vec3 w=vec3(1.0-bary.x-bary.y,bary);
@@ -99,10 +105,10 @@ const float rtLightClearance=16.0;
 // TLAS instance masks: 1 level/map geometry, 2 models and sprites, 4 models with the original SHADOW flag (actor shadows).
 float rtVisibility(vec3 origin,vec3 direction,float maxDistance,uint mask){
     if(maxDistance<=.001||dot(direction,direction)==0.0)return 1.0;
-    rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsNoneEXT,mask,origin,.001,normalize(direction),maxDistance);
+    rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsTerminateOnFirstHitEXT|gl_RayFlagsCullFrontFacingTrianglesEXT,mask,origin,.001,normalize(direction),maxDistance);
     float visibility=1.0;
     while(rayQueryProceedEXT(q))if(rayQueryGetIntersectionTypeEXT(q,false)==gl_RayQueryCandidateIntersectionTriangleEXT&&!rtAdditive(rayQueryGetIntersectionInstanceCustomIndexEXT(q,false),rayQueryGetIntersectionGeometryIndexEXT(q,false))){vec4 color=rtMaterialHit(rayQueryGetIntersectionInstanceCustomIndexEXT(q,false),rayQueryGetIntersectionGeometryIndexEXT(q,false),rayQueryGetIntersectionPrimitiveIndexEXT(q,false),!rayQueryGetIntersectionFrontFaceEXT(q,false),rayQueryGetIntersectionBarycentricsEXT(q,false),rayQueryGetIntersectionObjectToWorldEXT(q,false));if(color.a>0.0){visibility*=1.0-clamp(color.a,0.0,1.0);if(visibility<.01){rayQueryTerminateEXT(q);return 0.0;}}}
-    return visibility;
+    return rayQueryGetIntersectionTypeEXT(q,true)!=gl_RayQueryCommittedIntersectionNoneEXT?0.0:visibility; // Committed: an opaque occluder.
 }
 float rtVisibility(vec3 origin,vec3 direction,float maxDistance){return rtVisibility(origin,direction,maxDistance,255u);}
 vec3 rtReflection(vec3 origin,vec3 direction,float maxDistance,vec3 fallback){
@@ -111,7 +117,7 @@ vec3 rtReflection(vec3 origin,vec3 direction,float maxDistance,vec3 fallback){
     direction=normalize(direction);
     // A straight ray intersects each display triangle at most once: no arbitrary layer cap.
     for(uint layer=0u;layer<rtInstances[0].padding&&minDistance<=maxDistance;++layer){
-        rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsNoneEXT,255,origin,minDistance,direction,maxDistance);
+        rayQueryEXT q;rayQueryInitializeEXT(q,rtAcceleration,gl_RayFlagsCullBackFacingTrianglesEXT,255,origin,minDistance,direction,maxDistance);
         while(rayQueryProceedEXT(q))if(rayQueryGetIntersectionTypeEXT(q,false)==gl_RayQueryCandidateIntersectionTriangleEXT){vec4 color=rtHitColor(q,false);if(color.a>0.0)rayQueryConfirmIntersectionEXT(q);}
         if(rayQueryGetIntersectionTypeEXT(q,true)==gl_RayQueryCommittedIntersectionNoneEXT)break;
         vec4 color=rtHitColor(q,true);float alpha=clamp(color.a,0.0,1.0);

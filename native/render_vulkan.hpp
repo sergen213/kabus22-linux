@@ -55,7 +55,8 @@ struct RayMaterial {
 };
 // Ray flags: overlay=1, flare=2, invertFlare=4, textureAlpha=8,
 // doubleSided=16, clockwise=32, effect=64, effectSun=128, alphaTest=256, additive=512, blend=1024,
-// explicitMaterial=2048, unlit=4096, hasLightmap=8192 (GI hit lighting; lightState.z = lightmap texture).
+// explicitMaterial=2048, unlit=4096, hasLightmap=8192 (GI hit lighting; lightState.z = lightmap texture),
+// opaqueTexels=16384 (the bound texture's alpha is 1 everywhere; rt_scene's opaque geometry).
 struct Pose { Buffer vertices; std::uint32_t count{}; };
 struct RayGeometry { const DrawInstance* draw{}; Pose* pose{}; Buffer* indices{}; std::span<const RayMaterial> materials; std::array<float,16> transform{}; std::array<float,4> clipPlane{}; };
 struct Raster;
@@ -138,6 +139,7 @@ std::unique_ptr<RayTracing,RayDelete> rt_create(VulkanBackend::State&);
 void rt_destroy(RayTracing*);
 Pose& rt_pose(RayTracing&,const DrawInstance&,std::span<const Vertex> expandedVertices={},std::span<const Vec3> expandedTangents={},bool needsTangents=false);
 Pose* rt_previous_pose(RayTracing&,Pose& current);
+void rt_poses_ready(RayTracing&);
 void rt_scene(RayTracing&,std::span<const RayGeometry>);
 VkDescriptorSetLayout rt_layout(const RayTracing&); VkDescriptorSet rt_set(const RayTracing&);
 void rt_replace_texture(RayTracing&,VkImageView previous,VkImageView replacement);

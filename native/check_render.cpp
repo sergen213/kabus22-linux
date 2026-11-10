@@ -1650,6 +1650,29 @@ void rt_checks() {
     restored("Revision-keyed mutable pose reaches actual BLAS");
     overridePositions=blocker.frames[0].positions;actors[1].positions=overridePositions;++actors[1].meshRevision;
     if(lit-sample()<120)throw std::runtime_error("Changed mutable pose revision retained stale hardware visibility");
+    // Opaque acceleration-structure geometry (render_vulkan_rt.cpp static_opaque/opaque_now) follows material changes made
+    // after its build: each state must shade like a renderer that starts in it.
+    auto fresh=[&](const char*label){
+        const int running=sample();Renderer started(options);const int first=sampleRenderer(started);
+        if(std::abs(running-first)>18)throw std::runtime_error(std::string(label)+": opaque ray geometry kept a stale material state ("+std::to_string(running)+" vs "+std::to_string(first)+")");
+        return running;
+    };
+    actors[1].overlay=false;
+    if(lit-fresh("Colour key removed")<120)throw std::runtime_error("Opaque occluder without a colour key did not block hardware rays");
+    frame.skinBindings=skins;
+    if(std::abs(fresh("Opaque skin replaced by a transparent one")-lit)>18)throw std::runtime_error("Transparent replacement skin still occluded as opaque geometry");
+    frame.skinBindings={};
+    if(lit-fresh("Opaque skin restored")<120)throw std::runtime_error("Restored opaque skin did not block hardware rays");
+    actors[1].alpha=.25f;fresh("Occluder faded");
+    actors[1].alpha=0;
+    if(std::abs(fresh("Occluder faded out")-lit)>18)throw std::runtime_error("Invisible occluder still blocked hardware rays");
+    actors[1].alpha=1;actors[1].translucent=true;fresh("Occluder made TRANSPARENT");actors[1].translucent=false;
+    actors[1].overlay=true;
+    if(lit-fresh("Colour key restored")<120)throw std::runtime_error("Colour-keyed opaque occluder did not block hardware rays");
+    actors[1].overlay=false;actors[1].doubleSided=false;const int oneSided=fresh("One-sided occluder");
+    actors[1].scale={1,-1,1};
+    if(std::abs(fresh("Mirrored one-sided occluder")-oneSided)>18)throw std::runtime_error("Mirrored (negative-scale) occluder changed its ray facing");
+    actors[1].scale={1,1,1};actors[1].doubleSided=true;actors[1].overlay=true;
     frame.instances=std::span(actors).first(1);renderer.purge_model(&blocker);
     restored("Purged actor must leave no hardware ray occluder");
 }

@@ -2,7 +2,10 @@
 // Ray-traced signal denoiser. Mode 0: temporal accumulation with reprojection (motion vectors of moving entities, the
 // previous view-projection elsewhere), disocclusion rejection (render_policy::history_valid) and a variance clip of the
 // history. Mode 1: one edge-aware a-trous iteration (B3 kernel, depth/normal stopping; mirror-smooth reflections and the
-// lightmapped actor-shadow mask alpha are not blurred).
+// lightmapped actor-shadow mask alpha are not blurred); mode 2 is the last iteration.
+// The reflection signal exists on reflective pixels only (G-buffer flag 8): rt_signals.comp and every pass but the last
+// write it there alone, and a read of any other pixel (neighbour, history) takes the empty value instead. The last
+// pass writes the empty value elsewhere, so the image scene.frag samples is defined everywhere.
 layout(local_size_x=8,local_size_y=8) in;
 layout(set=0,binding=0,std140) uniform Signals { mat4 inverseViewProjection,previousViewProjection; vec4 eye,sun,params,camera; ivec4 config; vec4 actor; } g;
 layout(push_constant) uniform Push { int mode,stride; } pc;
@@ -22,17 +25,39 @@ layout(set=0,binding=17,rgba16f) uniform writeonly image2D outMask;
 layout(set=0,binding=18,rgba16f) uniform writeonly image2D outGi;
 layout(set=0,binding=19,rgba16f) uniform writeonly image2D outReflect;
 layout(set=0,binding=20,r32f) uniform writeonly image2D outLength;
+// Edge-stopping guide of the a-trous taps, written by mode 0 (one fetch per tap instead of depth + G-buffer data):
+// rg the bits of the linear view depth, its sign bit set on lightmapped pixels, all ones for sky; ba the G-buffer's
+// octahedral normal as its two half floats. Both are exact, so the weights equal those of the two fetches.
+layout(set=0,binding=21,rgba16ui) uniform uimage2D guide;
+// Mask shortcut. Mode 4 clears maskTiles; mode 0 marks every 8x8 tile holding a pixel whose accumulated mask is not exactly
+// 1; mode 3 marks in maskNear the tiles within two tiles (16 pixels: the three iterations reach 14) of a marked one. In
+// every other tile each tap of each iteration reads a mask of exactly 1, and the weighted mean of ones is exactly 1 (its
+// sum is the weight sum): those pixels store 1 without loading the mask taps.
+layout(set=0,binding=22,r32ui) uniform uimage2D maskTiles;
+layout(set=0,binding=23,r32ui) uniform uimage2D maskNear;
 vec3 decodeNormal(vec2 o){vec3 n=vec3(o,1.0-abs(o.x)-abs(o.y));if(n.z<0.0)n.xy=(1.0-abs(n.yx))*vec2(n.x>=0.0?1.0:-1.0,n.y>=0.0?1.0:-1.0);return normalize(n);}
 float linearDepth(float d){float n=g.params.w,f=g.eye.w,z=d*2.0-1.0;return 2.0*n*f/(f+n-z*(f-n));}
 bool use(int bit){return (g.config.x&bit)!=0;}
+const vec4 noReflection=vec4(0,0,0,1);
+bool reflective(float depth,vec4 data){return depth<1.0&&(int(data.a+0.5)&8)!=0;}
+float guideDepth(uvec4 v){return uintBitsToFloat(v.r|((v.g&0x7fffu)<<16));}
+vec3 guideNormal(uvec4 v){return decodeNormal(unpackHalf2x16(v.b|(v.a<<16)));}
+bool guideSky(uvec4 v){return (v.r&v.g)==0xffffu;}
+uvec4 packGuide(float depth,vec4 data){uint bits=depth<1.0?floatBitsToUint(linearDepth(depth))|(uint(int(data.a+0.5)&1)<<31):0xffffffffu,o=packHalf2x16(data.xy);return uvec4(bits&0xffffu,bits>>16,o&0xffffu,o>>16);}
 // render_policy::variance_clip (gamma 2): history outside the current 3x3 signal mean +- 2 sigma is pulled onto that box,
 // so a shadow or bounce that moved with its caster does not linger on the receiver.
 vec4 clipHistory(vec4 history,vec4 m1,vec4 m2){vec4 mean=m1/9.0,d=history-mean,e=abs(d)/(sqrt(max(m2/9.0-mean*mean,0.0))*2.0+1e-4);float m=max(max(e.x,e.y),max(e.z,e.w));return m>1.0?mean+d/m:history;}
 void main(){
     ivec2 pixel=ivec2(gl_GlobalInvocationID.xy),size=g.config.yz;if(pixel.x>=size.x||pixel.y>=size.y)return;
-    float depth=texelFetch(gDepth,pixel,0).r;vec4 data=texelFetch(gData,pixel,0);
+    if(pc.mode>=3){
+        ivec2 tiles=(size+7)>>3;if(pixel.x>=tiles.x||pixel.y>=tiles.y)return;
+        if(pc.mode==4){imageStore(maskTiles,pixel,uvec4(0));return;}
+        uint marked=0u;for(int y=-2;y<=2;++y)for(int x=-2;x<=2;++x)marked|=imageLoad(maskTiles,clamp(pixel+ivec2(x,y),ivec2(0),tiles-1)).r;
+        imageStore(maskNear,pixel,uvec4(marked));return;
+    }
     if(pc.mode==0){
-        vec4 mask=use(1)?imageLoad(inMask,pixel):vec4(1),gi=use(2)?imageLoad(inGi,pixel):vec4(0),reflection=use(4)?imageLoad(inReflect,pixel):vec4(0);float count=0.0;
+        float depth=texelFetch(gDepth,pixel,0).r;vec4 data=texelFetch(gData,pixel,0);const bool mirror=use(4)&&reflective(depth,data);
+        vec4 mask=use(1)?imageLoad(inMask,pixel):vec4(1),gi=use(2)?imageLoad(inGi,pixel):vec4(0),reflection=mirror?imageLoad(inReflect,pixel):noReflection;float count=0.0;
         if(depth<1.0&&g.config.w!=0){
             // Moving entities follow their motion vector (rasterized like this G-buffer, so the view depths agree).
             vec2 uv=(vec2(pixel)+0.5)/vec2(size),puv;float expected;vec4 motion=texelFetch(motionData,pixel,0);
@@ -40,39 +65,43 @@ void main(){
             else{vec4 world=g.inverseViewProjection*vec4(uv.x*2.0-1.0,1.0-uv.y*2.0,depth*2.0-1.0,1.0);vec4 previous=g.previousViewProjection*vec4(world.xyz/world.w,1.0);puv=vec2(previous.x/previous.w*0.5+0.5,0.5-previous.y/previous.w*0.5);expected=previous.w;}
             if(expected>0.0){ivec2 q=ivec2(floor(puv*vec2(size)));
                 if(all(greaterThanEqual(q,ivec2(0)))&&all(lessThan(q,size))){
-                    float before=linearDepth(texelFetch(previousDepth,q,0).r);float normalDot=dot(decodeNormal(data.xy),decodeNormal(texelFetch(previousData,q,0).xy));
+                    float beforeDepth=texelFetch(previousDepth,q,0).r,before=linearDepth(beforeDepth);vec4 beforeData=texelFetch(previousData,q,0);float normalDot=dot(decodeNormal(data.xy),decodeNormal(beforeData.xy));
                     // render_policy::history_valid: 5% relative view-depth change, normal cosine 0.9.
                     if(abs(expected-before)<=0.05*max(expected,before)&&normalDot>=0.9){
                         vec4 m1[3]=vec4[3](vec4(0),vec4(0),vec4(0)),m2[3]=m1;
-                        for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x){ivec2 o=clamp(pixel+ivec2(x,y),ivec2(0),size-1);vec4 s=use(1)?imageLoad(inMask,o):vec4(0);m1[0]+=s;m2[0]+=s*s;s=use(2)?imageLoad(inGi,o):vec4(0);m1[1]+=s;m2[1]+=s*s;s=use(4)?imageLoad(inReflect,o):vec4(0);m1[2]+=s;m2[2]+=s*s;}
+                        for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x){ivec2 o=clamp(pixel+ivec2(x,y),ivec2(0),size-1);vec4 s=use(1)?imageLoad(inMask,o):vec4(0);m1[0]+=s;m2[0]+=s*s;s=use(2)?imageLoad(inGi,o):vec4(0);m1[1]+=s;m2[1]+=s*s;if(mirror){s=reflective(texelFetch(gDepth,o,0).r,texelFetch(gData,o,0))?imageLoad(inReflect,o):noReflection;m1[2]+=s;m2[2]+=s*s;}}
                         count=min(imageLoad(historyLength,q).r+1.0,64.0);
                         if(use(1))mask=mix(clipHistory(imageLoad(historyMask,q),m1[0],m2[0]),mask,max(1.0/(count+1.0),0.15));
                         if(use(2))gi=mix(clipHistory(imageLoad(historyGi,q),m1[1],m2[1]),gi,max(1.0/(count+1.0),0.06));
-                        if(use(4))reflection=mix(clipHistory(imageLoad(historyReflect,q),m1[2],m2[2]),reflection,max(1.0/(count+1.0),0.15));
+                        if(mirror)reflection=mix(clipHistory(reflective(beforeDepth,beforeData)?imageLoad(historyReflect,q):noReflection,m1[2],m2[2]),reflection,max(1.0/(count+1.0),0.15));
                     }
                 }
             }
         }
-        if(use(1))imageStore(outMask,pixel,mask);if(use(2))imageStore(outGi,pixel,gi);if(use(4))imageStore(outReflect,pixel,reflection);imageStore(outLength,pixel,vec4(count));
+        if(use(1))imageStore(outMask,pixel,mask);if(use(2))imageStore(outGi,pixel,gi);if(mirror)imageStore(outReflect,pixel,reflection);imageStore(outLength,pixel,vec4(count));
+        if(use(1)&&mask!=vec4(1))imageStore(maskTiles,pixel>>3,uvec4(1));
+        imageStore(guide,pixel,packGuide(depth,data));
         return;
     }
-    vec4 mask=use(1)?imageLoad(inMask,pixel):vec4(1),gi=use(2)?imageLoad(inGi,pixel):vec4(0),reflection=use(4)?imageLoad(inReflect,pixel):vec4(0);
-    if(depth<1.0){
+    uvec4 own=imageLoad(guide,pixel);const bool sky=guideSky(own);vec4 data=use(4)&&!sky?texelFetch(gData,pixel,0):vec4(0);const bool mirror=(int(data.a+0.5)&8)!=0;
+    const bool blurMask=use(1)&&imageLoad(maskNear,pixel>>3).r!=0u;
+    vec4 mask=blurMask?imageLoad(inMask,pixel):vec4(1),gi=use(2)?imageLoad(inGi,pixel):vec4(0),reflection=mirror?imageLoad(inReflect,pixel):noReflection;
+    if(!sky){
         const float taps[3]=float[3](0.375,0.25,0.0625);
-        float center=linearDepth(depth);vec3 n=decodeNormal(data.xy);bool blurReflection=data.b>0.05,mapped=(int(data.a+0.5)&1)!=0;
+        float center=guideDepth(own);vec3 n=guideNormal(own);bool blurReflection=mirror&&data.b>0.05,mapped=(own.g&0x8000u)!=0u;
         vec4 sm=vec4(0),sg=vec4(0),sr=vec4(0);float wm=0.0,wr=0.0,sa=0.0,wa=0.0;
         for(int y=-2;y<=2;++y)for(int x=-2;x<=2;++x){
             ivec2 q=pixel+ivec2(x,y)*pc.stride;if(any(lessThan(q,ivec2(0)))||any(greaterThanEqual(q,size)))continue;
-            float d=texelFetch(gDepth,q,0).r;if(d>=1.0)continue;vec4 other=texelFetch(gData,q,0);
-            float w=taps[abs(x)]*taps[abs(y)]*exp(-abs(linearDepth(d)-center)/(0.02*center*float(pc.stride)))*pow(max(dot(n,decodeNormal(other.xy)),0.0),32.0);
-            if(use(1)){vec4 s=imageLoad(inMask,q);sm+=w*s;if(!mapped&&(int(other.a+0.5)&1)==0){sa+=w*s.a;wa+=w;}}if(use(2))sg+=w*imageLoad(inGi,q);wm+=w;
-            if(use(4)&&blurReflection){float wq=w*(other.b>0.05?1.0:0.0);sr+=wq*imageLoad(inReflect,q);wr+=wq;}
+            uvec4 other=imageLoad(guide,q);if(guideSky(other))continue;
+            float w=taps[abs(x)]*taps[abs(y)]*exp(-abs(guideDepth(other)-center)/(0.02*center*float(pc.stride)))*pow(max(dot(n,guideNormal(other)),0.0),32.0);
+            if(blurMask){vec4 s=imageLoad(inMask,q);sm+=w*s;if(!mapped&&(other.g&0x8000u)==0u){sa+=w*s.a;wa+=w;}}if(use(2))sg+=w*imageLoad(inGi,q);wm+=w;
+            if(blurReflection){vec4 tap=texelFetch(gData,q,0);float wq=w*(tap.b>0.05?1.0:0.0);sr+=wq*((int(tap.a+0.5)&8)!=0?imageLoad(inReflect,q):noReflection);wr+=wq;}
         }
         // Lightmapped pixels' actor-shadow alpha is only accumulated: its rays aim at small lamps, and the spatial blur thinned
         // a body's shadow strip to half its darkness. On model pixels alpha is the baked-light visibility, blurred among
         // model pixels only (the two encodings never mix).
-        if(wm>0.0){if(use(1))mask=vec4((sm/wm).rgb,wa>0.0?sa/wa:mask.a);if(use(2))gi=sg/wm;}
+        if(wm>0.0){if(blurMask)mask=vec4((sm/wm).rgb,wa>0.0?sa/wa:mask.a);if(use(2))gi=sg/wm;}
         if(wr>0.0)reflection=sr/wr;
     }
-    if(use(1))imageStore(outMask,pixel,mask);if(use(2))imageStore(outGi,pixel,gi);if(use(4))imageStore(outReflect,pixel,reflection);
+    if(use(1))imageStore(outMask,pixel,mask);if(use(2))imageStore(outGi,pixel,gi);if(mirror||(use(4)&&pc.mode==2))imageStore(outReflect,pixel,reflection);
 }
