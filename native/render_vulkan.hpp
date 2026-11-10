@@ -85,12 +85,10 @@ struct VulkanBackend::State {
     // interpolated between the previous and this rendered frame with this frame's UI drawn over it (valid when
     // generatedValid), real a copy of this frame's finalImage (captures). The frame's own command buffer blits both into
     // two acquired swapchain images; the present thread (Presenter) only presents them: generated, then real half a
-    // rendered-frame interval later. generationInterval: EMA of the render thread's period between submissions without its
-    // wait on the present thread (generationWait), last measured at generationLast. frameTimeline: timeline semaphore
+    // rendered-frame period later (it measures the period between frame completions). frameTimeline: timeline semaphore
     // (frame generation devices) signalled with frameValue by each frame-generation submission; the present thread waits it.
     bool generating{},generatedValid{}; std::array<vk22::Image,2> generated,real;
     struct Presenter; std::unique_ptr<Presenter> presenter;
-    double generationInterval{},generationWait{}; std::chrono::steady_clock::time_point generationLast{};
     VkSemaphore frameTimeline{}; std::uint64_t frameValue{};
     void drain_presents(std::uint64_t outstanding=0);
     bool retainedColorValid{},portalColorValid{},finalValid{};

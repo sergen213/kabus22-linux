@@ -2,8 +2,10 @@
 #include "render_vulkan.hpp"
 #include "render_policy.hpp"
 #include <SDL_vulkan.h>
+#include <sys/prctl.h>
 #include <cmath>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -153,17 +155,22 @@ void create_swapchain(VulkanBackend::State& s,WindowMetrics metrics) {
 // frame into two acquired swapchain images (finish()); this thread only presents them, so a present never queues behind a
 // later frame's GPU work. (The earlier IKV-derived thread acquired and blitted here after the frame's fence: on the one
 // graphics queue those blits ran after the next frame's rendering, so a GPU-bound frame's rendered image reached the
-// display together with the next generated one, and the generated one often too.) Pacing as OpenUnderworld
-// (src/render/vk/VkRenderer.cpp presentLoop) and ETI Yami (native/vulkan_renderer.cpp present_loop): once the frame's GPU
-// work is done, the generated image no earlier than half an interval after the previous rendered one, the rendered image half an
-// interval after it, no compositor lead (ETI Yami: IKV's 2 ms lead split every interval ~40/60, visible judder), and no
-// sleeping while further jobs are queued (catch up instead of adding latency). The present mode is unchanged: under FIFO
-// each image shows for at least one refresh in order and a full swapchain back-pressures the render thread's acquire.
+// display together with the next generated one, and the generated one often too.) Pacing: the generated image when the
+// frame's GPU work is done, the rendered image half a rendered-frame period later. The period is measured here, between
+// the frame completions this thread waits for (the last 8, without the smallest and the largest), so every wait of the
+// render thread counts: GPU, display (FIFO acquire), fps limit and CPU. (0.4.16 measured between submissions on the render
+// thread minus its wait on this thread; GPU-bound that wait hid a third of the period and the halves came out 4/7 ms.)
+// Completion jitter: a generated image is held until one period (less 0.1%) after the previous generated one, but never
+// more than 1/16 period after its frame's completion, so the cadence stays even through small frame-time differences at
+// a bounded latency cost and a period measured too long cannot hold the rendered rate down; no pacing wait starts once a
+// later frame is complete (catch up instead of adding latency). No compositor lead (ETI Yami: IKV's 2 ms lead split every
+// interval ~40/60, visible judder), no dependence on the refresh rate. The present mode is unchanged: under FIFO each
+// image shows for at least one refresh in order and a full swapchain back-pressures the render thread's acquire.
 // Every 600 presents it logs the presented and rendered rates measured at present calls and the generated->real and
 // real->generated interval medians (equal when the cadence is even).
 struct VulkanBackend::State::Presenter {
     static constexpr std::uint32_t none=UINT32_MAX;
-    struct Job { std::uint64_t frame; std::uint32_t generated,real; double halfMs; }; // frameTimeline value; swapchain image indices (generated: none)
+    struct Job { std::uint64_t frame; std::uint32_t generated,real; }; // frameTimeline value; swapchain image indices (generated: none)
     State& s;
     std::mutex mutex; std::condition_variable cv; std::deque<Job> jobs; std::uint64_t queued{},done{}; bool stop{}; std::exception_ptr error;
     std::atomic<bool> stale{}; // a present reported out of date or suboptimal: the render thread recreates the swapchain
@@ -184,12 +191,23 @@ struct VulkanBackend::State::Presenter {
     void loop()noexcept {
         using clock=std::chrono::steady_clock;
         const auto ms=[](clock::duration d){return std::chrono::duration<double,std::milli>(d).count();};
-        clock::time_point logStart{},lastShown{},lastReal{};bool lastWasReal=true;double interval=0;
-        std::vector<double> gaps,toReal,toGenerated;std::uint64_t generatedShown=0,realShown=0;
+        prctl(PR_SET_TIMERSLACK,1UL); // the default 50 us of slack on every pacing sleep is 1.2% of a 240 Hz refresh
+        clock::time_point logStart{},traceStart{},lastShown{},cadence{},completed{};bool lastWasReal=true;double interval=0;
+        std::array<double,8> periods{};std::size_t sampled=0;
+        const auto period=[&]{
+            const std::size_t n=std::min(sampled,periods.size());if(!n)return 0.;
+            double sum=0,low=periods[0],high=periods[0];for(std::size_t i=0;i<n;++i){sum+=periods[i];low=std::min(low,periods[i]);high=std::max(high,periods[i]);}
+            return n>3?(sum-low-high)/double(n-2):sum/double(n);
+        };
+        std::vector<double> gaps,toReal,toGenerated;std::uint64_t generatedShown=0,realShown=0,frame=0;
+        // K22_FG_TRACE=FILE: one line per present call: microseconds since the first one, G (generated) or R (rendered), the frame's
+        // timeline value, the pacing period in ms, ms since the frame's GPU work completed (tools/check_frame_pacing.py --fg-trace FILE).
+        const char* tracePath=std::getenv("K22_FG_TRACE");std::FILE* trace=tracePath&&*tracePath?std::fopen(tracePath,"a"):nullptr;
         const auto median=[](std::vector<double>& v){if(v.empty())return 0.;std::nth_element(v.begin(),v.begin()+v.size()/2,v.end());return v[v.size()/2];};
         const auto shown=[&](bool real) {
             const auto now=clock::now();
-            if(lastShown!=clock::time_point{}){const double gap=ms(now-lastShown);gaps.push_back(gap);if(real!=lastWasReal)(real?toReal:toGenerated).push_back(gap);}else logStart=now;
+            if(lastShown!=clock::time_point{}){const double gap=ms(now-lastShown);gaps.push_back(gap);if(real!=lastWasReal)(real?toReal:toGenerated).push_back(gap);}else logStart=traceStart=now;
+            if(trace)std::fprintf(trace,"%lld %c %llu %.3f %.3f\n",(long long)std::chrono::duration_cast<std::chrono::microseconds>(now-traceStart).count(),real?'R':'G',(unsigned long long)frame,interval,ms(now-completed));
             lastShown=now;lastWasReal=real;++(real?realShown:generatedShown);
             if(gaps.size()<600)return;
             const double seconds=ms(now-logStart)/1000;const double toRealMs=median(toReal),toGeneratedMs=median(toGenerated);std::sort(gaps.begin(),gaps.end());
@@ -199,20 +217,30 @@ struct VulkanBackend::State::Presenter {
         };
         const auto sleep=[](clock::time_point t){if(t>clock::now())std::this_thread::sleep_until(t);};
         for(;;) {
-            Job job{};bool behind{};
-            {std::unique_lock lock(mutex);cv.wait(lock,[&]{return stop||!jobs.empty();});if(jobs.empty())return;job=jobs.front();behind=jobs.size()>1;}
+            Job job{};
+            {std::unique_lock lock(mutex);cv.wait(lock,[&]{return stop||!jobs.empty();});if(jobs.empty()){if(trace)std::fclose(trace);return;}job=jobs.front();}
             try {
                 // The frame's GPU work, blits included: its frameTimeline value (no fence the render thread could reset).
                 VkSemaphoreWaitInfo wait{};wait.sType=VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;wait.semaphoreCount=1;wait.pSemaphores=&s.frameTimeline;wait.pValues=&job.frame;
                 for(VkResult r;(r=vkWaitSemaphores(s.device,&wait,50'000'000))!=VK_SUCCESS;)if(r!=VK_TIMEOUT)require(r,"Waiting for Vulkan frame-generation frame");
-                interval=job.halfMs*2;const auto half=std::chrono::duration_cast<clock::duration>(std::chrono::duration<double,std::milli>(job.halfMs));
+                // A stall (level load, renderer change) is not a period; a present skipped by the render thread doubles one
+                // sample, which the trimmed mean drops.
+                const auto previous=completed;completed=clock::now();
+                if(previous!=clock::time_point{}){const double sample=ms(completed-previous);if(sample<250)periods[sampled++%periods.size()]=sample;}
+                frame=job.frame;interval=period();
+                const auto full=std::chrono::duration_cast<clock::duration>(std::chrono::duration<double,std::milli>(interval)),half=full/2;
+                const std::uint64_t next=job.frame+1;wait.pValues=&next;
+                const auto behind=[&]{return vkWaitSemaphores(s.device,&wait,0)==VK_SUCCESS;}; // a later frame is complete
                 if(job.generated!=none) {
-                    if(!behind&&lastReal!=clock::time_point{})sleep(lastReal+half);
+                    if(cadence!=clock::time_point{}&&!behind())sleep(std::min(cadence+full-full/1000,completed+full/16));
+                    cadence=clock::now();
                     if(present(job.generated))shown(false);
-                    if(!behind)sleep(clock::now()+half);
+                    if(!behind())sleep(cadence+half);
+                    if(present(job.real))shown(true);
+                } else {
+                    if(present(job.real))shown(true);
+                    cadence=clock::now()-half; // history reset: the rendered frame alone
                 }
-                if(present(job.real))shown(true);
-                lastReal=clock::now();
             } catch(...) {std::scoped_lock lock(mutex);if(!error)error=std::current_exception();}
             {std::scoped_lock lock(mutex);jobs.pop_front();++done;}
             cv.notify_all();
@@ -524,15 +552,8 @@ void VulkanBackend::State::begin(WindowMetrics metrics,std::int32_t tripleBuffer
     // in-flight frame instead of serializing CPU recording behind the previous frame's GPU work.
     limit=desired;
     ensure_targets(metrics);if(swapDirty||!swapchain)return;
-    // Frame generation: the job of frame N-2 must be done before this frame reuses its slot (about half a rendered frame of
-    // latency); an out-of-date present recreates the swapchain here. The wait is excluded from generationInterval: counted,
-    // the render thread's period became the pacing period and the pacing never shrank (gpu-timing fps 32 with frame
-    // generation against 58 without, acquire_ms 11.8). Two jobs of slack instead ran into compositor buffer releases
-    // (whole frames waiting on acquire semaphores: 40 rendered fps against 160 at fps_limit=unlimited).
-    if(generating){
-        if(presenter->stale.exchange(false)){swapDirty=true;ensure_targets(metrics);if(swapDirty||!swapchain)return;}
-        const auto waitStart=std::chrono::steady_clock::now();drain_presents(1);const double waited=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-waitStart).count();timing.acquire+=waited;generationWait+=waited;
-    }
+    // Frame generation: an out-of-date present recreates the swapchain here.
+    if(generating&&presenter->stale.exchange(false)){swapDirty=true;ensure_targets(metrics);if(swapDirty||!swapchain)return;}
     auto& slot=slots[slotIndex];if(slot.pending)retire_slot(*this,slotIndex);
     garbage(*this,slot);
     if(generating){require(vkResetCommandPool(device,slot.pool,0),"Resetting Vulkan frame commands");VkCommandBufferBeginInfo beginInfo{};beginInfo.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;beginInfo.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;require(vkBeginCommandBuffer(slot.command,&beginInfo),"Beginning Vulkan frame");command=slot.command;if(timing.enabled){vkCmdResetQueryPool(command,slot.queries,0,64);slot.marks.clear();mark("start");}return;}
@@ -558,7 +579,12 @@ void VulkanBackend::State::finish(){
         // Two swapchain images (rendered, then generated when there is one), blitted here so the present thread only
         // presents: out of date presents nothing this frame, the rendered frame alone when only the second acquire fails.
         constexpr std::uint32_t none=Presenter::none;std::uint32_t realImage=none,generatedImage=none;
-        const auto acquireStart=std::chrono::steady_clock::now();
+        // The job of frame N-2 must be done before this frame takes its images (about half a rendered frame of latency).
+        // The wait is here, after recording, so the present thread's pacing overlaps the CPU work instead of delaying it.
+        // Two jobs of slack instead ran into compositor buffer releases (whole frames waiting on acquire semaphores: 40
+        // rendered fps against 160 at fps_limit=unlimited). K22_GPU_TIMING: present_ms is this wait, acquire_ms the acquires.
+        const auto drainStart=std::chrono::steady_clock::now();drain_presents(1);
+        const auto acquireStart=std::chrono::steady_clock::now();timing.present+=std::chrono::duration<double,std::milli>(acquireStart-drainStart).count();
         const auto take=[&](VkSemaphore semaphore,std::uint32_t& index){
             const VkResult r=vkAcquireNextImageKHR(device,swapchain,UINT64_MAX,semaphore,VK_NULL_HANDLE,&index);
             if(r==VK_ERROR_OUT_OF_DATE_KHR){swapDirty=true;index=none;return;}
@@ -589,12 +615,7 @@ void VulkanBackend::State::finish(){
         {std::scoped_lock lock(queueMutex);require(vkQueueSubmit2(queue,1,&submit,slot.fence),"Submitting Vulkan frame");}
         if(!pending)front=slotIndex;
         slot.pending=true;++pending;++submissions;finalSlot=slotIndex;finalSubmission=submissions;finalValid=true;command=VK_NULL_HANDLE;
-        // Rendered-frame period between submissions without the present-thread wait (begin()); GPU, display (FIFO
-        // acquire) and fps-limit waits count. Clamped to 1.5x the running value so one stall does not stretch the pacing.
-        const auto now=std::chrono::steady_clock::now();
-        if(generationLast!=std::chrono::steady_clock::time_point{}){const double period=std::chrono::duration<double,std::milli>(now-generationLast).count()-generationWait;if(period>0&&period<250)generationInterval=generationInterval>0?generationInterval*.9+std::min(period,generationInterval*1.5)*.1:period;}
-        generationLast=now;generationWait=0;
-        if(realImage!=none){{std::scoped_lock lock(presenter->mutex);presenter->jobs.push_back({frameValue,generatedImage,realImage,generationInterval*.5});++presenter->queued;}presenter->cv.notify_all();}
+        if(realImage!=none){{std::scoped_lock lock(presenter->mutex);presenter->jobs.push_back({frameValue,generatedImage,realImage});++presenter->queued;}presenter->cv.notify_all();}
         slotIndex=(slotIndex+1)%slots.size();
         return;
     }

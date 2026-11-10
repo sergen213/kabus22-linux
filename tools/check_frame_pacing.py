@@ -53,11 +53,65 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
+def frame_generation_trace(path, tail, max_split, max_p99):
+    """Summarize a K22_FG_TRACE file: `microseconds G|R frame periodMs msSinceFrameCompletion` per present call."""
+    rows = []
+    for line in path.read_text().split("\n"):
+        fields = line.split()
+        if len(fields) != 5:
+            continue
+        if rows and int(fields[0]) < rows[-1][0]:
+            rows = []  # a new presenter (renderer restart) restarts the clock
+        rows.append((int(fields[0]), fields[1], int(fields[2]), float(fields[3]), float(fields[4])))
+    rows = rows[-tail:] if tail else rows
+    require(len(rows) >= 100, f"only {len(rows)} presents in {path}")
+    gaps, to_real, to_generated = [], [], []
+    for before, after in zip(rows, rows[1:]):
+        gap = (after[0] - before[0]) / 1000
+        gaps.append(gap)
+        if before[1] == "G" and after[1] == "R" and before[2] == after[2]:
+            to_real.append(gap)
+        elif before[1] == "R" and after[1] == "G":
+            to_generated.append(gap)
+    require(to_real and to_generated, "no generated frames in the trace")
+
+    def quantile(values, q):
+        ordered = sorted(values)
+        return ordered[min(len(ordered) - 1, int(q * len(ordered)))]
+
+    seconds = (rows[-1][0] - rows[0][0]) / 1e6
+    real = sum(1 for row in rows[1:] if row[1] == "R")
+    g2r, r2g = quantile(to_real, .5), quantile(to_generated, .5)
+    split = abs(g2r - r2g) / (g2r + r2g)
+    p50, p99 = quantile(gaps, .5), quantile(gaps, .99)
+    print(f"presents={len(rows)} presentedFps={len(gaps) / seconds:.1f} renderedFps={real / seconds:.1f} "
+          f"interval p1={quantile(gaps, .01):.2f} p50={p50:.2f} p99={p99:.2f} max={max(gaps):.2f} "
+          f"generatedToReal p50={g2r:.2f} p99={quantile(to_real, .99):.2f} "
+          f"realToGenerated p50={r2g:.2f} p99={quantile(to_generated, .99):.2f} "
+          f"split={split * 100:.1f}% p99/p50={p99 / p50:.2f} pacingInterval={quantile([row[3] for row in rows], .5):.2f} "
+          f"completionToGenerated p50={quantile([row[4] for row in rows if row[1] == 'G'], .5):.2f} "
+          f"completionToReal p50={quantile([row[4] for row in rows if row[1] == 'R'], .5):.2f}")
+    if max_split is not None:
+        require(split <= max_split, f"generated/real halves differ by {split * 100:.1f}% of their sum")
+    if max_p99 is not None:
+        require(p99 <= max_p99 * p50, f"present interval p99 {p99:.2f} ms exceeds {max_p99:g} x p50 {p50:.2f} ms")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--engine", required=True, type=Path,
+    parser.add_argument("--engine", type=Path,
                         help="Real graphical native kabus22 executable (not a headless check)")
+    parser.add_argument("--fg-trace", type=Path,
+                        help="Summarize a frame-generation present trace (K22_FG_TRACE=FILE) instead of running the engine")
+    parser.add_argument("--tail", type=int, default=0, help="--fg-trace: only the last N presents (steady state)")
+    parser.add_argument("--max-split", type=float,
+                        help="--fg-trace: fail when |generated->real - real->generated| exceeds this fraction of their sum")
+    parser.add_argument("--max-p99", type=float, help="--fg-trace: fail when the p99 present interval exceeds this multiple of p50")
     args = parser.parse_args()
+    if args.fg_trace:
+        frame_generation_trace(args.fg_trace, args.tail, args.max_split, args.max_p99)
+        return
+    require(args.engine is not None, "--engine or --fg-trace is required")
     engine = args.engine.resolve(strict=True)
     require(engine.is_file() and os.access(engine, os.X_OK),
             f"not an executable file: {engine}")

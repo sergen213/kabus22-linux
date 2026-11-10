@@ -14,6 +14,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <chrono>
 #include <system_error>
 
 namespace {
@@ -1999,11 +2001,64 @@ void temporal_ghosting_checks(bool rayTracing,std::uint8_t fsr=0) {
     // Camera-only reprojection left 6043 (RT) / 2278 (raster) visibly different pixels of 57600; motion vectors ~800.
     if(trail>1400||noise>200)throw std::runtime_error("Moving actor left a temporal trail");
 }
+// Frame-generation pacing (render_vulkan.cpp Presenter) read from its K22_FG_TRACE: a moving actor drawn every 12 ms, a
+// 150 ms stall, 12 ms again, then 6 ms. Each rendered frame must be presented as generated then rendered, half a period
+// apart both ways, and the pacing period must ignore the stall and follow the faster cadence within a dozen frames.
+void frame_generation_pacing_checks() {
+    using namespace k22;
+    TempDirectory captures;const auto tracePath=captures.path/"fg-trace.txt";
+    auto solid=[](std::array<std::uint8_t,3>c){auto image=std::make_shared<Image>();image->width=image->height=8;for(unsigned i=0;i<64;++i)image->rgba.insert(image->rgba.end(),{c[0],c[1],c[2],255});return image;};
+    auto plane=[](Model&m,float x,float half,std::shared_ptr<const Image>image){m.formatVersion=4;m.vertices={{{x,-half,-half},{-1,0,0},{0,0},{}},{{x,half,-half},{-1,0,0},{1,0},{}},{{x,half,half},{-1,0,0},{1,1},{}},{{x,-half,half},{-1,0,0},{0,1},{}}};m.triangles={{{0,1,2},0,0},{{0,2,3},0,0}};m.materials.resize(1);m.materials[0].texture=std::move(image);};
+    World backdrop;Model actor;
+    plane(backdrop.mesh,40,60,solid({40,60,160}));backdrop.mesh.formatVersion=6;backdrop.mesh.materials[0].flags=3;backdrop.mesh.materials[0].raw.resize(64);
+    plane(actor,9,1.5f,solid({230,30,20}));
+    std::array<DrawInstance,1> actors{};actors[0].model=&actor;actors[0].objectId=401;actors[0].doubleSided=actors[0].noFog=true;
+    Camera camera;camera.nativeAmbient=-127;camera.widescreen=false;camera.noShadow=true;camera.perDrawOpacity=true;
+    RenderFrame frame;frame.cameras=std::span(&camera,1);frame.world=&backdrop;frame.sunDirection={-1,0,1};frame.instances=actors;
+    RenderOptions options;options.backend=RendererBackend::Vulkan;options.pbr=true;
+    options.width=320;options.height=180;options.samples=1;options.vsync=false;options.title="Kabus 22 frame generation pacing consumer";
+    options.features.fsr=2;options.features.frameGeneration=true;
+    constexpr int firstFrames=40,secondFrames=40,fastFrames=70;
+    ::setenv("K22_FG_TRACE",tracePath.c_str(),1);
+    try {
+        Renderer renderer(options);
+        if(!renderer.presentation_state().frameGeneration)throw std::runtime_error("frame generation did not start");
+        int drawn=0;
+        auto run=[&](int frames,std::chrono::milliseconds period){for(int i=0;i<frames;++i){const auto start=std::chrono::steady_clock::now();actors[0].position.y=-6+.05f*float(drawn++%240);renderer.draw(frame);std::this_thread::sleep_until(start+period);}};
+        run(firstFrames,std::chrono::milliseconds(12));std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        run(secondFrames,std::chrono::milliseconds(12));run(fastFrames,std::chrono::milliseconds(6));
+    } catch(...) {::unsetenv("K22_FG_TRACE");throw;}
+    ::unsetenv("K22_FG_TRACE");
+    struct Row { double ms; char kind; std::uint64_t frame; double interval,delay; };
+    std::vector<Row> rows;{std::ifstream file(tracePath);long long us{};Row r{};while(file>>us>>r.kind>>r.frame>>r.interval>>r.delay){r.ms=double(us)/1000;rows.push_back(r);}}
+    auto fail=[](const std::string& what){throw std::runtime_error("frame generation pacing: "+what);};
+    auto median=[](std::vector<double> v){if(v.empty())return 0.;std::nth_element(v.begin(),v.begin()+std::ptrdiff_t(v.size()/2),v.end());return v[v.size()/2];};
+    // Frame values count from 1; the first frames after start are history resets (rendered frame only).
+    struct Phase { const char* name; std::uint64_t from,to; double period; };
+    const Phase phases[]{{"12 ms",16,firstFrames,12},{"12 ms after a stall",firstFrames+4,firstFrames+secondFrames,12},{"6 ms",firstFrames+secondFrames+16,firstFrames+secondFrames+fastFrames,6}};
+    for(const auto& phase:phases) {
+        std::vector<double> toReal,toGenerated,intervals,delays;std::size_t frames=0;
+        for(std::size_t i=0;i+1<rows.size();++i) {
+            const auto&a=rows[i],&b=rows[i+1];if(a.frame<phase.from||b.frame>phase.to)continue;
+            if(a.kind=='G'){if(b.kind!='R'||b.frame!=a.frame)fail("a generated frame was not followed by its rendered frame");toReal.push_back(b.ms-a.ms);intervals.push_back(a.interval);delays.push_back(b.delay);++frames;}
+            else if(b.kind=='G'&&b.frame==a.frame+1)toGenerated.push_back(b.ms-a.ms);
+            else fail("a rendered frame was presented without its generated frame");
+        }
+        if(frames+3<phase.to-phase.from)fail("frames without a generated present");
+        const double generatedToReal=median(toReal),realToGenerated=median(toGenerated),delay=median(delays),low=*std::min_element(intervals.begin(),intervals.end()),high=*std::max_element(intervals.begin(),intervals.end());
+        std::cout<<"Frame generation pacing "<<phase.name<<": "<<frames<<" frames, generated->real "<<generatedToReal<<" ms, real->generated "<<realToGenerated<<" ms, period "<<low<<".."<<high<<" ms, rendered frame presented "<<delay<<" ms after its completion"<<std::endl;
+        if(low<phase.period*.85||high>phase.period*1.25)fail("the pacing period does not follow the rendered period");
+        if(std::abs(generatedToReal-realToGenerated)>.15*(generatedToReal+realToGenerated))fail("generated and rendered frames are unevenly spaced");
+        if(generatedToReal<phase.period*.4||generatedToReal>phase.period*.62)fail("the rendered frame does not follow its generated frame by half a period");
+        if(delay>phase.period*.62)fail("the rendered frame is presented more than half a period (plus the jitter allowance) after its completion");
+    }
+}
 // FSR 3.1.4 frame generation (frame_generation=on, FSR quality): a solid actor sliding sideways at constant speed under a
 // HUD rectangle. The generated frame (capture -fg-generated) must place the actor halfway between the previous and the
 // current rendered frame without a second, faded copy, and must carry this frame's HUD exactly as the rendered frame does.
 void frame_generation_checks(bool rayTracing) {
     using namespace k22;
+    if(!rayTracing)frame_generation_pacing_checks();
     TempDirectory captures;
     auto solid=[](std::array<std::uint8_t,3>c){auto image=std::make_shared<Image>();image->width=image->height=8;for(unsigned i=0;i<64;++i)image->rgba.insert(image->rgba.end(),{c[0],c[1],c[2],255});return image;};
     auto plane=[](Model&m,float x,float half,std::shared_ptr<const Image>image){m.formatVersion=4;m.vertices={{{x,-half,-half},{-1,0,0},{0,0},{}},{{x,half,-half},{-1,0,0},{1,0},{}},{{x,half,half},{-1,0,0},{1,1},{}},{{x,-half,half},{-1,0,0},{0,1},{}}};m.triangles={{{0,1,2},0,0},{{0,2,3},0,0}};m.materials.resize(1);m.materials[0].texture=std::move(image);};
