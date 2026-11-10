@@ -177,7 +177,8 @@ const World* Engine::door_world(Runtime& runtime,DoorGroup& g,bool wait){
         for(auto& other:door_.groups)other.linked=false;
         door_.world=nullptr;door_.wmb=wmb;
     }
-    if(!door_.world){if(!wait&&!assets.prefetch_world(wmb))return nullptr;door_.world=&assets.world(wmb);}
+    // doorsSynchronous: the destination is adopted on the tick that first asks for it (assets.world waits for the worker).
+    if(!door_.world){if(!wait&&!assets.prefetch_world(wmb)&&!doorsSynchronous)return nullptr;door_.world=&assets.world(wmb);}
     if(!g.linked){const int from=int(number("LY_AktifLevelID"));auto arrival=door_arrival(runtime,g.target,from);
         // This level's own Giris arrival from the destination stands in front of this door: it tells the room side.
         auto back=door_arrival(runtime,from,g.target);std::optional<Vec3> room;if(back&&std::hypot((*back)[0]-g.centroid.x,(*back)[1]-g.centroid.y)<160)room=Vec3{(*back)[0],(*back)[1],(*back)[2]};
@@ -209,7 +210,9 @@ void Engine::door_tick(Runtime& runtime){
     auto facing=[&](ObjectId b){const float pan=render_policy::rad(float(field(b,"pan")));return Vec3{std::cos(pan),std::sin(pan),0};};
     switch(door_.phase){
     case DoorPhase::Idle:{
-        if(!world||!player)break;if(door_.groupsWorld!=world)door_level();
+        if(!world||!player)break;
+        // A new level: its door groups, and (once per session) the Giris placement table, parsed here instead of at the first doorway.
+        if(door_.groupsWorld!=world){door_level();door_arrival(runtime,0,0);}
         const int from=int(number("LY_AktifLevelID"));
         // Proactive opening (not in the original; the use key keeps working, door_scan): a body within 96 quants of an armed
         // eligible doorway, in front of it and facing it (60 degrees) opens it when LY_Tarama would let the use key. A door is armed

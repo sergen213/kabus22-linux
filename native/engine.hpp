@@ -56,12 +56,17 @@ public:
  std::optional<Value> service_builtin(Runtime&,ProcessContext&,std::string_view,std::span<const Argument>);
  std::optional<Value> world_builtin(Runtime&,ProcessContext&,std::string_view,std::span<const Argument>);
  Value key_state(int)const;
+ // The Sym of the native call NAME. Fast when NAME is the interner's own view of HINT (ProcessContext::call) or of the call being dispatched.
+ Sym call_symbol(std::string_view name,Sym hint=0);
  void tick(Runtime&,const Input&);
  // Native convenience: skips the startup logos / New Game intro / full-screen movies on a confirm or cancel press; returns the input tick() should see.
  const Input& skip_intro(Runtime&,const Input&);
  // A7: after successful draw; headless callers use their explicit logical CPU-frame boundary.
  void finish_frame(Runtime&);
  const RenderFrame& frame()const{return frame_;}
+ // K22_STATE_DIGEST (docs/GAMEPLAY_TESTING.md): 64-bit digest of the script-visible state: globals (not the wall-clock SYS_*), every
+ // object, the process table and random(). Independent of container order and addresses; names are hashed case-folded.
+ std::uint64_t state_digest(const Runtime&)const;
  void load_level(Runtime&,std::string_view);
  ObjectId create_entity(Runtime&,std::string_view,Vec3,FunctionId,ObjectId parent=0);
  void remove_entity(Runtime&,ObjectId);
@@ -69,18 +74,19 @@ public:
  void set_vector(const Argument&,Vec3);
  std::string_view string(Value)const;
  std::string& mutable_string(const Argument&);
- double number(std::string_view)const;
- Value global(std::string_view)const;
+ double number(std::string_view)const;double number(Sym)const;
+ Value global(std::string_view)const;Value global(Sym)const;
  Argument global_vector(std::string_view)const;
- void set_global(std::string_view,Value);
+ void set_global(std::string_view,Value);void set_global(Sym,Value);
  double field(ObjectId,std::string_view)const;
- void set_field(ObjectId,std::string_view,double);
+ double field(ObjectId,Sym)const;
+ void set_field(ObjectId,std::string_view,double);void set_field(ObjectId,Sym,double);
  Vec3 position(ObjectId)const;
  Vec3 angles(ObjectId)const;
  void set_position(ObjectId,Vec3);
  std::uint32_t flags(ObjectId)const;
  std::uint32_t constant(std::string_view)const;
- FunctionId callback(ObjectId,std::string_view)const;
+ FunctionId callback(ObjectId,std::string_view)const;FunctionId callback(ObjectId,Sym)const;
  Value new_string(std::string);
  void invoke_event(Runtime&,ObjectId,ObjectId,int);
  NativeEntityLightState prepare_entity_light(const DrawInstance&,const Camera&);
@@ -134,6 +140,9 @@ public:
  std::optional<PositionRestore> positionRestore; // set by a quicksave slot read; applied once its level is in play
  // Native seamless doors (docs/SEAMLESS_DOORS.md, native/seamless_doors.cpp); false = the original LevelYukle fade exactly.
  bool seamlessDoors=false;
+ // Set by main.cpp while a scenario runs its fixed step off the wall clock (`realtime off`): a doorway then opens on the same tick in
+ // every run instead of whenever the prefetch worker finishes. Ordinary play and `realtime on` keep the asynchronous prefetch.
+ bool doorsSynchronous=false;
  // main loop: do not present (last frame stays up); an open switch prompt pauses door_tick, so it must stay visible.
  bool hold_presentation()const{return door_.phase==DoorPhase::Holding&&switchPrompt_<0;}
  int door_phase()const; // 0 idle, 1 opening, 2 crossing, 3 holding, 4 revealing
@@ -191,7 +200,9 @@ private:
  bool door_refused(Runtime&,const DoorGroup&)const;
  friend class Physics;
  friend std::optional<Value> worldModelBuiltin(Engine&,Runtime&,ProcessContext&,std::string_view,std::span<const Argument>);
- void initialize_globals();void make_frame(bool mouseOutput=true);void update_input(Runtime&);void update_ui(Runtime&);void update_first_person();
+ void initialize_globals();
+ // particles=false: the pass before the scripts run (UI hit rectangles, portal surfaces) leaves the particle list empty; the pass that ends the tick builds it.
+ void make_frame(bool mouseOutput=true,bool particles=true);void update_input(Runtime&);void update_ui(Runtime&);void update_first_person();
  void console_tick(Runtime&);void console_overlay();void console_print(std::string_view);void notify(std::string);
  std::string gameplay_blocked(const Runtime&)const;ObjectId live_player()const;std::string saved_position()const;void read_saved_position(const std::filesystem::path& slot);
  bool consoleOpen_=false,consoleRelease_=false,god_=false,noclip_=false,fpsOverlay_=false;ObjectId noclipPlayer_=0;
@@ -243,7 +254,10 @@ private:
  std::unordered_set<ObjectId> displayFills_;
  void level_progress(Runtime&,std::int64_t stage);
  float levelPercent_=0,levelQuantum_=0;double levelCallbackTime_=0;
- bool pendingExit_=false;Value exitMessage_;
+ bool pendingExit_=false;Value exitMessage_;Sym callSymbol_=0;
+ // effect() per-frame emitters on frames shorter than 1/fps_max: fractional particles carried per callback; emitFrame_ is true on
+ // the ticks (dt*fps_max of them) on which a whole-frame emitter emits.
+ std::unordered_map<FunctionId,double> emitCarry_;double emitFrameCarry_=0;bool emitFrame_=true;
  // A6 VECTOR/_vec return borrowed aliases into the shared 64-slot ring.
  std::array<Object*,64> vectorTemps_{};std::size_t vectorTempCursor_=0;
  RenderFrame frame_;std::vector<DrawInstance> draws_,shadows_;std::vector<Camera> cameras_;std::vector<UICommand> ui_;std::vector<Particle> particles_;std::vector<RenderLight> lights_;

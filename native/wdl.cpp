@@ -67,14 +67,42 @@ std::vector<Token> lex(std::string_view s,std::string_view file,ParseMetrics& me
  }
  metrics.lines+=s.empty()?0:line-(s.back()=='\n'?1:0);metrics.tokens+=out.size();out.push_back({Token::End,"",{std::string(file),line,col}});return out;
 }
-struct Expr {enum Kind{Literal,Name,Unary,Binary,Call,Member,Index,Conditional,List}kind=Literal;enum Dispatch{Dynamic,Native,Script}dispatch=Dynamic;Location loc;std::string op;Value value;std::vector<std::unique_ptr<Expr>> args;};
+enum class Op:std::uint8_t{None,Add,Sub,Mul,Div,Mod,Eq,Ne,Lt,Gt,Le,Ge,And,Or,BitAnd,BitOr,BitXor,Shl,Shr,Plus,Neg,Not,BitNot,Increment,Reference};
+// kind/op/args are the program. The second line is derived: link() after op is set (identifier, operator), Runtime::Impl::layout for
+// names in function code (local/binding slot), and per-site caches filled at evaluation (call kind, global slot).
+struct Expr {enum Kind{Literal,Name,Unary,Binary,Call,Member,Index,Conditional,List}kind=Literal;enum Dispatch{Dynamic,Native,Script}dispatch=Dynamic;Location loc;std::string op;Value value;std::vector<std::unique_ptr<Expr>> args;
+ enum Resolution:std::uint8_t{Global,Zero,One,Local,Binding};enum Special:std::uint8_t{Unlinked,Ordinary,Wait,Waitt,Sleep,ProcLate,ProcKill};
+ Sym sym=0;Op opc=Op::None;bool assign=false,post=false,decrement=false,vectorMember=false;std::uint8_t component=3;Resolution resolution=Global;std::uint32_t slot=0;
+ mutable Special special=Unlinked;mutable Slot* global=nullptr;mutable ObjectId numericView=0;mutable std::uint32_t fieldHint=~std::uint32_t{0};mutable std::size_t numericEpoch=0;
+};
 using E=std::unique_ptr<Expr>;
-struct Instruction {enum Kind{Eval,Jump,Branch,Declare,Return,Late}kind=Eval;E expr;std::size_t target=0;std::string name;std::size_t size=0;Location loc;};
+void link(Expr& e){
+ const std::string_view s=e.op;
+ if(e.kind==Expr::Name){e.sym=Symbols::intern(s);e.resolution=s=="null"||s=="off"||s=="false"?Expr::Zero:s=="on"||s=="true"?Expr::One:Expr::Global;}
+ else if(e.kind==Expr::Member){e.sym=Symbols::intern(s);e.component=s=="x"||s=="pan"?0:s=="y"||s=="tilt"?1:s=="z"||s=="roll"?2:3;e.vectorMember=e.component<3||s=="blue"||s=="green"||s=="red";}
+ else if(e.kind==Expr::Unary){e.opc=s=="&"||s=="*"?Op::Reference:s=="+"?Op::Plus:s=="-"?Op::Neg:s=="!"?Op::Not:s=="~"?Op::BitNot:Op::Increment;e.decrement=s=="--"||s=="post--";e.post=s.starts_with("post");}
+ else if(e.kind==Expr::Binary){
+  e.assign=s=="="||(s.size()==2&&s[1]=='='&&s!="=="&&s!="!="&&s!="<="&&s!=">=");const auto base=e.assign?s.substr(0,1):s;
+  e.opc=base=="+"?Op::Add:base=="-"?Op::Sub:base=="*"?Op::Mul:base=="/"?Op::Div:base=="%"?Op::Mod:base=="=="?Op::Eq:base=="!="?Op::Ne:base=="<"?Op::Lt:base==">"?Op::Gt:base=="<="?Op::Le:base==">="?Op::Ge:base=="&&"?Op::And:base=="||"?Op::Or:base=="&"?Op::BitAnd:base=="|"?Op::BitOr:base=="^"?Op::BitXor:base=="<<"?Op::Shl:base==">>"?Op::Shr:Op::None;
+ }
+}
+// The native call NAME() that reroute_reads and friends substitute.
+E native_call(const Location& loc,std::string_view name){auto c=std::make_unique<Expr>();c->kind=Expr::Call;c->dispatch=Expr::Native;c->loc=loc;auto n=std::make_unique<Expr>();n->kind=Expr::Name;n->loc=loc;n->op=std::string(name);link(*n);c->args.push_back(std::move(n));return c;}
+struct Instruction {enum Kind{Eval,Jump,Branch,Declare,Return,Late}kind=Eval;E expr;std::size_t target=0;std::string name;std::size_t size=0;Location loc;std::uint32_t slot=0;};
 struct Parameter {std::string name;bool reference=false;};
-struct Function {std::string name;Location loc;std::vector<Parameter> params;std::vector<std::pair<std::string,std::size_t>> localDefinitions;std::vector<Instruction> code;std::map<std::string,std::size_t,CaseLess> labels;std::vector<std::pair<std::size_t,std::string>> gotos;std::uint32_t schedulerFlags=0;bool starter=false,defined=false,external=false;};
+// One step of building a process frame, in the order the storage objects are created (object ids are script-visible).
+struct FrameStep {enum Kind:std::uint8_t{Value,Reference,Argument,Local}kind=Value;std::uint32_t source=0,slot=0;std::size_t size=3;};
+struct Function {std::string name;Location loc;std::vector<Parameter> params;std::vector<std::pair<std::string,std::size_t>> localDefinitions;std::vector<Instruction> code;std::map<std::string,std::size_t,CaseLess> labels;std::vector<std::pair<std::size_t,std::string>> gotos;std::uint32_t schedulerFlags=0;bool starter=false,defined=false,external=false;
+ // Frame layout (Runtime::Impl::layout): localSyms[slot] names Process::locals[slot] (0 my, 1 you, then value parameters, _arg1.._arg4,
+ // declared locals); bindingSyms[i] names Process::bindings[i] (reference parameters); bindingOrder lists them in CaseLess name order.
+ std::vector<Sym> localSyms,bindingSyms;std::vector<std::uint32_t> bindingOrder;std::vector<FrameStep> frame;bool laidOut=false;
+};
 struct Declaration {std::string type,name;Location loc;bool pointer=false;E size,init;std::vector<std::pair<std::string,std::vector<E>>> properties;ObjectId object=0;Slot* pointerCell=nullptr;};
 struct LocalSnapshot {ObjectId object;std::size_t offset,count;};
-struct Process {ProcessContext context;std::array<ObjectId,2> retainedContext{};FunctionId function=0;std::uint32_t schedulerFlags=0;std::size_t pc=0;Fields locals;std::map<std::string,Argument,CaseLess> bindings;std::vector<ObjectId> ownedLocals;std::vector<LocalSnapshot> snapshots;std::vector<Value> savedLocals;std::int32_t countdown=0;int bank=0;bool yielded=false,cancelled=false,noContinuation=false,running=false;Value result;};
+// locals[slot]: the leased storage object of that local and its value cell &array[0] (stable while leased: the array is never
+// emptied); bindings[i]: the reference argument.
+struct Local {Object* object=nullptr;Slot* cell=nullptr;};
+struct Process {ProcessContext context;std::array<ObjectId,2> retainedContext{};FunctionId function=0;std::uint32_t schedulerFlags=0;std::size_t pc=0;std::vector<Local> locals;std::vector<Argument> bindings;std::vector<ObjectId> ownedLocals;std::vector<LocalSnapshot> snapshots;std::vector<Value> savedLocals;std::int32_t countdown=0;int bank=0;bool yielded=false,cancelled=false,noContinuation=false,running=false;Value result;};
 std::string_view function_file_name(const Function& f){std::string_view n=f.loc.file;return n.substr(n.find_last_of("/\\")+1);}
 int precedence(std::string_view s){if(s=="="||s=="+="||s=="-="||s=="*="||s=="/="||s=="%="||s=="|="||s=="&="||s=="^=")return 1;if(s=="?")return 2;if(s=="||")return 3;if(s=="&&")return 4;if(s=="|")return 5;if(s=="^")return 6;if(s=="&")return 7;if(s=="=="||s=="!=")return 8;if(s=="<"||s==">"||s=="<="||s==">=")return 9;if(s=="<<"||s==">>")return 10;if(s=="+"||s=="-")return 11;if(s=="*"||s=="/"||s=="%")return 12;return 0;}
 bool declaration_type(std::string_view s){return s=="var"||s=="var_nsave"||s=="string"||s=="bmap"||s=="sound"||s=="font"||s=="entity"||s=="panel"||s=="text"||s=="view"||s=="material"||s=="window"||s=="vector";}
@@ -96,9 +124,10 @@ struct Runtime::Impl {
  }
  void disable_banks(){use_bank(0);banked.clear();bankIndex.clear();resolver={};}
  std::deque<std::unique_ptr<Process>> queued;std::deque<std::unique_ptr<Process>>* pendingQueue=nullptr;Process* active=nullptr;std::uint64_t nextProcess=1;std::int32_t time=1024;std::size_t callDepth=0;
- struct LocalLease {std::size_t owners=0,references=0;bool available=false,scalarValue=false;};std::unordered_map<ObjectId,LocalLease> localLeases;std::vector<ObjectId> freeLocals;
+ // Local storage objects are pooled: the lease lives in the Object (leased/leaseOwners/...), leasedLocals lists them, freeLocals is the LIFO pool.
+ std::vector<Object*> leasedLocals;std::vector<ObjectId> freeLocals;std::vector<std::unique_ptr<Process>> spareFrames;
  Impl(Runtime& r,State& s,Builtin b):runtime(r),state(s),builtin(std::move(b)){functions.emplace_back();}
- ~Impl(){for(auto& p:queued)if(p)release(*p);clear_layouts();}
+ ~Impl(){for(auto& p:queued)if(p)release(*p);clear_layouts();for(auto* o:leasedLocals)o->leased=false;}
  void clear_layouts(){for(auto& d:declarations)if(d.object)if(auto* object=state.get(d.object)){object->properties.clear();object->alive=false;}}
  const Token& peek(std::size_t n=0)const{return tokens.at(std::min(pos+n,tokens.size()-1));}
  std::string_view expression_spelling()const{const auto& first=peek();if(compactExpressions&&first.kind==Token::Punct&&first.text.size()==1){const auto& second=peek(1);if(second.kind==Token::Punct&&!second.text.empty()){auto pair=paired_operator(first.text[0],second.text[0]);if(!pair.empty())return pair;}}return first.text;}
@@ -108,7 +137,7 @@ struct Runtime::Impl {
  std::string identifier(){if(peek().kind!=Token::Word)fail(peek().loc,"expected identifier");return consume().text;}
  Token expression_token(){auto spelling=expression_spelling();auto t=peek();if(t.text!=spelling)t.text=spelling;advance_spelling();if(compactExpressions&&(t.kind==Token::Word||t.kind==Token::Number))while(peek().kind==Token::Word||peek().kind==Token::Number)t.text+=consume().text;return t;}
  std::string expression_identifier(){if(peek().kind!=Token::Word)fail(peek().loc,"expected identifier");return expression_token().text;}
- bool scalar_storage(ObjectId id)const{auto found=localLeases.find(id);return found!=localLeases.end()&&found->second.scalarValue;}
+ static bool scalar_storage(const Object& o){return o.leased&&o.leaseScalar;}
  FunctionId ensure_function(std::string name){auto it=names.find(name);if(it!=names.end())return it->second;FunctionId id=FunctionId(functions.size());functions.emplace_back();functions.back().name=name;names.emplace(std::move(name),id);return id;}
  void append_expanded(const Token& t,std::vector<Token>& out,int depth=0){if(depth>64)fail(t.loc,"recursive DEFINE expansion");auto m=macros.find(t.text);if(t.kind==Token::Word&&m!=macros.end()){if(m->second.size()==1&&m->second[0].kind==Token::Word&&m->second[0].text==t.text){out.push_back(t);return;}for(auto v:m->second){v.loc=t.loc;append_expanded(v,out,depth+1);}}else out.push_back(t);}
  void preprocess(std::string_view name,std::string_view text){
@@ -129,7 +158,7 @@ struct Runtime::Impl {
   if(!parents.empty())fail(ts.back().loc,"unterminated IFDEF");
   --includeDepth;
  }
- E node(Expr::Kind kind,const Location& loc,std::string op={}){++metrics.expressions;auto e=std::make_unique<Expr>();e->kind=kind;e->loc=loc;e->op=std::move(op);return e;}
+ E node(Expr::Kind kind,const Location& loc,std::string op={}){++metrics.expressions;auto e=std::make_unique<Expr>();e->kind=kind;e->loc=loc;e->op=std::move(op);link(*e);return e;}
  E expression(int min=1){
   Token t=expression_token();E e;
   if(t.kind==Token::Number){e=node(Expr::Literal,t.loc);try{std::size_t consumed=0;if(t.text.starts_with("0x")||t.text.starts_with("0X"))e->value=Value::from_int(std::stoul(t.text,&consumed,16));else e->value=Value::from_double(std::stod(t.text,&consumed));if(consumed!=t.text.size())fail(t.loc,"invalid numeric literal '"+t.text+"'");}catch(const std::exception&){fail(t.loc,"invalid numeric literal '"+t.text+"'");}}
@@ -198,34 +227,123 @@ struct Runtime::Impl {
    initializers.push_back(expression());expect(";");
   }
  }
+ // A variable's cell reads through to element 0 of the vector/array object it names.
+ Argument slot_argument(Slot& slot){if(slot.value.kind==Value::Kind::Object){auto* o=state.get(slot.value.bits);if(o&&o->kind==Object::Kind::Vector&&!o->array.empty())return {o->array[0].value,{&o->array[0],o->id,{},0}};}return {slot.value,{&slot,slot.value.kind==Value::Kind::Object?slot.value.bits:0}};}
+ // Globals are never erased, so a found Slot* stays valid for the Expr's lifetime. numericGlobals only grows: its size is the epoch.
+ Slot* global_slot(const Expr& e){
+  if(!e.global){e.global=state.globals.get(e.sym);if(!e.global)return nullptr;}
+  if(e.numericEpoch!=state.numericGlobals.size()+1){auto view=state.numericGlobals.find(e.op);e.numericView=view==state.numericGlobals.end()?0:view->second;e.numericEpoch=state.numericGlobals.size()+1;}
+  return e.global;
+ }
+ Argument name_argument(const Expr& e,Process* p){
+  switch(e.resolution){
+   case Expr::Zero:return {Value{},{}};
+   case Expr::One:return {Value::from_int(1),{}};
+   case Expr::Local:if(p){const auto& local=p->locals[e.slot];return {local.cell->value,{local.cell,local.object->id,{},0}};}break;
+   case Expr::Binding:if(p){auto& bound=p->bindings[e.slot];return {bound.current(),bound.ref};}break;
+   case Expr::Global:break;
+  }
+  if(auto* slot=global_slot(e)){if(e.numericView)return {slot->value,{slot,e.numericView,"x"}};return slot_argument(*slot);}
+  auto fn=names.find(e.op);if(fn!=names.end())return {Value::function(fn->second),{}};
+  fail(e.loc,"unknown symbol '"+e.op+"'");
+ }
+ static Value raw_value(std::uint32_t v){return Value::from_raw(std::bit_cast<std::int32_t>(v));}
+ Value apply(const Expr& e,const Value& x,const Value& y){
+  switch(e.opc){
+   case Op::Add:return raw_value(x.bits+y.bits);
+   case Op::Sub:return raw_value(x.bits-y.bits);
+   case Op::Mul:{std::int64_t n=std::int64_t(x.raw())*y.raw();if(n<0&&n>=-4294967296LL)n+=1023;return raw_value(std::uint32_t(n>>10));}
+   case Op::Div:{if(!y.raw())fail(e.loc,"fixed-point division by zero");std::int64_t n=std::int64_t(x.raw())*1024/y.raw();if(n<std::numeric_limits<std::int32_t>::min()||n>std::numeric_limits<std::int32_t>::max())fail(e.loc,"fixed-point division overflow");return Value::from_raw(std::int32_t(n));}
+   case Op::Mod:{if(!y.raw())fail(e.loc,"fixed-point remainder by zero");std::int32_t left=x.raw();if(left<0){std::int64_t q=0xF424000000LL/y.raw();if(q<std::numeric_limits<std::int32_t>::min()||q>std::numeric_limits<std::int32_t>::max())fail(e.loc,"legacy negative remainder adjustment overflow");auto count=std::uint32_t((std::int32_t(q)>>10)+1);left=std::bit_cast<std::int32_t>(std::uint32_t(left)+count*y.bits);}if(left==std::numeric_limits<std::int32_t>::min()&&y.raw()==-1)fail(e.loc,"fixed-point remainder overflow");return Value::from_raw(left%y.raw());}
+   case Op::Eq:return Value::from_int(x.bits==y.bits);
+   case Op::Ne:return Value::from_int(x.bits!=y.bits);
+   case Op::Lt:return Value::from_int(x.raw()<y.raw());
+   case Op::Gt:return Value::from_int(x.raw()>y.raw());
+   case Op::Le:return Value::from_int(x.raw()<=y.raw());
+   case Op::Ge:return Value::from_int(x.raw()>=y.raw());
+   case Op::And:return Value::from_int(bool(x)&&bool(y));
+   case Op::Or:return Value::from_int(bool(x)||bool(y));
+   case Op::BitAnd:return raw_value(x.bits&y.bits);
+   case Op::BitOr:return raw_value(x.bits|y.bits);
+   case Op::BitXor:return raw_value(x.bits^y.bits);
+   case Op::Shl:return raw_value(x.bits<<(y.integer()&31));
+   case Op::Shr:return Value::from_raw(x.raw()>>(y.integer()&31));
+   default:break;
+  }
+  fail(e.loc,"unknown operator "+(e.assign?e.op.substr(0,1):e.op));
+ }
+ // VARIABLE.member where the variable (a local's value cell or a plain global) holds a handle to an object that is neither a
+ // vector nor a TEXT: the member is state.member(object) with none of the vector/skill/string cases. Null: take the general path.
+ Object* handle_object(const Expr& base,Process* p){
+  if(base.kind!=Expr::Name)return nullptr;
+  const Value* v;
+  if(base.resolution==Expr::Local){if(!p)return nullptr;const auto& local=p->locals[base.slot];if(!scalar_storage(*local.object))return nullptr;v=&local.cell->value;}
+  else if(base.resolution==Expr::Global){const Slot* slot=global_slot(base);if(!slot||base.numericView)return nullptr;v=&slot->value;}
+  else return nullptr;
+  if(v->kind!=Value::Kind::Object)return nullptr;
+  Object* o=state.get(v->bits);return o&&o->kind!=Object::Kind::Vector&&o->kind!=Object::Kind::Text?o:nullptr;
+ }
+ // value(e,p) is evaluate(e,p).current() without building the reference: operands of pure operators and statement results take it.
+ // Both operands are always evaluated (&& and || do not short-circuit); only % evaluates its right operand first.
+ Value value(const Expr& e,Process* p){
+  switch(e.kind){
+   case Expr::Literal:return e.value;
+   case Expr::Name:
+    if(e.resolution==Expr::Local){if(p)return p->locals[e.slot].cell->value;}
+    else if(e.resolution==Expr::Global){if(auto* slot=global_slot(e)){if(!e.numericView&&slot->value.kind==Value::Kind::Object){auto* o=state.get(slot->value.bits);if(o&&o->kind==Object::Kind::Vector&&!o->array.empty())return o->array[0].value;}return slot->value;}}
+    break;
+   case Expr::Unary:
+    switch(e.opc){
+     case Op::Plus:return value(*e.args[0],p);
+     case Op::Neg:return raw_value(0u-value(*e.args[0],p).bits);
+     case Op::Not:return Value::from_int(!bool(value(*e.args[0],p)));
+     case Op::BitNot:return raw_value(~value(*e.args[0],p).bits);
+     default:break;
+    }
+    break;
+   case Expr::Binary:
+    if(!e.assign){
+     if(e.opc==Op::Mod){const Value y=value(*e.args[1],p);const Value x=value(*e.args[0],p);return apply(e,x,y);}
+     const Value x=value(*e.args[0],p);const Value y=value(*e.args[1],p);return apply(e,x,y);
+    }
+    break;
+   case Expr::Conditional:return value(*e.args[0],p)?value(*e.args[1],p):value(*e.args[2],p);
+   case Expr::Member:if(Object* o=handle_object(*e.args[0],p)){const auto ref=state.member(*o,e.sym,&e.fieldHint);return ref.slot?ref.get():Value::object(o->id);}break;
+   default:break;
+  }
+  return evaluate(e,p).current();
+ }
+ // Call arguments: up to 8 live on the C stack, constructed only as far as used.
+ struct ArgumentBuffer {
+  alignas(Argument) unsigned char raw[8*sizeof(Argument)];std::vector<Argument> large;Argument* data;std::size_t count;
+  explicit ArgumentBuffer(std::size_t n):count(n){if(n>8){large.resize(n);data=large.data();}else{data=reinterpret_cast<Argument*>(raw);for(std::size_t i=0;i<n;++i)new(data+i)Argument();}}
+  ~ArgumentBuffer(){if(large.empty())for(std::size_t i=0;i<count;++i)data[i].~Argument();}
+  ArgumentBuffer(const ArgumentBuffer&)=delete;ArgumentBuffer& operator=(const ArgumentBuffer&)=delete;
+ };
+ static void link_call(const Expr& e){
+  const Expr& target=*e.args[0];const std::string_view name=target.kind==Expr::Name?std::string_view(target.op):std::string_view{};
+  e.special=name=="wait"?Expr::Wait:name=="waitt"?Expr::Waitt:name=="sleep"?Expr::Sleep:name=="proc_late"?Expr::ProcLate:name=="proc_kill"?Expr::ProcKill:Expr::Ordinary;
+ }
  Argument evaluate(const Expr& e,Process* p=nullptr){
   auto result=[](Value v,Ref ref={}){return Argument{v,ref};};
   auto arg=[&](std::size_t i){return evaluate(*e.args.at(i),p);};
-  const std::string_view opv=e.op; // size-first compares; std::string==const char* is strlen+memcmp
   try{switch(e.kind){
    case Expr::Literal:return result(e.value);
-   case Expr::Name:{
-    if(opv=="null"||opv=="off"||opv=="false")return result(Value{});
-    if(opv=="on"||opv=="true")return result(Value::from_int(1));
-    auto slotArgument=[&](Slot& slot)->Argument{if(slot.value.kind==Value::Kind::Object){auto* o=state.get(slot.value.bits);if(o&&o->kind==Object::Kind::Vector&&!o->array.empty())return {o->array[0].value,{&o->array[0],o->id,{},0}};}return {slot.value,{&slot,slot.value.kind==Value::Kind::Object?slot.value.bits:0}};};
-    if(p){if(opv=="me"||opv=="your")return slotArgument(p->locals.at(opv=="me"?"my":"you"));auto bound=p->bindings.find(e.op);if(bound!=p->bindings.end())return {bound->second.current(),bound->second.ref};auto it=p->locals.find(e.op);if(it!=p->locals.end())return slotArgument(it->second);}
-    auto it=state.globals.find(e.op);if(it!=state.globals.end()){auto view=state.numericGlobals.find(e.op);if(view!=state.numericGlobals.end())return result(it->second.value,{&it->second,view->second,"x"});return slotArgument(it->second);}
-    auto fn=names.find(e.op);if(fn!=names.end())return result(Value::function(fn->second));
-    fail(e.loc,"unknown symbol '"+e.op+"'");
-   }
+   case Expr::Name:return name_argument(e,p);
    case Expr::Member:{
-    auto a=arg(0);auto v=a.current();ObjectId id=v.kind==Value::Kind::Object?v.bits:a.ref.owner;auto* owner=state.get(a.ref.owner);if(owner&&owner->kind==Object::Kind::Vector&&scalar_storage(owner->id)&&v.kind!=Value::Kind::Object&&opv!="x"&&opv!="y"&&opv!="z"&&opv!="pan"&&opv!="tilt"&&opv!="roll"&&opv!="blue"&&opv!="green"&&opv!="red")fail(e.loc,"member '"+e.op+"' on non-object parameter");if(owner&&owner->kind==Object::Kind::Vector&&e.args[0]->kind==Expr::Name&&(!scalar_storage(owner->id)||v.kind!=Value::Kind::Object))id=owner->id;if(!id)fail(e.loc,"member '"+e.op+"' on null/non-object");auto& o=state.require(id);
-    bool component=opv=="x"||opv=="y"||opv=="z"||opv=="pan"||opv=="tilt"||opv=="roll";std::size_t componentIndex=opv=="x"||opv=="pan"?0:opv=="y"||opv=="tilt"?1:2;
+    if(Object* o=handle_object(*e.args.at(0),p)){const auto ref=state.member(*o,e.sym,&e.fieldHint);return result(ref.slot?ref.get():Value::object(o->id),ref);}
+    auto a=arg(0);auto v=a.current();ObjectId id=v.kind==Value::Kind::Object?v.bits:a.ref.owner;auto* owner=state.get(a.ref.owner);const bool vectorOwner=owner&&owner->kind==Object::Kind::Vector;if(vectorOwner&&scalar_storage(*owner)&&v.kind!=Value::Kind::Object&&!e.vectorMember)fail(e.loc,"member '"+e.op+"' on non-object parameter");if(vectorOwner&&e.args[0]->kind==Expr::Name&&(!scalar_storage(*owner)||v.kind!=Value::Kind::Object))id=owner->id;if(!id)fail(e.loc,"member '"+e.op+"' on null/non-object");auto& o=state.require(id);
+    const bool component=e.component<3;const std::size_t componentIndex=component?e.component:2;
     if(component&&a.ref.owner==id&&a.ref.field.starts_with("skill")){int start=0;auto suffix=a.ref.field.substr(5);auto parsed=std::from_chars(suffix.data(),suffix.data()+suffix.size(),start);if(parsed.ec!=std::errc{})fail(e.loc,"invalid skill vector base");auto ref=state.member(id,"skill"+std::to_string(start+componentIndex));return result(ref.get(),ref);}
-    if(o.kind==Object::Kind::Text&&opv=="string"){auto index=o.field("index").value.integer();if(index<1||std::size_t(index)>o.array.size())return result(Value{}, {nullptr,o.id,"string"});auto n=std::size_t(index-1);return result(o.array[n].value,{&o.array[n],o.id,"string",n});}
+    if(o.kind==Object::Kind::Text&&e.sym=="string"_sym){auto index=o.field("index"_sym).value.integer();if(index<1||std::size_t(index)>o.array.size())return result(Value{}, {nullptr,o.id,"string"});auto n=std::size_t(index-1);return result(o.array[n].value,{&o.array[n],o.id,"string",n});}
     if(o.kind==Object::Kind::Vector&&!o.scalar&&component){
      std::size_t n=(a.ref.owner==id?a.ref.index:0)+componentIndex;if(n>=o.array.size())fail(e.loc,"vector component out of bounds");return result(o.array[n].value,{&o.array[n],o.id,e.op,n});
     }
-    auto ref=state.member(o.id,e.op);return result(ref.slot?ref.get():Value::object(o.id),ref);
+    auto ref=state.member(o.id,e.sym);return result(ref.slot?ref.get():Value::object(o.id),ref);
    }
    case Expr::Index:{
-    auto base=arg(0);auto a=base.current();auto n=arg(1).current().integer();ObjectId id=a.kind==Value::Kind::Object?a.bits:base.ref.owner;
-    auto* owner=state.get(base.ref.owner);if(owner&&(owner->kind==Object::Kind::Text||(owner->kind==Object::Kind::Vector&&(!scalar_storage(owner->id)||a.kind!=Value::Kind::Object))))id=owner->id;
+    auto base=arg(0);auto a=base.current();auto n=value(*e.args.at(1),p).integer();ObjectId id=a.kind==Value::Kind::Object?a.bits:base.ref.owner;
+    auto* owner=state.get(base.ref.owner);if(owner&&(owner->kind==Object::Kind::Text||(owner->kind==Object::Kind::Vector&&(!scalar_storage(*owner)||a.kind!=Value::Kind::Object))))id=owner->id;
     if(!id||n<0)fail(e.loc,"invalid array reference/index");auto& o=state.require(id);
     if((o.scalar||(o.kind!=Object::Kind::Vector&&o.kind!=Object::Kind::Text))&&base.ref.owner==id&&!base.ref.field.empty()){
      auto field=base.ref.field;std::string next;
@@ -236,49 +354,38 @@ struct Runtime::Impl {
     std::size_t offset=base.ref.owner==id&&o.kind!=Object::Kind::Text?base.ref.index:0;if(offset+std::size_t(n)>=o.array.size())fail(e.loc,"array index "+std::to_string(n)+" out of bounds "+std::to_string(o.array.size()));auto& slot=o.array[offset+std::size_t(n)];return result(slot.value,{&slot,o.id,{},offset+std::size_t(n)});
    }
    case Expr::List:fail(e.loc,"tuple used outside vector/array initializer");
-   case Expr::Conditional:{auto c=arg(0).current();return c?arg(1):arg(2);}
+   case Expr::Conditional:{auto c=value(*e.args.at(0),p);return c?arg(1):arg(2);}
    case Expr::Unary:{
+    if(e.opc==Op::Reference){auto a=arg(0);if(!a.ref)fail(e.loc,"reference operator on non-reference");return a;}
+    if(e.opc!=Op::Increment)return result(value(e,p));
     auto a=arg(0);auto v=a.current();
-    if(opv=="&"||opv=="*"){if(!a.ref)fail(e.loc,"reference operator on non-reference");return a;}
-    if(opv=="+" )return result(v);
-    if(opv=="-")return result(Value::from_raw(std::bit_cast<std::int32_t>(0u-v.bits)));
-    if(opv=="!")return result(Value::from_int(!bool(v)));
-    if(opv=="~")return result(Value::from_raw(std::bit_cast<std::int32_t>(~v.bits)));
-    if(!a.ref.slot)fail(e.loc,"increment requires writable reference");bool dec=opv=="--"||opv=="post--";auto next=Value::from_raw(std::bit_cast<std::int32_t>(v.bits+(dec?0u-1024u:1024u)));a.ref.set(next);return opv.starts_with("post")?result(v):result(next,a.ref);
+    if(!a.ref.slot)fail(e.loc,"increment requires writable reference");auto next=raw_value(v.bits+(e.decrement?0u-1024u:1024u));a.ref.set(next);return e.post?result(v):result(next,a.ref);
    }
    case Expr::Binary:{
-    Argument a,b;Value x,y;if(opv=="%"){b=arg(1);y=b.current();a=arg(0);x=a.current();}else{a=arg(0);x=a.current();b=arg(1);y=b.current();}std::string_view op=e.op;bool assign=op=="="||(op.size()==2&&op[1]=='='&&op!="=="&&op!="!="&&op!="<="&&op!=">=");
-    if(op=="="){if(!a.ref.slot)fail(e.loc,"assignment requires writable reference");a.ref.set(y);return result(y,a.ref);}
-    if(assign)op=op.substr(0,1);
-    auto raw=[](std::uint32_t v){return Value::from_raw(std::bit_cast<std::int32_t>(v));};Value v;
-    if(op=="+")v=raw(x.bits+y.bits);else if(op=="-")v=raw(x.bits-y.bits);
-    else if(op=="*"){std::int64_t n=std::int64_t(x.raw())*y.raw();if(n<0&&n>=-4294967296LL)n+=1023;v=raw(std::uint32_t(n>>10));}
-    else if(op=="/"){if(!y.raw())fail(e.loc,"fixed-point division by zero");std::int64_t n=std::int64_t(x.raw())*1024/y.raw();if(n<std::numeric_limits<std::int32_t>::min()||n>std::numeric_limits<std::int32_t>::max())fail(e.loc,"fixed-point division overflow");v=Value::from_raw(std::int32_t(n));}
-    else if(op=="%"){if(!y.raw())fail(e.loc,"fixed-point remainder by zero");std::int32_t left=x.raw();if(left<0){std::int64_t q=0xF424000000LL/y.raw();if(q<std::numeric_limits<std::int32_t>::min()||q>std::numeric_limits<std::int32_t>::max())fail(e.loc,"legacy negative remainder adjustment overflow");auto count=std::uint32_t((std::int32_t(q)>>10)+1);left=std::bit_cast<std::int32_t>(std::uint32_t(left)+count*y.bits);}if(left==std::numeric_limits<std::int32_t>::min()&&y.raw()==-1)fail(e.loc,"fixed-point remainder overflow");v=Value::from_raw(left%y.raw());}
-    else if(op=="==")v=Value::from_int(x.bits==y.bits);else if(op=="!=")v=Value::from_int(x.bits!=y.bits);
-    else if(op=="<")v=Value::from_int(x.raw()<y.raw());else if(op==">")v=Value::from_int(x.raw()>y.raw());else if(op=="<=")v=Value::from_int(x.raw()<=y.raw());else if(op==">=")v=Value::from_int(x.raw()>=y.raw());
-    else if(op=="&&")v=Value::from_int(bool(x)&&bool(y));else if(op=="||")v=Value::from_int(bool(x)||bool(y));
-    else if(op=="&")v=raw(x.bits&y.bits);else if(op=="|")v=raw(x.bits|y.bits);else if(op=="^")v=raw(x.bits^y.bits);
-    else if(op=="<<")v=raw(x.bits<<(y.integer()&31));else if(op==">>")v=Value::from_raw(x.raw()>>(y.integer()&31));else fail(e.loc,"unknown operator "+std::string(op));
-    if(assign){if(!a.ref.slot)fail(e.loc,"compound assignment requires writable reference");a.ref.set(v);return result(v,a.ref);}return result(v);
+    if(!e.assign)return result(value(e,p));
+    auto a=arg(0);
+    if(e.opc==Op::None){const Value y=value(*e.args[1],p);if(!a.ref.slot)fail(e.loc,"assignment requires writable reference");a.ref.set(y);return result(y,a.ref);}
+    const Value x=a.current();const Value y=value(*e.args[1],p);const Value v=apply(e,x,y);
+    if(!a.ref.slot)fail(e.loc,"compound assignment requires writable reference");
+    a.ref.set(v);return result(v,a.ref);
    }
    case Expr::Call:{
     if(e.args.size()>65)fail(e.loc,"call exceeds 64 arguments");
-    // Most calls pass few arguments: avoid constructing/destroying 64 Arguments (~6 KB) per call expression.
-    std::array<Argument,8> small;std::vector<Argument> large;Argument* args=small.data();if(e.args.size()-1>small.size()){large.resize(e.args.size()-1);args=large.data();}
+    const Expr& target=*e.args.at(0);if(e.special==Expr::Unlinked)link_call(e);
+    ArgumentBuffer buffer(e.args.size()-1);Argument* args=buffer.data;
     for(std::size_t i=e.args.size();i-->1;){auto& value=args[i-1];value=arg(i);value.value=value.current();value.captured=true;}
-    std::span<const Argument> values(args,e.args.size()-1);const Expr& target=*e.args[0];std::string_view name=target.kind==Expr::Name?target.op:std::string_view{};
-    if(p){p->context.my=context_slot(*p,"my").value.bits;p->context.you=context_slot(*p,"you").value.bits;}
-    if(name=="wait"||name=="waitt"||name=="sleep"){
+    std::span<const Argument> values(args,e.args.size()-1);std::string_view name=target.kind==Expr::Name?target.op:std::string_view{};
+    if(p){p->context.my=context_slot(*p,0).value.bits;p->context.you=context_slot(*p,1).value.bits;}
+    if(e.special==Expr::Wait||e.special==Expr::Waitt||e.special==Expr::Sleep){
      if(!p)fail(e.loc,"wait in declaration initializer");if(values.size()!=1)fail(e.loc,"wait requires one argument");auto n=values[0].current().raw();
-     auto it=state.globals.find("time");auto t=it==state.globals.end()?time:it->second.value.raw();
+     auto* timeSlot=state.globals.get("time"_sym);auto t=timeSlot?timeSlot->value.raw():time;
      Value returned;
-     if(name=="wait"){auto clamped=std::clamp(n,1024,1048575);p->countdown=clamped-1024;returned=Value::from_raw(clamped);}
-     else {if(name=="sleep"){n=std::bit_cast<std::int32_t>(std::uint32_t(n)<<4);if(n<1024&&n/2<t)return result(Value{});}auto chosen=n<t?t:std::min(n,1048575);p->countdown=std::bit_cast<std::int32_t>(std::uint32_t(t)-std::uint32_t(chosen));returned=Value::from_raw(chosen);}
+     if(e.special==Expr::Wait){auto clamped=std::clamp(n,1024,1048575);p->countdown=clamped-1024;returned=Value::from_raw(clamped);}
+     else {if(e.special==Expr::Sleep){n=std::bit_cast<std::int32_t>(std::uint32_t(n)<<4);if(n<1024&&n/2<t)return result(Value{});}auto chosen=n<t?t:std::min(n,1048575);p->countdown=std::bit_cast<std::int32_t>(std::uint32_t(t)-std::uint32_t(chosen));returned=Value::from_raw(chosen);}
      capture(*p);p->yielded=true;return result(returned);
     }
-    if(name=="proc_late"){if(!p)fail(e.loc,"proc_late outside process");functions[p->function].schedulerFlags|=2;return result(Value{});}
-    if(name=="proc_kill"){
+    if(e.special==Expr::ProcLate){if(!p)fail(e.loc,"proc_late outside process");functions[p->function].schedulerFlags|=2;return result(Value{});}
+    if(e.special==Expr::ProcKill){
      if(!p||values.size()!=1)fail(e.loc,"proc_kill requires current process and mode");auto mode=values[0].current().raw()>>10;
      auto cancel=[&](auto& queue){for(auto& q:queue)if(q&&!q->running&&(((mode&1)&&p->context.my&&q->context.my==p->context.my)||((mode&2)&&p->context.you&&q->context.my==p->context.you)||((mode&4)&&q->function==p->function)))q->cancelled=true;};cancel(queued);if(pendingQueue)cancel(*pendingQueue);
      if(mode&8)suppressContinuations=true;return result(Value{});
@@ -286,7 +393,8 @@ struct Runtime::Impl {
     Value targetValue;bool resolved=e.dispatch==Expr::Script;
     if(e.dispatch==Expr::Script)targetValue=e.value;
     else if(e.dispatch==Expr::Dynamic){
-     resolved=name.empty()||state.globals.contains(name)||(p&&(p->locals.contains(name)||p->bindings.contains(name)))||names.contains(name);
+     auto local=[&]{const auto& f=functions[p->function];return std::find(f.localSyms.begin(),f.localSyms.end(),target.sym)!=f.localSyms.end()||std::find(f.bindingSyms.begin(),f.bindingSyms.end(),target.sym)!=f.bindingSyms.end();};
+     resolved=name.empty()||state.globals.contains(target.sym)||(p&&local())||names.contains(name);
      if(resolved)targetValue=arg(0).current();
     }
     // A6 indirect adapter 00412220 returns raw zero for NULL, after argument evaluation.
@@ -295,7 +403,8 @@ struct Runtime::Impl {
     if(targetValue.kind==Value::Kind::Function&&targetValue.bits){if(targetValue.bits>=functions.size())fail(e.loc,"invalid function pointer");auto& called=functions[targetValue.bits];if(called.defined){auto v=start(targetValue.bits,values,p?p->context.my:0,p?p->context.you:0);return result(v);}if(!called.external)fail(e.loc,"call target '"+called.name+"' has no definition");name=called.name;}
     if(name.empty())fail(e.loc,"call target is not a defined function");
     ProcessContext temporary;auto& context=p?p->context:temporary;
-    auto value=builtin(runtime,context,name,values);if(p){context_slot(*p,"my").value=Value::object(context.my);context_slot(*p,"you").value=Value::object(context.you);}return result(value);
+    context.call=target.kind==Expr::Name&&name.data()==target.op.data()?target.sym:Symbols::intern(name);
+    auto value=builtin(runtime,context,Symbols::name(context.call),values);if(p){context_slot(*p,0).value=Value::object(context.my);context_slot(*p,1).value=Value::object(context.you);}return result(value);
    }
   }fail(e.loc,"invalid expression");}catch(const WdlError&){throw;}catch(const std::exception& ex){fail(e.loc,ex.what());}
  }
@@ -364,33 +473,60 @@ struct Runtime::Impl {
   }
   for(auto& e:initializers)evaluate(*e);
  }
- void validate_expression(Expr& e,const std::set<std::string,CaseLess>& locals,bool callTarget=false){
+ void validate_expression(Expr& e,const std::set<std::string,CaseLess>& locals,bool callTarget=false,const Function* f=nullptr){
   if(e.kind==Expr::Name&&!callTarget&&!locals.contains(e.op)&&!state.globals.contains(e.op)&&!names.contains(e.op)&&e.op!="null"&&e.op!="off"&&e.op!="on"&&e.op!="true"&&e.op!="false")fail(e.loc,"unresolved symbol '"+e.op+"'");
   if(e.kind==Expr::Name&&!callTarget&&!locals.contains(e.op)&&!state.globals.contains(e.op)){auto f=names.find(e.op);if(f!=names.end()&&functions[f->second].defined){e.kind=Expr::Literal;e.value=Value::function(f->second);}}
   if(e.kind==Expr::Call&&e.dispatch==Expr::Dynamic&&e.args[0]->kind==Expr::Name){auto& name=e.args[0]->op;if(!locals.contains(name)&&!state.globals.contains(name)){auto f=names.find(name);if(f!=names.end()&&functions[f->second].defined){e.dispatch=Expr::Script;e.value=Value::function(f->second);}else e.dispatch=Expr::Native;}}
-  for(std::size_t i=0;i<e.args.size();++i)validate_expression(*e.args[i],locals,e.kind==Expr::Call&&i==0);
+  // Evaluation order with a process: ME/YOUR, reference parameters, locals; everything else is a global or function name.
+  if(e.kind==Expr::Name&&f&&e.resolution==Expr::Global){
+   if(e.op=="me"||e.op=="your"){e.resolution=Expr::Local;e.slot=e.op=="me"?0:1;}
+   else if(auto b=std::find(f->bindingSyms.begin(),f->bindingSyms.end(),e.sym);b!=f->bindingSyms.end()){e.resolution=Expr::Binding;e.slot=std::uint32_t(b-f->bindingSyms.begin());}
+   else if(auto l=std::find(f->localSyms.begin(),f->localSyms.end(),e.sym);l!=f->localSyms.end()){e.resolution=Expr::Local;e.slot=std::uint32_t(l-f->localSyms.begin());}
+  }
+  for(std::size_t i=0;i<e.args.size();++i)validate_expression(*e.args[i],locals,e.kind==Expr::Call&&i==0,f);
  }
- void validate_functions(){for(FunctionId id=1;id<functions.size();++id){auto& f=functions[id];if(!f.defined&&!f.external)fail(f.loc,"function prototype '"+f.name+"' has no definition");if(!f.defined)continue;std::set<std::string,CaseLess> locals={"my","you","me","your","_arg1","_arg2","_arg3","_arg4"};for(auto& p:f.params)locals.insert(p.name);for(auto& local:f.localDefinitions)locals.insert(local.first);for(auto& i:f.code)if(i.expr)validate_expression(*i.expr,locals);}}
- void recycle(ObjectId id){auto it=localLeases.find(id);if(it!=localLeases.end()&&!it->second.owners&&!it->second.references&&!it->second.available){it->second.available=true;auto& object=state.require(id);for(auto& slot:object.array)slot.value={};object.alive=false;freeLocals.push_back(id);}}
- void hold_reference(const Argument& arg){auto it=localLeases.find(arg.ref.owner);if(it!=localLeases.end())++it->second.references;else state.retain_reference(arg.ref);}
- void release(Process& p){for(auto& [name,arg]:p.bindings){auto it=localLeases.find(arg.ref.owner);if(it!=localLeases.end()){--it->second.references;recycle(it->first);}else state.release_reference(arg.ref);}for(auto id:p.ownedLocals){--localLeases.at(id).owners;recycle(id);}for(auto id:p.retainedContext)state.release_object(id);p.retainedContext={};p.ownedLocals.clear();p.bindings.clear();}
- Object& local_storage(Process& p,std::string_view name,std::size_t size,bool scalarValue=false){
-  ObjectId id;if(freeLocals.empty()){auto& object=state.create(Object::Kind::Vector,std::string(name));id=object.id;localLeases.emplace(id,LocalLease{});}else{id=freeLocals.back();freeLocals.pop_back();}
-  auto& lease=localLeases.at(id);lease.available=false;lease.scalarValue=scalarValue;++lease.owners;auto& object=state.require(id);object.alive=true;object.array.resize(size);for(auto& slot:object.array)slot.value={};p.ownedLocals.push_back(id);return object;
+ void layout(Function& f){
+  f.localSyms={"my"_sym,"you"_sym};f.bindingSyms.clear();f.bindingOrder.clear();f.frame.clear();
+  auto slot=[&](Sym s){auto found=std::find(f.localSyms.begin(),f.localSyms.end(),s);if(found==f.localSyms.end()){f.localSyms.push_back(s);return std::uint32_t(f.localSyms.size()-1);}return std::uint32_t(found-f.localSyms.begin());};
+  for(std::uint32_t i=0;i<f.params.size();++i){const Sym s=Symbols::intern(f.params[i].name);
+   if(!f.params[i].reference){f.frame.push_back({FrameStep::Value,i,slot(s),3});continue;}
+   auto found=std::find(f.bindingSyms.begin(),f.bindingSyms.end(),s);if(found==f.bindingSyms.end()){f.bindingSyms.push_back(s);found=f.bindingSyms.end()-1;}
+   f.frame.push_back({FrameStep::Reference,i,std::uint32_t(found-f.bindingSyms.begin()),0});
+  }
+  static const std::array<Sym,4> argSyms{"_arg1"_sym,"_arg2"_sym,"_arg3"_sym,"_arg4"_sym};for(std::uint32_t i=0;i<4;++i)f.frame.push_back({FrameStep::Argument,i,slot(argSyms[i]),3});
+  for(auto& [name,size]:f.localDefinitions){const Sym s=Symbols::intern(name);if(std::find(f.localSyms.begin(),f.localSyms.end(),s)==f.localSyms.end())f.frame.push_back({FrameStep::Local,0,slot(s),size});}
+  for(auto& i:f.code)if(i.kind==Instruction::Declare)i.slot=slot(Symbols::intern(i.name));
+  f.bindingOrder.resize(f.bindingSyms.size());for(std::uint32_t i=0;i<f.bindingOrder.size();++i)f.bindingOrder[i]=i;
+  std::sort(f.bindingOrder.begin(),f.bindingOrder.end(),[&](auto a,auto b){return CaseLess{}(Symbols::name(f.bindingSyms[a]),Symbols::name(f.bindingSyms[b]));});
+  f.laidOut=true;
  }
- Slot& context_slot(Process& p,const char* name){return state.require(p.locals.at(name).value.bits).array[0];}
- void clear_context(Process& p,const char* name){(std::string_view(name)=="my"?p.context.my:p.context.you)=0;auto id=p.locals.at(name).value.bits;context_slot(p,name).value=Value::object(0);for(auto& snapshot:p.snapshots)if(snapshot.object==id)p.savedLocals[snapshot.offset]=Value::object(0);}
- void clear_you(Process& p){clear_context(p,"you");}
+ void validate_functions(){for(FunctionId id=1;id<functions.size();++id){auto& f=functions[id];if(!f.defined&&!f.external)fail(f.loc,"function prototype '"+f.name+"' has no definition");if(!f.defined)continue;std::set<std::string,CaseLess> locals={"my","you","me","your","_arg1","_arg2","_arg3","_arg4"};for(auto& p:f.params)locals.insert(p.name);for(auto& local:f.localDefinitions)locals.insert(local.first);layout(f);for(auto& i:f.code)if(i.expr)validate_expression(*i.expr,locals,false,&f);}}
+ void recycle(Object& object){if(object.leased&&!object.leaseOwners&&!object.leaseReferences&&!object.leaseAvailable){object.leaseAvailable=true;for(auto& slot:object.array)slot.value={};object.alive=false;freeLocals.push_back(object.id);}}
+ void hold_reference(const Argument& arg){auto* o=state.get(arg.ref.owner);if(o&&o->leased)++o->leaseReferences;else state.retain_reference(arg.ref);}
+ // Bindings are released in CaseLess name order and locals in creation order: recycling order decides which storage object a later local gets.
+ void release(Process& p){const auto& order=functions[p.function].bindingOrder;for(auto i:order){if(i>=p.bindings.size())continue;const auto& arg=p.bindings[i];auto* o=state.get(arg.ref.owner);if(o&&o->leased){--o->leaseReferences;recycle(*o);}else state.release_reference(arg.ref);}for(auto id:p.ownedLocals){auto& o=state.require(id);--o.leaseOwners;recycle(o);}for(auto id:p.retainedContext)state.release_object(id);p.retainedContext={};p.ownedLocals.clear();p.bindings.clear();}
+ Object& local_storage(Process& p,Sym name,std::size_t size,bool scalarValue=false){
+  Object* object;if(freeLocals.empty()){object=&state.create(Object::Kind::Vector,std::string(Symbols::name(name)));object->leased=true;object->leaseOwners=object->leaseReferences=0;leasedLocals.push_back(object);}else{object=&state.require(freeLocals.back());freeLocals.pop_back();}
+  object->leaseAvailable=false;object->leaseScalar=scalarValue;++object->leaseOwners;object->alive=true;if(object->array.size()!=size)object->array.resize(size);for(auto& slot:object->array)slot.value={};p.ownedLocals.push_back(object->id);return *object;
+ }
+ Slot& context_slot(Process& p,std::size_t which){return *p.locals[which].cell;} // 0 my, 1 you
+ void clear_context(Process& p,std::size_t which){(which==0?p.context.my:p.context.you)=0;auto id=p.locals[which].object->id;context_slot(p,which).value=Value::object(0);for(auto& snapshot:p.snapshots)if(snapshot.object==id)p.savedLocals[snapshot.offset]=Value::object(0);}
+ void clear_you(Process& p){clear_context(p,1);}
  // Returns false when the bank resolver skips the call (nothing allocated).
  bool prepare(Process& p,FunctionId id,std::span<const Argument> args,ObjectId my,ObjectId you){
   if(!id||id>=functions.size()||!functions[id].defined)throw std::runtime_error("undefined WDL function "+std::to_string(id));
   if(resolver){p.bank=resolver(id,my,liveBank);if(p.bank==Runtime::BankSkip)return false;}
   p.context={nextProcess++,my,you};p.retainedContext={my,you};for(auto context:p.retainedContext)state.retain_object(context);p.function=id;
   p.schedulerFlags=functions[id].schedulerFlags;
-  auto& f=functions[id];p.ownedLocals.reserve(f.params.size()+6+f.localDefinitions.size());auto value_slot=[&](std::string_view name,Value value){auto& object=local_storage(p,name,3,true);object.array[0].value=value;p.locals[std::string(name)].value=Value::object(object.id);};
-  try{value_slot("my",Value::object(my));value_slot("you",Value::object(you));for(std::size_t i=0;i<f.params.size();++i){auto& parameter=f.params[i];auto a=i<args.size()?args[i]:Argument{};if(parameter.reference){if(!a.ref)fail(f.loc,"reference parameter "+parameter.name+" requires lvalue");a.captured=false;p.bindings[parameter.name]=a;hold_reference(a);}else value_slot(parameter.name,a.current());}
-   static constexpr std::array<std::string_view,4> argNames{"_arg1","_arg2","_arg3","_arg4"};for(std::size_t i=0;i<4;++i)value_slot(argNames[i],i<args.size()?args[i].current():Value{});
-   for(auto& [name,size]:f.localDefinitions)if(!p.locals.contains(name)){auto& object=local_storage(p,name,size);p.locals[name].value=Value::object(object.id);}
+  auto& f=functions[id];if(!f.laidOut)layout(f);p.ownedLocals.reserve(f.params.size()+6+f.localDefinitions.size());p.locals.assign(f.localSyms.size(),Local{});p.bindings.assign(f.bindingSyms.size(),Argument{});
+  auto value_slot=[&](std::uint32_t slot,Value value){auto& object=local_storage(p,f.localSyms[slot],3,true);auto& cell=object.array[0];cell.value=std::move(value);p.locals[slot]={&object,&cell};};
+  try{value_slot(0,Value::object(my));value_slot(1,Value::object(you));
+   for(const auto& step:f.frame)switch(step.kind){
+    case FrameStep::Value:value_slot(step.slot,step.source<args.size()?args[step.source].current():Value{});break;
+    case FrameStep::Reference:{auto a=step.source<args.size()?args[step.source]:Argument{};if(!a.ref)fail(f.loc,"reference parameter "+f.params[step.source].name+" requires lvalue");a.captured=false;p.bindings[step.slot]=a;hold_reference(a);break;}
+    case FrameStep::Argument:value_slot(step.slot,step.source<args.size()?args[step.source].current():Value{});break;
+    case FrameStep::Local:{auto& object=local_storage(p,f.localSyms[step.slot],step.size);p.locals[step.slot]={&object,&object.array[0]};break;}
+   }
   }catch(...){release(p);throw;}
   return true;
  }
@@ -401,34 +537,40 @@ struct Runtime::Impl {
   snapshot->schedulerFlags=functions[p.function].schedulerFlags;
   snapshot->retainedContext={snapshot->context.my,snapshot->context.you};for(auto context:snapshot->retainedContext)state.retain_object(context);
   std::size_t count=0;for(auto id:snapshot->ownedLocals)count+=state.require(id).array.size();snapshot->snapshots.reserve(snapshot->ownedLocals.size());snapshot->savedLocals.reserve(count);
-  for(auto id:snapshot->ownedLocals){auto& object=state.require(id);snapshot->snapshots.push_back({id,snapshot->savedLocals.size(),object.array.size()});for(auto& slot:object.array)snapshot->savedLocals.push_back(slot.value);++localLeases.at(id).owners;}
-  for(auto& [name,arg]:snapshot->bindings)hold_reference(arg);try{queued.push_back(std::move(snapshot));}catch(...){if(snapshot)release(*snapshot);throw;}
+  for(auto id:snapshot->ownedLocals){auto& object=state.require(id);snapshot->snapshots.push_back({id,snapshot->savedLocals.size(),object.array.size()});for(auto& slot:object.array)snapshot->savedLocals.push_back(slot.value);++object.leaseOwners;}
+  for(auto& arg:snapshot->bindings)hold_reference(arg);try{queued.push_back(std::move(snapshot));}catch(...){if(snapshot)release(*snapshot);throw;}
  }
+ // start() frames are reused (one per call depth): a script call or particle callback allocates nothing once warm.
+ struct Frame {
+  Impl& impl;std::unique_ptr<Process> process;
+  explicit Frame(Impl& i):impl(i){if(impl.spareFrames.empty())process=std::make_unique<Process>();else{process=std::move(impl.spareFrames.back());impl.spareFrames.pop_back();}}
+  ~Frame(){auto& p=*process;p.context={};p.function=0;p.schedulerFlags=0;p.pc=0;p.locals.clear();p.bindings.clear();p.ownedLocals.clear();p.snapshots.clear();p.savedLocals.clear();p.countdown=0;p.bank=0;p.yielded=p.cancelled=p.noContinuation=p.running=false;p.result={};try{impl.spareFrames.push_back(std::move(process));}catch(...){}}
+ };
  Value start(FunctionId id,std::span<const Argument> args,ObjectId my,ObjectId you){
   if(++callDepth>256){--callDepth;throw std::runtime_error("WDL call stack exceeds 256");}
-  Process p;try{if(!prepare(p,id,args,my,you)){--callDepth;return {};}run(p);}catch(...){release(p);--callDepth;throw;}--callDepth;auto value=p.result;release(p);return value;
+  Frame frame(*this);Process& p=*frame.process;try{if(!prepare(p,id,args,my,you)){--callDepth;return {};}run(p);}catch(...){release(p);--callDepth;throw;}--callDepth;auto value=p.result;release(p);return value;
  }
  void run(Process& p){
   for(auto& snapshot:p.snapshots){auto& object=state.require(snapshot.object);for(std::size_t i=0;i<snapshot.count;++i)object.array[i].value=p.savedLocals[snapshot.offset+i];}p.snapshots.clear();p.savedLocals.clear();
   const int previousBank=liveBank;if(resolver)use_bank((p.bank==Runtime::BankDynamic?resolver(p.function,p.context.my,Runtime::BankDynamic):p.bank)==1?1:0);
   auto* previous=active;active=&p;auto& f=functions[p.function];p.yielded=false;p.running=true;
   try{while(p.pc<f.code.size()&&!p.yielded&&!p.cancelled){auto& i=f.code[p.pc++];switch(i.kind){
-   case Instruction::Eval:p.result=evaluate(*i.expr,&p).current();break;
+   case Instruction::Eval:p.result=value(*i.expr,&p);break;
    case Instruction::Jump:p.pc=i.target;break;
    // A6 interpreter 00410a80 case5 stores the condition into accumulator 006445b4 before jumping; falling off the end returns it (:845).
-   case Instruction::Branch:p.result=evaluate(*i.expr,&p).current();if(!p.result)p.pc=i.target;break;
-   case Instruction::Return:if(i.expr)p.result=evaluate(*i.expr,&p).current();p.pc=f.code.size();break;
+   case Instruction::Branch:p.result=value(*i.expr,&p);if(!p.result)p.pc=i.target;break;
+   case Instruction::Return:if(i.expr)p.result=value(*i.expr,&p);p.pc=f.code.size();break;
    case Instruction::Late:f.schedulerFlags|=2;break;
-   case Instruction::Declare:{auto& slot=p.locals[i.name];auto value=i.expr&&i.expr->kind!=Expr::List?evaluate(*i.expr,&p).current():Value{};auto* object=slot.value.kind==Value::Kind::Object?state.get(slot.value.bits):nullptr;if(!object||!localLeases.contains(object->id)||std::find(p.ownedLocals.begin(),p.ownedLocals.end(),object->id)==p.ownedLocals.end())object=&local_storage(p,i.name,i.size?i.size:3);auto& o=*object;slot.value=Value::object(o.id);for(auto& s:o.array)s.value={};if(i.expr&&i.expr->kind==Expr::List){if(i.expr->args.size()>o.array.size())fail(i.loc,"too many local array initializers");for(std::size_t n=0;n<i.expr->args.size();++n)o.array[n].value=evaluate(*i.expr->args[n],&p).current();}else if(!o.array.empty())o.array[0].value=value;break;}
-  }}p.context.my=context_slot(p,"my").value.bits;p.context.you=context_slot(p,"you").value.bits;}catch(...){p.running=false;active=previous;if(resolver)use_bank(previousBank);throw;}p.running=false;active=previous;if(resolver)use_bank(previousBank);
+   case Instruction::Declare:{auto initial=i.expr&&i.expr->kind!=Expr::List?value(*i.expr,&p):Value{};auto* object=p.locals[i.slot].object;if(std::find(p.ownedLocals.begin(),p.ownedLocals.end(),object->id)==p.ownedLocals.end()){object=&local_storage(p,f.localSyms[i.slot],i.size?i.size:3);p.locals[i.slot]={object,&object->array[0]};}auto& o=*object;for(auto& s:o.array)s.value={};if(i.expr&&i.expr->kind==Expr::List){if(i.expr->args.size()>o.array.size())fail(i.loc,"too many local array initializers");for(std::size_t n=0;n<i.expr->args.size();++n)o.array[n].value=value(*i.expr->args[n],&p);}else if(!o.array.empty())o.array[0].value=initial;break;}
+  }}p.context.my=context_slot(p,0).value.bits;p.context.you=context_slot(p,1).value.bits;}catch(...){p.running=false;active=previous;if(resolver)use_bank(previousBank);throw;}p.running=false;active=previous;if(resolver)use_bank(previousBank);
  }
  void tick(std::int32_t raw,std::int32_t freeze){
   const bool bonus=state.profile==SemanticProfile::BonusA7;
-  const auto freezeGlobal=state.globals.find("freeze_mode");
+  const auto freezeGlobal=state.globals.find("freeze_mode"_sym);
   // A6 004120ec and A7 10016710 reread the source cell for every eligible record.
   // Standalone callers without registered globals retain the supplied freeze value.
   const auto freezeValue=[&](){return freezeGlobal==state.globals.end()?freeze:freezeGlobal->second.value.raw();};
-  suppressContinuations=false;time=raw;state.global("time").value=Value::from_raw(raw);if(freezeValue()>=2048)return;
+  suppressContinuations=false;time=raw;state.global("time"_sym).value=Value::from_raw(raw);if(freezeValue()>=2048)return;
   auto pending=std::move(queued);queued.clear();pendingQueue=&pending;
   try{for(int pass=0;pass<(bonus?3:2);++pass)for(auto& p:pending){if(!p)continue;if(p->cancelled){release(*p);p.reset();continue;}
    const auto flags=bonus?p->schedulerFlags:functions[p->function].schedulerFlags;
@@ -473,7 +615,7 @@ void Runtime::kill_for_entity(ObjectId id){
  const auto mask=object->fields.find("event_flags");if(mask==object->fields.end()||!mask->second.value.bits)return;
  for(auto& declaration:impl_->declarations)if(auto* cell=declaration.pointerCell;cell&&cell->value.kind==Value::Kind::Object&&cell->value.bits==id)cell->value={};
  for(auto& b:impl_->banked)if(b.pointer&&b.value.kind==Value::Kind::Object&&b.value.bits==id)b.value={};
- if(impl_->active&&impl_->active->context.my==id)impl_->clear_context(*impl_->active,"my");
+ if(impl_->active&&impl_->active->context.my==id)impl_->clear_context(*impl_->active,0);
 }
 void Runtime::enable_banks(std::span<const std::string> names,BankResolver resolver){
  auto& m=*impl_;m.disable_banks();if(names.empty())return;if(!resolver)throw std::invalid_argument("enable_banks requires a resolver");
@@ -529,12 +671,33 @@ const ParseMetrics& Runtime::metrics()const{return impl_->metrics;}
 std::size_t Runtime::processes()const{return std::count_if(impl_->queued.begin(),impl_->queued.end(),[](auto& p){return !p->cancelled;});}
 bool Runtime::running(FunctionId id)const{return id&&std::any_of(impl_->queued.begin(),impl_->queued.end(),[id](auto& p){return !p->cancelled&&p->function==id;});}
 const Runtime::CompilerSettings& Runtime::compiler_settings()const{return impl_->compilerSettings;}
+std::uint64_t Runtime::digest()const{
+ const auto& m=*impl_;std::uint64_t h=digest_mix(m.nextProcess,(std::uint64_t(std::uint32_t(m.time))<<8)|std::uint64_t(m.liveBank*2+int(m.suppressContinuations)));
+ for(const auto& f:m.functions)h=digest_mix(h,f.schedulerFlags);
+ for(const auto& p:m.queued){
+  if(!p){h=digest_mix(h,0);continue;}
+  h=digest_mix(h,p->context.processId);h=digest_mix(h,(std::uint64_t(p->context.my)<<32)|p->context.you);h=digest_mix(h,(std::uint64_t(p->retainedContext[0])<<32)|p->retainedContext[1]);
+  h=digest_mix(h,(std::uint64_t(p->function)<<32)|p->schedulerFlags);h=digest_mix(h,p->pc);h=digest_mix(h,(std::uint64_t(std::uint32_t(p->countdown))<<8)|std::uint64_t(p->bank+2)<<4|std::uint64_t(p->yielded*8+p->cancelled*4+p->noContinuation*2+p->running));
+  const auto& f=m.functions[p->function];
+  std::uint64_t locals=0;for(std::size_t i=0;i<p->locals.size();++i)locals+=digest_mix(digest_value(Symbols::hash(f.localSyms[i]),Value::object(p->locals[i].object->id)),0);h=digest_mix(h,locals);
+  std::uint64_t bindings=0;for(std::size_t i=0;i<p->bindings.size();++i){const auto& arg=p->bindings[i];bindings+=digest_mix(digest_ref(digest_value(Symbols::hash(f.bindingSyms[i]),arg.value),arg.ref),arg.captured);}h=digest_mix(h,bindings);
+  for(auto id:p->ownedLocals)h=digest_mix(h,id);
+  for(const auto& s:p->snapshots)h=digest_mix(digest_mix(h,(std::uint64_t(s.object)<<32)|s.count),s.offset);
+  for(const auto& v:p->savedLocals)h=digest_value(h,v);
+  h=digest_value(h,p->result);
+ }
+ std::uint64_t leases=0;for(const auto* o:m.leasedLocals)leases+=digest_mix(digest_mix(o->id,o->leaseOwners),std::uint64_t(o->leaseReferences)*4+o->leaseAvailable*2+o->leaseScalar);h=digest_mix(h,leases);
+ for(auto id:m.freeLocals)h=digest_mix(h,id);
+ for(const auto& b:m.banked){h=digest_value(digest_mix(h,(std::uint64_t(b.object)<<2)|std::uint64_t(b.text*2+b.pointer)),b.value);for(const auto& v:b.values)h=digest_value(h,v);h=digest_text(h,b.string);}
+ return h;
+}
 std::size_t Runtime::reroute_reads(std::string_view global,std::string_view call,std::span<const std::string_view> functions,std::span<const std::string_view> arrays,std::span<const std::string_view> files){
  std::size_t count=0;
  auto assignment=[](const Expr& e){return (e.kind==Expr::Binary&&precedence(e.op)==1)||(e.kind==Expr::Unary&&(e.op.ends_with("++")||e.op.ends_with("--")));};
  std::function<void(E&,bool,bool)> walk=[&](E& e,bool all,bool target){
   if(!e)return;
-  if(e->kind==Expr::Name&&all&&!target&&case_equal(e->op,global)){auto c=std::make_unique<Expr>();c->kind=Expr::Call;c->dispatch=Expr::Native;c->loc=e->loc;auto n=std::make_unique<Expr>();n->kind=Expr::Name;n->loc=e->loc;n->op=std::string(call);c->args.push_back(std::move(n));e=std::move(c);++count;return;}
+  if(e->kind==Expr::Name&&all&&!target&&case_equal(e->op,global)){e=native_call(e->loc,call);++count;return;}
+  e->special=Expr::Unlinked;
   const bool indexed=e->kind==Expr::Index&&e->args[0]->kind==Expr::Name&&std::any_of(arrays.begin(),arrays.end(),[&](auto a){return case_equal(a,e->args[0]->op);});
   for(std::size_t i=0;i<e->args.size();++i)walk(e->args[i],all||(indexed&&i==1),i==0&&assignment(*e));
  };
@@ -547,7 +710,7 @@ std::size_t Runtime::reroute_assigned_read(std::string_view function,std::string
  std::function<void(E&)> walk=[&](E& e){
   if(!e)return;
   if(e->kind==Expr::Binary&&e->op=="="&&e->args[0]->kind==Expr::Member&&case_equal(e->args[0]->op,field)&&e->args[1]->kind==Expr::Name&&case_equal(e->args[1]->op,global)){
-   auto& r=e->args[1];auto c=std::make_unique<Expr>();c->kind=Expr::Call;c->dispatch=Expr::Native;c->loc=r->loc;auto n=std::make_unique<Expr>();n->kind=Expr::Name;n->loc=r->loc;n->op=std::string(call);c->args.push_back(std::move(n));r=std::move(c);++count;return;}
+   auto& r=e->args[1];r=native_call(r->loc,call);++count;return;}
   for(auto& a:e->args)walk(a);
  };
  for(auto& f:impl_->functions)if(case_equal(f.name,function))for(auto& ins:f.code)walk(ins.expr);
@@ -558,7 +721,7 @@ std::size_t Runtime::wrap_assigned(std::string_view field,std::string_view call,
  std::function<void(E&)> walk=[&](E& e){
   if(!e)return;
   if(e->kind==Expr::Binary&&e->op=="="&&e->args[0]->kind==Expr::Member&&case_equal(e->args[0]->op,field)){
-   auto& r=e->args[1];auto c=std::make_unique<Expr>();c->kind=Expr::Call;c->dispatch=Expr::Native;c->loc=r->loc;auto n=std::make_unique<Expr>();n->kind=Expr::Name;n->loc=r->loc;n->op=std::string(call);c->args.push_back(std::move(n));c->args.push_back(std::move(r));r=std::move(c);++count;return;}
+   auto& r=e->args[1];auto c=native_call(r->loc,call);c->args.push_back(std::move(r));r=std::move(c);++count;return;}
   for(auto& a:e->args)walk(a);
  };
  for(auto& f:impl_->functions)if(std::any_of(files.begin(),files.end(),[&](auto x){return case_equal(x,function_file_name(f));}))for(auto& ins:f.code)walk(ins.expr);

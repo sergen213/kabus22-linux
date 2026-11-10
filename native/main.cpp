@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <map>
 #include <cstdlib>
 #include <cstdio>
 #include <filesystem>
@@ -195,6 +196,8 @@ int main(int argc,char** argv){try{
   }
   // K22_FRAME_TIMING=FILE: one line per frame, microseconds: frame poll+scenario tick draw finish_frame, then live particles, door phase, held (seamless doors).
   static std::FILE* timingLog=[]{const char* p=std::getenv("K22_FRAME_TIMING");return p&&*p?std::fopen(p,"w"):nullptr;}();
+  // K22_STATE_DIGEST=FILE: one line per frame, "frame digest" (Engine::state_digest, hex) after the tick. A directory: DIR/<scenario name>.digest.
+  static std::FILE* digestLog=[&]{const char* p=std::getenv("K22_STATE_DIGEST");if(!p||!*p)return static_cast<std::FILE*>(nullptr);std::filesystem::path file=p;if(std::filesystem::is_directory(file))file/=(scenarioFile.empty()?std::string("frames"):scenarioFile.stem().string())+".digest";return std::fopen(file.c_str(),"w");}();
   const auto t0=timingLog?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
   // In-game graphics menu (docs/GRAPHICS_MENU.md): a change Renderer::reconfigure cannot apply live gets a new renderer here, before
   // poll, keeping the window mode/size. A chosen backend fails hard (no preset degradation); then the previous options come back.
@@ -205,7 +208,7 @@ int main(int argc,char** argv){try{
    engine.set_renderer(renderer.get());engine.renderer_recreated(error);frameStart=std::chrono::steady_clock::now();
   }
   if(renderer)renderer->poll(input);else input.dt=1.0/60;
-  if(scenario){input.dt=step;if(!scenario->step(engine,runtime,renderer.get(),input,count))break;if(scenario->realtime())media.real_clock();else media.advance_clock(step);}
+  if(scenario){input.dt=step;if(!scenario->step(engine,runtime,renderer.get(),input,count))break;engine.doorsSynchronous=!scenario->realtime();if(scenario->realtime())media.real_clock();else media.advance_clock(step);}
   const auto t1=timingLog?std::chrono::steady_clock::now():t0;
   engine.tick(runtime,engine.skip_intro(runtime,engine.console(runtime,input)));
   engine.graphics_update(); // debounced graphics-menu renderer change: reconfigure now, or a recreation next frame
@@ -215,6 +218,10 @@ int main(int argc,char** argv){try{
   const auto t3=timingLog?std::chrono::steady_clock::now():t0;
   engine.finish_frame(runtime);++count;
   if(timingLog){const auto t4=std::chrono::steady_clock::now();auto us=[](auto d){return (long long)std::chrono::duration_cast<std::chrono::microseconds>(d).count();};std::fprintf(timingLog,"%llu %lld %lld %lld %lld %zu %d %d\n",(unsigned long long)count-1,us(t1-t0),us(t2-t1),us(t3-t2),us(t4-t3),engine.activeParticles.size(),engine.door_phase(),int(engine.hold_presentation()));}
+  // K22_PARTICLE_CENSUS=FILE: every 0.5 s of scenario time, "seconds total name=count ..." (live particles per birth action).
+  static std::FILE* censusLog=[]{const char* p=std::getenv("K22_PARTICLE_CENSUS");return p&&*p?std::fopen(p,"w"):nullptr;}();
+  if(censusLog&&scenario&&std::floor(double(count)*step*2)!=std::floor(double(count-1)*step*2)){std::map<std::string,int> census;for(const auto& p:engine.activeParticles)++census[std::string(runtime.function_name(p.callback))];std::fprintf(censusLog,"%.1f %zu",double(count)*step,engine.activeParticles.size());for(const auto& [name,n]:census)std::fprintf(censusLog," %s=%d",name.c_str(),n);std::fprintf(censusLog,"\n");}
+  if(digestLog)std::fprintf(digestLog,"%llu %016llx\n",(unsigned long long)count-1,(unsigned long long)engine.state_digest(runtime));
  }
  if(renderer&&!capture.empty())renderer->capture(capture.string());std::cout<<"Native frames="<<count<<" live_processes="<<runtime.processes()<<" entities="<<engine.entities.size()<<" save_root="<<engine.saveRoot.string()<<'\n';return scenario?scenario->finish(std::cout,count,engine.quit):0;
  }catch(const std::exception& e){std::cerr<<"kabus22: "<<e.what()<<'\n';return 1;}}

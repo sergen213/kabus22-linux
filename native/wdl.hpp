@@ -25,6 +25,8 @@ public:
  const std::vector<std::string>& diagnostics()const; const ParseMetrics& metrics()const;
  const CompilerSettings& compiler_settings()const;
  std::size_t processes()const;
+ // K22_STATE_DIGEST: the process table (function, pc, countdown, context, locals, bindings, saved locals), local leases, banks.
+ std::uint64_t digest()const;
  bool running(FunctionId)const; // a live suspended process of this function is queued
  // Native override: reads of GLOBAL in FUNCTIONS, in every function defined in FILES (script file names), and in the index of
  // ARRAYS[...] anywhere, become the native call CALL(); returns the count.

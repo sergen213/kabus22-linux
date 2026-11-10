@@ -2019,6 +2019,50 @@ void legacy_particle_size_consumers(){
     close(particles[0].size,300*8*focalTan/800,.001);   // 800x600: shift 12 -> 8.
     std::printf("legacy particle size contracts passed: A6 00443950 emit() screen-pixel SIZE, effect() quants\n");
 }
+// effect() of the per-frame rain emitter (callback rain_effect) follows the frame time below 1/fps_max: particles per second
+// equal the original's at fps_max, the fraction is carried, the script still gets its requested count back. Longer frames and
+// every other emitter are untouched (docs/ENGINE_ARCHITECTURE.md §3.5).
+void rain_emission_consumers(){
+    TempDirectory temporary;SaveEnvironment saves(temporary.path/"private");
+    Assets assets(temporary.path);Media media(assets,false);State state;Engine engine(assets,nullptr,media,state);
+    Runtime runtime(state,[&engine](auto& vm,auto& ctx,auto name,auto args){return engine.builtin(vm,ctx,name,args);});
+    runtime.load_text("rain.wdl",R"(
+        VAR origin[3]; VAR returned;
+        function rain_effect(){ }
+        function other_effect(){ }
+        function karasmoke_effect(){ }
+        function tasgir_par(){ }
+        function smoke(){ returned=effect(karasmoke_effect,2,origin,nullvector); }
+        function flares(){ effect(tasgir_par,1,origin,nullvector); effect(tasgir_par,1,origin,nullvector); effect(tasgir_par,1,origin,nullvector); returned=10; }
+        function rain(){ returned=effect(rain_effect,10,origin,nullvector); }
+        function other(){ returned=effect(other_effect,10,origin,nullvector); }
+        function main(){}
+    )");
+    engine.set_global("fps_max",Value::from_int(72));
+    Input frame;
+    auto emitted=[&](const char* emitter,double dt,int calls){
+        frame.dt=dt;engine.tick(runtime,frame);engine.finish_frame(runtime);const auto before=engine.activeParticles.size();
+        for(int i=0;i<calls;++i){runtime.start(emitter,{},0,0);assert(engine.number("returned")==10);}
+        return engine.activeParticles.size()-before;
+    };
+    assert(emitted("rain",1.0/60,5)==50);                // a frame longer than 1/fps_max: the script's count
+    assert(emitted("rain",1.0/72,5)==50);                // exactly 1/fps_max
+    assert(emitted("rain",0.99/72,5)==50);               // pacing jitter around 1/fps_max (within 2%) is not scaled
+    assert(emitted("other",1.0/240,5)==50);              // any other emitter keeps its per-frame count
+    double carry=0;std::size_t expected=0;for(int i=0;i<240;++i){carry+=10*(1.0/240*72);const auto n=std::size_t(carry);carry-=double(n);expected+=n;}
+    assert(expected>=719&&expected<=720);                // 240 frames of 1/240 s emit what 72 frames of 1/72 s do
+    assert(emitted("rain",1.0/240,240)==expected);
+    assert(engine.number("num_particles")==double(engine.activeParticles.size()));
+    assert(emitted("rain",1.0/60,1)==10);                // and the long frame is exact again
+    // The other per-frame emitters: kara_smoke scales its count with its own carry; tasgir_par (several calls per frame, one per
+    // vertex) emits whole frames, dt*fps_max of them.
+    {frame.dt=1.0/240;const auto before=engine.activeParticles.size();for(int i=0;i<240;++i){engine.tick(runtime,frame);engine.finish_frame(runtime);runtime.start("smoke",{},0,0);}
+     const auto smoke=engine.activeParticles.size()-before;assert(smoke>=143&&smoke<=144);}
+    {frame.dt=1.0/240;const auto before=engine.activeParticles.size();std::size_t frames=0;for(int i=0;i<240;++i){engine.tick(runtime,frame);engine.finish_frame(runtime);const auto at=engine.activeParticles.size();runtime.start("flares",{},0,0);const auto born=engine.activeParticles.size()-at;assert(born==0||born==3);frames+=born==3;}
+     assert(frames>=71&&frames<=72&&engine.activeParticles.size()-before==frames*3);}
+    {frame.dt=1.0/60;engine.tick(runtime,frame);engine.finish_frame(runtime);const auto before=engine.activeParticles.size();runtime.start("smoke",{},0,0);runtime.start("flares",{},0,0);assert(engine.activeParticles.size()-before==5);}
+    std::printf("rain emission contracts passed: per-second rate below 1/fps_max, exact counts otherwise\n");
+}
 // Community patch 1.8.5 behaviours ported as options: load-list joystick (modern controller only) and the
 // engine-side first-person camera (--camera first-person); asset-free behavioural fixture, not campaign scripts.
 void patch_option_contracts(){
@@ -2089,7 +2133,7 @@ void patch_option_contracts(){
 }
 
 int main(int argc, char** argv) {
-    if(argc==2&&std::string_view(argv[1])=="--input-saves"){input_saves_contracts();patch_option_contracts();entity_bounds_consumers();sprite_strip_consumers();legacy_particle_size_consumers();return 0;}
+    if(argc==2&&std::string_view(argv[1])=="--input-saves"){input_saves_contracts();patch_option_contracts();entity_bounds_consumers();sprite_strip_consumers();legacy_particle_size_consumers();rain_emission_consumers();return 0;}
     if((argc==7||argc==8)&&std::string_view(argv[3])=="--campaign-display"){
         campaign_display(argv[4],argv[5],argv[6],argc==8?std::string_view(argv[7]):"all");return 0;
     }
