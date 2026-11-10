@@ -196,6 +196,8 @@ Measured: mean `Engine::tick` over 1200 frames after a save load, headless, one 
 
 Script parse and bootstrap (frame 0): 170 → 123 ms. Level-load frames are unchanged (largest later tick 77 ms on both).
 
+The table compares both versions built locally with one compiler. The released binaries (gcc 13 in the Ubuntu 24 toolchain container), measured the same way: street with rain 14.0 → 0.78 ms at 1/240 s and 4.22 → 0.72 ms at 1/60 s; save 7 4.52 → 1.19 ms; save 9 4.93 → 1.31 ms; save 10 0.58 → 0.15 ms; save 14 0.31 → 0.09 ms.
+
 ### 3.5 Frame-rate-independent per-frame emitters
 
 Some scripts call `effect()` once per frame from a `wait(1)` loop, and the original engine never ran faster than the script's `fps_max` (72). Above that rate their live particle count grew with the frame rate. The `effect` builtin therefore treats the emitters listed in `per_frame_emitter` (`engine.cpp`, by callback name) specially whenever the frame is more than 2% shorter than `1/fps_max` (`dt * fps_max < 0.98`; the margin keeps a game paced at `fps_max` itself, with its timer jitter, on the exact original counts). Longer frames are untouched, no extra `random()` draws are made, the script still gets its requested count back, and no other emitter is changed.

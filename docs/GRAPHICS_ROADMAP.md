@@ -359,6 +359,14 @@ Captures of kayit1 and kayit10 on Vulkan raster, `--preset original` and OpenGL 
 of this section alone leave Vulkan RT captures byte-identical too; 0.4.17's RT image differs by the denoiser rounding
 described in docs/RAYTRACING.md "Third pass").
 
+The table compares both versions built locally with one compiler. The released binaries (gcc 13 in the Ubuntu 24
+toolchain container), measured the same way: Vulkan RT kayit1 38 -> 141 fps (`cpu_record_ms` 7.59 -> 1.48), kayit10
+112 -> 139 fps (1.32 -> 0.70), kayit14 120 -> 164 fps (3.11 -> 0.67); Vulkan raster kayit1 37 -> 176 fps (8.18 -> 2.54);
+OpenGL kayit1 44 -> 210 fps. With frame generation and `fps_limit=240`: kayit1 90 -> 201 presented fps, kayit14
+181 -> 225. The release toolchain's code records up to 1.7 times slower than the local compiler's (0.4.17: 1.4 times on
+the RT street, 1.7 on the raster street, 1.05 in the tunnel; 0.4.16: 1.1-1.4 times): part of a release build's
+remaining recording cost is the compiler, not the algorithm.
+
 What a draw costs now, and what it may assume:
 
 - **Scene descriptor sets are cached, not built per draw.** Set 0 binds the per-draw `Uniform` block (binding 0) and the
