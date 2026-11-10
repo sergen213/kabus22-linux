@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <deque>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
@@ -19,6 +20,7 @@
 #include <thread>
 #include <tuple>
 #include <utility>
+#include <unistd.h>
 
 namespace k22 {
 namespace vk22 {
@@ -62,6 +64,7 @@ void cleanup(VulkanBackend::State& s) {
     if(s.device) {
         s.presenter.reset(); // joins the frame-generation present thread before the device goes idle
         vkDeviceWaitIdle(s.device);
+        s.save_pipeline_cache(); if(s.pipelineCache) {vkDestroyPipelineCache(s.device,s.pipelineCache,nullptr); s.pipelineCache=VK_NULL_HANDLE;}
         if(s.frameTimeline) vkDestroySemaphore(s.device,s.frameTimeline,nullptr);
         s.raster.reset(); s.rays.reset(); s.fsr.reset();
         destroy_target(s,s.scene); destroy_target(s,s.alpha); destroy_target(s,s.portal); destroy_target(s,s.hdr); s.destroy(s.finalImage);
@@ -273,6 +276,7 @@ VulkanBackend::State::State(SDL_Window* w,const RenderOptions& o):window(w),opti
         if(rayEnabled) deviceExtensions.insert(deviceExtensions.end(),{VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,VK_KHR_RAY_QUERY_EXTENSION_NAME});
         VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO}; deviceInfo.pNext=&f12; deviceInfo.pEnabledFeatures=&features; deviceInfo.queueCreateInfoCount=1; deviceInfo.pQueueCreateInfos=&queueInfo; deviceInfo.enabledExtensionCount=static_cast<std::uint32_t>(deviceExtensions.size()); deviceInfo.ppEnabledExtensionNames=deviceExtensions.data();
         require(vkCreateDevice(physical,&deviceInfo,nullptr,&device),"Creating Vulkan device"); vkGetDeviceQueue(device,queueFamily,0,&queue);
+        load_pipeline_cache(); if(const char* e=std::getenv("K22_RENDER_EVENTS");e&&*e=='1') events.enabled=true;
         if(f12.timelineSemaphore){VkSemaphoreTypeCreateInfo type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};type.semaphoreType=VK_SEMAPHORE_TYPE_TIMELINE;VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};semaphore.pNext=&type;require(vkCreateSemaphore(device,&semaphore,nullptr,&frameTimeline),"Creating Vulkan frame-generation timeline");}
         for(auto format:{VK_FORMAT_D24_UNORM_S8_UINT,VK_FORMAT_D32_SFLOAT_S8_UINT}) {VkFormatProperties p{}; vkGetPhysicalDeviceFormatProperties(physical,format,&p); if(p.optimalTilingFeatures&VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT){depthFormat=format;break;} }
         VkImageFormatProperties colorProperties{},depthProperties{};
@@ -310,7 +314,7 @@ VulkanBackend::State::~State(){cleanup(*this);}
 vk22::Buffer VulkanBackend::State::buffer(VkDeviceSize size,VkBufferUsageFlags usage,bool mapped,const void* initial) {
     if(!size) throw std::runtime_error("Vulkan buffer cannot have zero size");
     if((usage&VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)&&!bufferAddressEnabled) throw std::runtime_error(std::string(properties.deviceName)+": buffer device addresses unavailable");
-    vk22::Buffer b{}; b.size=size;
+    vk22::Buffer b{}; b.size=size; b.id=++resourceIds;
     try {
         VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO}; info.size=size; info.usage=usage|(!mapped&&initial?VK_BUFFER_USAGE_TRANSFER_DST_BIT:0); info.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
         require(vkCreateBuffer(device,&info,nullptr,&b.handle),"Creating Vulkan buffer");
@@ -348,7 +352,7 @@ void VulkanBackend::State::retire(vk22::Buffer& b){if(!b.handle)return;if(comman
 void VulkanBackend::State::retire(vk22::Image& i){if(!i.handle)return;if(command){slots[slotIndex].garbageImages.push_back(i);i={};}else{drain();destroy(i);}}
 vk22::Image VulkanBackend::State::image(std::uint32_t width,std::uint32_t height,VkFormat format,VkImageUsageFlags usage,std::uint32_t levels,std::uint32_t layers,VkSampleCountFlagBits sampleCount,bool cube) {
     if(!width||!height||!levels||!layers)throw std::runtime_error("Invalid Vulkan image dimensions");
-    vk22::Image i{};i.width=width;i.height=height;i.format=format;i.levels=levels;i.layers=layers;i.samples=sampleCount;
+    vk22::Image i{};i.width=width;i.height=height;i.format=format;i.levels=levels;i.layers=layers;i.samples=sampleCount;i.id=++resourceIds;
     try {
         VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO}; info.flags=cube?VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT:0;info.imageType=VK_IMAGE_TYPE_2D;info.format=format;info.extent={width,height,1};info.mipLevels=levels;info.arrayLayers=layers;info.samples=sampleCount;info.tiling=VK_IMAGE_TILING_OPTIMAL;info.usage=usage;info.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
         require(vkCreateImage(device,&info,nullptr,&i.handle),"Creating Vulkan image"); VkMemoryRequirements requirements{};vkGetImageMemoryRequirements(device,i.handle,&requirements);
@@ -398,6 +402,60 @@ VkShaderModule VulkanBackend::State::shader(std::span<const std::uint32_t> words
     VkShaderModule module{};
     require(vkCreateShaderModule(device,&info,nullptr,&module),"Creating Vulkan shader module");
     return module;
+}
+namespace {
+constexpr char pipelineMagic[8]={'K','2','2','P','I','P','E','1'};
+std::uint64_t fnv(std::span<const std::uint8_t> bytes){std::uint64_t h=1469598103934665603ull;for(auto b:bytes){h^=b;h*=1099511628211ull;}return h;}
+}
+// File layout: magic[8], FNV-1a of everything after it[8], key bytes[4], reserved[4], pipelineKeys, driver cache data.
+// The driver data is used only when it starts with this device's VkPipelineCacheHeaderVersionOne (vendor, device,
+// pipelineCacheUUID: another GPU or driver build starts empty); the keys carry their own shader signature (Raster).
+void VulkanBackend::State::load_pipeline_cache() {
+    std::vector<std::uint8_t> file; std::span<const std::uint8_t> driver;
+    if(const char* use=std::getenv("K22_PIPELINE_CACHE");!use||*use!='0') {
+        const char* cache=std::getenv("XDG_CACHE_HOME"); const char* home=std::getenv("HOME"); std::filesystem::path root;
+        if(cache&&*cache&&std::filesystem::path(cache).is_absolute()) root=cache; else if(home&&*home) root=std::filesystem::path(home)/".cache";
+        char name[64]; std::snprintf(name,sizeof(name),"vulkan-pipelines-%04x-%04x.bin",properties.vendorID,properties.deviceID);
+        if(!root.empty()) pipelineCachePath=(root/"kabus22"/name).string();
+    }
+    if(!pipelineCachePath.empty()) {
+        std::ifstream in(pipelineCachePath,std::ios::binary);
+        if(in) {in.seekg(0,std::ios::end); const std::streamoff size=in.tellg(); if(size>=24&&size<=(std::streamoff(256)<<20)) {file.resize(static_cast<std::size_t>(size)); in.seekg(0); in.read(reinterpret_cast<char*>(file.data()),size); if(!in) file.clear();}}
+    }
+    if(file.size()>=24&&!std::memcmp(file.data(),pipelineMagic,8)) {
+        std::uint64_t sum{}; std::uint32_t keyBytes{}; std::memcpy(&sum,file.data()+8,8); std::memcpy(&keyBytes,file.data()+16,4);
+        if(sum==fnv(std::span<const std::uint8_t>(file).subspan(16))&&std::size_t(keyBytes)<=file.size()-24) {
+            pipelineKeys.assign(file.begin()+24,file.begin()+24+keyBytes);
+            const auto data=std::span<const std::uint8_t>(file).subspan(24+keyBytes); std::uint32_t header[4]{};
+            if(data.size()>=16+VK_UUID_SIZE) {std::memcpy(header,data.data(),16); if(header[0]==16+VK_UUID_SIZE&&header[1]==VK_PIPELINE_CACHE_HEADER_VERSION_ONE&&header[2]==properties.vendorID&&header[3]==properties.deviceID&&!std::memcmp(data.data()+16,properties.pipelineCacheUUID,VK_UUID_SIZE)) driver=data;}
+        }
+    }
+    VkPipelineCacheCreateInfo info{}; info.sType=VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO; info.initialDataSize=driver.size(); info.pInitialData=driver.empty()?nullptr:driver.data();
+    require(vkCreatePipelineCache(device,&info,nullptr,&pipelineCache),"Creating Vulkan pipeline cache");
+    vkGetPipelineCacheData(device,pipelineCache,&pipelineCacheBytes,nullptr);
+}
+// Written beside the target and renamed over it: another process reads the old or the new file, never a partial one.
+void VulkanBackend::State::save_pipeline_cache() {
+    // Saved when the raster recorded a new pipeline key or the driver data grew since the load (compiles the file lacked).
+    if(!pipelineCache||pipelineCachePath.empty()) return;
+    std::size_t size=0; if(vkGetPipelineCacheData(device,pipelineCache,&size,nullptr)!=VK_SUCCESS||(!pipelineCacheDirty&&size==pipelineCacheBytes)) return;
+    pipelineCacheDirty=false; pipelineCacheBytes=size;
+    const std::size_t keyBytes=pipelineKeys.size(); std::vector<std::uint8_t> file(24+keyBytes+size);
+    if(vkGetPipelineCacheData(device,pipelineCache,&size,file.data()+24+keyBytes)!=VK_SUCCESS) return;
+    file.resize(24+keyBytes+size); std::memcpy(file.data(),pipelineMagic,8); const std::uint32_t stored=static_cast<std::uint32_t>(keyBytes); std::memcpy(file.data()+16,&stored,4);
+    if(keyBytes) std::memcpy(file.data()+24,pipelineKeys.data(),keyBytes);
+    const std::uint64_t sum=fnv(std::span<const std::uint8_t>(file).subspan(16)); std::memcpy(file.data()+8,&sum,8);
+    std::error_code ec; const std::filesystem::path target(pipelineCachePath); std::filesystem::create_directories(target.parent_path(),ec);
+    auto temporary=target; temporary+="."+std::to_string(::getpid())+".tmp";
+    bool written=false; {std::ofstream out(temporary,std::ios::binary|std::ios::trunc); out.write(reinterpret_cast<const char*>(file.data()),static_cast<std::streamsize>(file.size())); out.flush(); written=bool(out);}
+    if(written) std::filesystem::rename(temporary,target,ec);
+    // An unwritable location is reported once and not tried again by this renderer.
+    if(!written||ec) {std::filesystem::remove(temporary,ec); std::fprintf(stderr,"kabus22: graphics: Vulkan pipeline cache not saved (%s)\n",pipelineCachePath.c_str()); pipelineCachePath.clear();}
+}
+void VulkanBackend::State::event(const char* what,std::chrono::steady_clock::time_point since,std::string_view detail) {
+    if(!events.enabled) return;
+    char text[192]; std::snprintf(text,sizeof(text)," %s=%.3f%s%.*s",what,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-since).count(),detail.empty()?"":":",static_cast<int>(detail.size()),detail.data());
+    events.log+=text;
 }
 void VulkanBackend::State::immediate(const std::function<void(VkCommandBuffer)>& record) {
     if(command) throw std::runtime_error("Nested Vulkan immediate submission");
@@ -566,6 +624,7 @@ void VulkanBackend::State::finish(){
     VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};present.waitSemaphoreCount=1;present.pWaitSemaphores=&swapRendered[acquiredIndex];present.swapchainCount=1;present.pSwapchains=&swapchain;present.pImageIndices=&acquiredIndex;const auto presentStart=std::chrono::steady_clock::now();VkResult result;{std::scoped_lock lock(queueMutex);result=vkQueuePresentKHR(queue,&present);}timing.present+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-presentStart).count();if(result==VK_ERROR_OUT_OF_DATE_KHR||result==VK_SUBOPTIMAL_KHR)swapDirty=true;else require(result,"Presenting Vulkan frame");slotIndex=(slotIndex+1)%slots.size();
 }
 void VulkanBackend::State::mark(const char* label){
+    if(events.enabled){const auto now=std::chrono::steady_clock::now();events.phases.emplace_back(label,std::chrono::duration<double,std::milli>(now-events.last).count());events.last=now;}
     if(!timing.enabled||!command)return;auto& slot=slots[slotIndex];if(slot.marks.size()>=64)return;
     vkCmdWriteTimestamp2(command,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,slot.queries,static_cast<std::uint32_t>(slot.marks.size()));
     slot.marks.push_back(label);
@@ -713,11 +772,23 @@ void VulkanBackend::draw(const RenderFrame& frame,WindowMetrics metrics) {
     const auto t1=clock::now();
     if(!state_->command) return;
     try {
+        if(state_->events.enabled){auto& e=state_->events;e.last=t1;e.phases.clear();} // e.log keeps events since the last draw (startup pipeline warm-up)
         vk22::raster_draw(*state_->raster,frame,metrics);
         const auto t2=clock::now();
         state_->finish();
         // cpu_wait: fence waits, acquire, submit and present; cpu_record: Raster command recording.
         if(state_->timing.enabled){auto& t=state_->timing;t.cpuRecord+=std::chrono::duration<double,std::milli>(t2-t1).count();t.cpuWait+=std::chrono::duration<double,std::milli>((t1-t0)+(clock::now()-t2)).count();}
+        // A frame is reported when it created resources or recorded for over 3x the running typical time (and 2 ms).
+        if(auto& e=state_->events;e.enabled){
+            const auto ms=[](clock::duration d){return std::chrono::duration<double,std::milli>(d).count();};const double record=ms(t2-t1);++e.draws;
+            if(!e.log.empty()||(e.typical>0&&record>std::max(2.0,3*e.typical))){
+                char text[160];std::snprintf(text,sizeof(text),"kabus22: render-event draw=%llu begin_ms=%.3f record_ms=%.3f finish_ms=%.3f typical_ms=%.3f phases",static_cast<unsigned long long>(e.draws),ms(t1-t0),record,ms(clock::now()-t2),e.typical);
+                std::string line=text;for(const auto& [label,value]:e.phases)if(value>=0.2){std::snprintf(text,sizeof(text)," %s=%.3f",label,value);line+=text;}
+                std::fprintf(stderr,"%s |%s\n",line.c_str(),e.log.c_str());e.log.clear();
+            }
+            e.typical=e.typical>0?e.typical*.95+std::min(record,3*e.typical)*.05:record;e.recorded+=record;
+            if(e.draws%600==0){std::fprintf(stderr,"kabus22: render-stats draws=%llu record_ms=%.3f binds=%.1f culled=%.1f sets=%.2f\n",static_cast<unsigned long long>(e.draws),e.recorded/600,double(e.binds)/600,double(e.culled)/600,double(e.sets)/600);e.recorded=0;e.binds=e.culled=e.sets=0;}
+        }
     } catch(...) {
         state_->command=VK_NULL_HANDLE;
         state_->finalValid=false;
@@ -729,7 +800,7 @@ void VulkanBackend::drain(){state_->drain();}
 void VulkanBackend::invalidate(){state_->invalidate();}
 const RenderOptions& VulkanBackend::options()const{return state_->options;}
 bool VulkanBackend::reconfigure(const RenderOptions& next){return state_->reconfigure(next);}
-void VulkanBackend::release_scene(std::span<const Model* const> keep){state_->drain();vk22::raster_release(*state_->raster,keep);vk22::rt_release(*state_->rays,keep);state_->retainedColorValid=false;state_->portalColorValid=false;}
+void VulkanBackend::release_scene(std::span<const Model* const> keep){state_->drain();vk22::raster_release(*state_->raster,keep);vk22::rt_release(*state_->rays,keep);state_->retainedColorValid=false;state_->portalColorValid=false;state_->save_pipeline_cache();}
 void VulkanBackend::purge_model(const Model* model) {
     state_->drain();
     vk22::raster_purge_model(*state_->raster,model);

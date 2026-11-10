@@ -47,6 +47,7 @@
     X(vkCreateImage) \
     X(vkCreateImageView) \
     X(vkCreateInstance) \
+    X(vkCreatePipelineCache) \
     X(vkCreatePipelineLayout) \
     X(vkCreateQueryPool) \
     X(vkCreateSampler) \
@@ -63,6 +64,7 @@
     X(vkDestroyImageView) \
     X(vkDestroyInstance) \
     X(vkDestroyPipeline) \
+    X(vkDestroyPipelineCache) \
     X(vkDestroyPipelineLayout) \
     X(vkDestroyQueryPool) \
     X(vkDestroySampler) \
@@ -80,6 +82,7 @@
     X(vkGetDeviceProcAddr) \
     X(vkGetDeviceQueue) \
     X(vkGetImageMemoryRequirements) \
+    X(vkGetPipelineCacheData) \
     X(vkGetPhysicalDeviceFeatures) \
     X(vkGetPhysicalDeviceFeatures2) \
     X(vkGetQueryPoolResults) \

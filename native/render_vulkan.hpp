@@ -31,8 +31,9 @@ private:
 };
 namespace vk22 {
 void require(VkResult,const char*);
-struct Buffer { VkBuffer handle{}; VkDeviceMemory memory{}; VkDeviceSize size{}; void* mapped{}; VkDeviceAddress address{}; };
-struct Image { VkImage handle{}; VkDeviceMemory memory{}; VkImageView view{}; VkFormat format{}; std::uint32_t width{},height{},levels{1},layers{1}; VkImageLayout layout{VK_IMAGE_LAYOUT_UNDEFINED}; VkSampleCountFlagBits samples{VK_SAMPLE_COUNT_1_BIT}; };
+// id: process-unique identity assigned by State::buffer/image (0: not created there). Unlike the Vulkan handle it is never reused.
+struct Buffer { VkBuffer handle{}; VkDeviceMemory memory{}; VkDeviceSize size{}; void* mapped{}; VkDeviceAddress address{}; std::uint64_t id{}; };
+struct Image { VkImage handle{}; VkDeviceMemory memory{}; VkImageView view{}; VkFormat format{}; std::uint32_t width{},height{},levels{1},layers{1}; VkImageLayout layout{VK_IMAGE_LAYOUT_UNDEFINED}; VkSampleCountFlagBits samples{VK_SAMPLE_COUNT_1_BIT}; std::uint64_t id{}; };
 struct Target { Image color,depth,resolve; };
 struct RayMaterial {
     VkImageView texture{}; VkSampler sampler{};
@@ -102,6 +103,17 @@ struct VulkanBackend::State {
     void account(Slot&);
     std::unique_ptr<vk22::Raster,vk22::RasterDelete> raster;
     std::unique_ptr<vk22::RayTracing,vk22::RayDelete> rays;
+    std::uint64_t resourceIds{};
+    // On-disk pipeline cache: the driver's VkPipelineCache data plus pipelineKeys, the raster's record of the pipelines it
+    // created (opaque here), under $XDG_CACHE_HOME/kabus22, so a later run builds them at startup instead of at first
+    // draw. K22_PIPELINE_CACHE=0: no file (the in-memory cache stays).
+    VkPipelineCache pipelineCache{}; std::vector<std::uint8_t> pipelineKeys; bool pipelineCacheDirty{}; std::size_t pipelineCacheBytes{}; std::string pipelineCachePath;
+    void load_pipeline_cache(); void save_pipeline_cache();
+    // K22_RENDER_EVENTS=1: a stderr line for every frame that created resources (event(): pipelines, uploads, pool or
+    // buffer growth) or whose recording stalled, with the CPU time between mark() calls, and every 600 frames the
+    // averages per frame of scene binds (draws), culled world batches and descriptor sets written.
+    struct Events { bool enabled{}; std::chrono::steady_clock::time_point last{}; std::vector<std::pair<const char*,double>> phases; std::string log; double typical{},recorded{}; std::uint64_t draws{},binds{},culled{},sets{}; } events;
+    void event(const char* what,std::chrono::steady_clock::time_point since,std::string_view detail={});
     State(SDL_Window*,const RenderOptions&); ~State();
     vk22::Buffer buffer(VkDeviceSize,VkBufferUsageFlags,bool mapped=false,const void* initial=nullptr);
     void destroy(vk22::Buffer&); void destroy(vk22::Image&); void retire(vk22::Buffer&); void retire(vk22::Image&);
