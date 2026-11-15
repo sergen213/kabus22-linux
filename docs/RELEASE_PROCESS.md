@@ -1,6 +1,7 @@
 # Release process
 
-How Kabus22 Linux versions are numbered, built, signed, published, updated and rolled back.
+How Kabus22 versions are numbered, built, signed, published, updated and rolled back: the signed Linux AppImage and
+update payload, and the unsigned Windows zip and setup ([Windows files](#windows-files)).
 Original game media is **never** part of any release artifact (see [What never ships](#what-never-ships)).
 
 ## Versioning
@@ -106,12 +107,26 @@ no hard links, devices or setuid bits; only `bin/ lib/ share/`) into a private s
 
 - `.github/workflows/ci.yml` (push/PR, Ubuntu 24.04): builds the native engine and installer/launcher/
   updater with distro packages, runs asset-free CTests (fixture-dependent tests self-skip in a public
-  checkout), `tools/check_wrs2.py` and the packaging policy self-check.
+  checkout), `tools/check_wrs2.py` and the packaging policy self-check. Its `windows` job runs
+  `.github/workflows/windows-build.yml` (below) and uploads the artifacts `kabus22-windows-x64` (portable zip) and
+  `kabus22-windows-setup-x64` (setup exe).
 - `.github/workflows/release.yml` (tag `v*`): acquires the pinned innoextract helper and uruntime (hash
   and signature checked), builds the pinned toolchain image from `tools/Dockerfile.ubuntu24` (stdin, no
   build context), runs `tools/build_kabus_baseline.sh`, extracts the AppImage SquashFS, builds and signs
   the update payload, and creates a **draft** GitHub release with the AppImage, its report and
-  dependency-source bundle, native source archive, update assets and `SHA256SUMS`.
+  dependency-source bundle, native source archive, update assets and `SHA256SUMS`. Independently, its `windows`
+  job builds the Windows files for the tag (artifacts `kabus22-windows-x64`, `kabus22-windows-setup-x64`,
+  `kabus22-windows-x64-sources`) and `windows-attach` uploads them to the tag's release once it exists (it waits up
+  to 10 minutes, draft or published), replacing their lines in the release's `SHA256SUMS`.
+- `.github/workflows/windows-build.yml` (called by both, `windows-2022` runner): clones microsoft/vcpkg at the
+  `builtin-baseline` of `windows/vcpkg.json`, restores/saves vcpkg's binary cache (actions/cache, a new key per run
+  so a failed engine build keeps the dependencies built so far), fetches the pinned DXC release (SHA-256 checked;
+  `dxil.dll` beside `dxc.exe` signs the DXIL), configures and builds through `windows\dev.cmd` (newest Visual Studio
+  2022+ with the C++ x64 tools; MSVC only), runs `windows/package-windows.ps1` (zip and Inno Setup 6.3+ setup from one
+  `cmake --install` folder; it refuses a version whose `X.Y.Z` differs from `CMakeLists.txt` and any game data), and
+  smoke-tests the packaged `kabus22.exe --version` / `--list-capabilities` (no GPU on the runner). For tags it also
+  builds the corresponding-sources archive of the bundled vcpkg libraries (`vcpkg install --only-downloads` into a
+  fresh root: upstream archives plus the port recipes and patches).
 
 ## Publishing a release
 
@@ -125,6 +140,37 @@ no hard links, devices or setuid bits; only `bin/ lib/ share/`) into a private s
 
 Local equivalent of steps 3–4 without CI: follow README "Optional AppImage assembly", then extract the
 AppImage (`unsquashfs -o <squashfs_offset from report> …`) and run the two `tools/release` commands.
+
+## Windows files
+
+| Asset | Content |
+| --- | --- |
+| `kabus22-<v>-windows-x64.zip` | portable folder `Kabus22\`: `kabus22.exe`, vcpkg DLLs, app-local MSVC runtime, `Kabus22.cmd`, `import-data.ps1`, `prepare-data.ps1`, `README.md` (docs/WINDOWS.md), `licenses\` |
+| `Kabus22-<v>-Windows-Setup-x64.exe` | the same folder as a per-user Inno Setup installer that imports the game data from the player's media |
+| `kabus22-<v>-windows-x64-sources.zip` | upstream sources and vcpkg recipes of the bundled libraries (FFmpeg is LGPL) |
+
+They are neither code-signed nor covered by the update signature: Windows has no launcher or updater, players install
+a newer setup over the old one ([WINDOWS.md](WINDOWS.md)). `windows/vcpkg.json` carries no version; the Windows
+version is the CMake project version, checked against the tag by `package-windows.ps1`.
+
+With the local release flow (the maintainer creates and publishes the release with `gh release create` right after
+pushing the tag), the tag's `windows-attach` job adds the three files and their `SHA256SUMS` lines by itself once
+the Windows build is done (about 15 minutes with a warm vcpkg cache, over an hour when FFmpeg must be rebuilt). Check
+the release afterwards (`gh release view vX.Y.Z`; `gh release download vX.Y.Z` and `sha256sum -c SHA256SUMS`).
+If the release did not exist in time (the job then ends with a notice), attach them by hand from that tag's run:
+
+```sh
+run=$(gh run list -R sergen213/kabus22-linux --workflow release.yml --branch vX.Y.Z --limit 1 --json databaseId -q '.[0].databaseId')
+gh run download "$run" -R sergen213/kabus22-linux -p 'kabus22-windows-*' -D windows-dist
+mv windows-dist/*/* windows-dist/ && rmdir windows-dist/*/
+(cd windows-dist && sha256sum -- *) >> release-X.Y.Z/SHA256SUMS
+gh release upload vX.Y.Z -R sergen213/kabus22-linux windows-dist/* release-X.Y.Z/SHA256SUMS --clobber
+```
+
+Qualify a Windows build on a Windows 10/11 PC before announcing it: install the setup with the ISO and with an
+installed game folder as source, start Direct3D 12 and `--renderer opengl`, uninstall and confirm that
+`%LOCALAPPDATA%\Kabus22` (saves, settings) is untouched. CI artifacts of any branch build are downloadable the same
+way (`gh run download <run> -n kabus22-windows-x64`).
 
 ## AppImage assembly
 

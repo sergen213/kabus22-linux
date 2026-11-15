@@ -1,4 +1,5 @@
 #include "mods.hpp"
+#include "platform.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
@@ -7,6 +8,9 @@
 
 namespace k22 {
 namespace fs=std::filesystem;
+#ifdef _WIN32
+fs::path mods_root(){return platform::user_data_root()/"mods";}
+#else
 fs::path mods_root(){
     const char* xdg=std::getenv("XDG_DATA_HOME");
     if(xdg&&*xdg&&fs::path(xdg).is_absolute())return fs::path(xdg)/"kabus22/mods";
@@ -14,7 +18,8 @@ fs::path mods_root(){
     if(!home||!*home)throw std::runtime_error("HOME or XDG_DATA_HOME required for mods");
     return fs::path(home)/".local/share/kabus22/mods";
 }
-bool mod_id(std::string_view s){return !s.empty()&&s.size()<=128&&s!="."&&s!=".."&&s.front()!='-'&&std::all_of(s.begin(),s.end(),[](char c){return static_cast<unsigned char>(c)>=0x20&&c!=0x7f&&c!='/';});}
+#endif
+bool mod_id(std::string_view s){return !s.empty()&&s.size()<=128&&s!="."&&s!=".."&&s.front()!='-'&&std::all_of(s.begin(),s.end(),[](char c){return static_cast<unsigned char>(c)>=0x20&&c!=0x7f&&platform::pathSeparators.find(c)==std::string_view::npos;});}
 ModInfo load_mod(const fs::path& directory){
     ModInfo mod;mod.id=directory.filename().string();mod.path=directory;std::error_code ec;
     if(!mod_id(mod.id)){mod.detail="invalid mod directory name";return mod;}

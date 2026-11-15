@@ -8,6 +8,9 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#ifdef _WIN32
+#include "platform.hpp"
+#endif
 namespace k22 {
 namespace {
 static_assert(SDL_CONTROLLER_BUTTON_MAX==21,"controller.ini button names follow the SDL2 2.0.14+ button order");
@@ -45,10 +48,20 @@ ControllerConfig parse_controller_config(std::string_view text,std::ostream& war
  return c;
 }
 ControllerConfig load_controller_config(std::ostream& warnings){
+#ifdef _WIN32
+ auto path=platform::user_data_root()/"config"/"controller.ini";
+#else
  const char* xdg=std::getenv("XDG_CONFIG_HOME");const char* home=std::getenv("HOME");
  if((!xdg||!*xdg)&&(!home||!*home))return {};
  auto path=(xdg&&*xdg?std::filesystem::path(xdg):std::filesystem::path(home)/".config")/"kabus22/controller.ini";
+#endif
+#if K22_UWP
+ // Xbox: the controller is the only input and no one can author controller.ini on the console, so absent means modern mode
+ // with the default bindings (triggers aim/fire); an uploaded controller.ini with mode=original restores the raw layout.
+ std::error_code error;if(!std::filesystem::is_regular_file(path,error)){ControllerConfig modern;modern.modern=true;return modern;}
+#else
  std::error_code error;if(!std::filesystem::is_regular_file(path,error))return {}; // Absent ⇒ original mode.
+#endif
  if(std::filesystem::file_size(path,error)>65536||error){warnings<<"kabus22: controller.ini too large or unreadable; using original mode\n";return {};}
  std::ifstream in(path,std::ios::binary);std::string text(std::istreambuf_iterator<char>(in),{});
  if(!in.good()&&!in.eof()){warnings<<"kabus22: cannot read controller.ini; using original mode\n";return {};}

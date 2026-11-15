@@ -1078,7 +1078,11 @@ void Engine::update_input(Runtime& runtime){auto edge=[&](Value fn,int code){if(
  if(input.quit){auto close=global("on_close"_sym);if(close.kind==Value::Kind::Function)edge(close,0);else quit=true;}if(renderer&&state.profile==SemanticProfile::CampaignA6)renderer->set_mouse_mode(number("mouse_mode"_sym)!=0,number("mouse_mode"_sym)==0&&(number("enable_mouse"_sym)!=0||firstPersonActive_));}
 void Engine::tick(Runtime& runtime,const Input& in){ensure_font_palette(runtime.compiler_settings().entry);input=in;{const double scale=in.dt*number("fps_max"_sym);if(scale>=0&&scale<0.98){emitFrameCarry_+=scale;emitFrame_=emitFrameCarry_>=1;if(emitFrame_)emitFrameCarry_-=1;}else emitFrame_=true;}if(!std::isfinite(in.dt))throw std::runtime_error("nonfinite native frame duration");auto seconds=std::clamp(in.dt,0.0,1.0);time_+=std::max(0.0,in.dt);auto frameRaw=std::max<std::int32_t>(1,Value::from_double(seconds*16).raw());set_global("time_frame"_sym,Value::from_raw(frameRaw));set_global("total_ticks"_sym,Value::from_raw(std::bit_cast<std::int32_t>(global("total_ticks"_sym).bits+std::uint32_t(frameRaw))));set_global("total_secs"_sym,Value::from_double(time_));set_global("total_frames"_sym,Value::from_int(global("total_frames"_sym).integer()+1));set_global("fps"_sym,Value::from_double(seconds?1/seconds:0));
  // A6 00414650 (004146e0-004147fb): every main-loop pass copies localtime into SYS_*; DOW is Monday=1..Sunday=7, DOY 1-based.
+#ifdef _WIN32
+ {const auto now=std::time(nullptr);std::tm t{};localtime_s(&t,&now);for(auto [name,value]:{std::pair{"sys_seconds",t.tm_sec},{"sys_minutes",t.tm_min},{"sys_hours",t.tm_hour},{"sys_day",t.tm_mday},{"sys_month",t.tm_mon+1},{"sys_year",t.tm_year+1900},{"sys_dow",(t.tm_wday+6)%7+1},{"sys_doy",t.tm_yday+1}})set_global(name,Value::from_int(value));}
+#else
  {const auto now=std::time(nullptr);std::tm t{};localtime_r(&now,&t);for(auto [name,value]:{std::pair{"sys_seconds",t.tm_sec},{"sys_minutes",t.tm_min},{"sys_hours",t.tm_hour},{"sys_day",t.tm_mday},{"sys_month",t.tm_mon+1},{"sys_year",t.tm_year+1900},{"sys_dow",(t.tm_wday+6)%7+1},{"sys_doy",t.tm_yday+1}})set_global(name,Value::from_int(value));}
+#endif
  // Single player: the lowest connected controller slot feeds the original joystick globals (a pad replugged into slot 1 takes over);
  // coop: P1's pad only (none when the only pad is P2's), docs/COOP.md "Controllers".
 legacyPad=coop.active?coop_pad(0):in.controllerConnected[0]?0:in.controllerConnected[1]?1:0;
@@ -1142,7 +1146,7 @@ Value Engine::builtin(Runtime& runtime,ProcessContext& ctx,std::string_view name
  ensure_font_palette(runtime.compiler_settings().entry);
  display_admitted();
  if(callId=="k22_body_player"_sym)return Value::from_int(coop.active?coop.characters[runtime.active_bank()]:body_character()); // coop: the running bank's player
- if(callId=="k22_coop_game_over"_sym||callId=="k22_coop_enter"_sym)return coop_read(runtime,name); // native/coop.cpp
+ if(callId=="k22_coop_game_over"_sym||callId=="k22_coop_enter"_sym||callId=="k22_coop_esc"_sym)return coop_read(runtime,name); // native/coop.cpp
  if(callId=="k22_menu_player"_sym)return Value::from_int(menu_character());
  if(callId=="k22_weapon_player"_sym)return Value::from_int(weapon_character());
  if(callId=="k22_body_oyuncu_pasif"_sym||callId=="k22_body_koruyucu_pasif"_sym){ // a locked body obeys the story character's control gate
@@ -1247,7 +1251,10 @@ Value Engine::builtin(Runtime& runtime,ProcessContext& ctx,std::string_view name
  throw std::runtime_error("unsupported native engine builtin: "+std::string(name));}
 }
 
+#include "platform.hpp"
+#ifndef _WIN32
 #include <fcntl.h>
+#endif
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -1262,10 +1269,12 @@ Value Engine::builtin(Runtime& runtime,ProcessContext& ctx,std::string_view name
 #include <iostream>
 #include <limits>
 #include <numbers>
+#ifndef _WIN32
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#endif
 namespace k22 {
 namespace {
 constexpr double svc_pi=std::numbers::pi;
@@ -1276,7 +1285,7 @@ std::filesystem::path svc_relative(std::string_view name){
  for(const auto& part:path)if(part=="..")throw std::runtime_error("private file traversal");return path.lexically_normal();
 }
 std::filesystem::path svc_private(const std::filesystem::path& root,const std::filesystem::path& relative){
- auto base=std::filesystem::weakly_canonical(root),target=std::filesystem::weakly_canonical(root/relative);auto match=std::mismatch(base.begin(),base.end(),target.begin(),target.end());if(match.first!=base.end())throw std::runtime_error("private file symlink escapes save directory");return target;
+ auto base=platform::weakly_canonical_path(root),target=platform::weakly_canonical_path(root/relative);auto match=std::mismatch(base.begin(),base.end(),target.begin(),target.end());if(match.first!=base.end())throw std::runtime_error("private file symlink escapes save directory");return target;
 }
 std::vector<std::uint8_t> svc_read_file(const std::filesystem::path& path){
  std::ifstream f(path,std::ios::binary|std::ios::ate);if(!f)throw std::runtime_error("cannot open private file: "+path.string());auto end=f.tellg();if(end<0||end>64*1024*1024)throw std::runtime_error("private file exceeds limit");std::vector<std::uint8_t> bytes(static_cast<std::size_t>(end));f.seekg(0);if(!bytes.empty()&&!f.read(reinterpret_cast<char*>(bytes.data()),static_cast<std::streamsize>(bytes.size())))throw std::runtime_error("cannot read private file: "+path.string());return bytes;
@@ -1297,18 +1306,40 @@ const Image& svc_bitmap(Engine& e,Value value){
 }
 std::string svc_json(std::string_view s){
  bool utf8=true;for(std::size_t i=0;i<s.size()&&utf8;){unsigned char c=s[i++];if(c<128)continue;unsigned count=c>=0xc2&&c<=0xdf?1:c>=0xe0&&c<=0xef?2:c>=0xf0&&c<=0xf4?3:0;if(!count||s.size()-i<count){utf8=false;break;}unsigned cp=c&((1u<<(6-count))-1);for(unsigned j=0;j<count;++j){unsigned char next=s[i++];if((next&0xc0)!=0x80){utf8=false;break;}cp=(cp<<6)|(next&63);}if(cp<(count==1?128u:count==2?2048u:65536u)||cp>0x10ffff||(cp>=0xd800&&cp<=0xdfff))utf8=false;}
+#ifdef _WIN32
+ // SDL's built-in iconv has no CP1254; the same result as SDL_iconv_string: undefined bytes skipped, text ends at a NUL.
+ std::string converted;if(!utf8){for(unsigned char c:s){if(!c)break;const char32_t cp=platform::cp1254_to_unicode(c);if(cp!=platform::cp1254Undefined)platform::append_utf8(converted,cp);}s=converted;}
+#else
  std::string converted;if(!utf8){char* bytes=SDL_iconv_string("UTF-8","CP1254",s.data(),s.size()+1);if(!bytes)throw std::runtime_error("Discord activity text cannot be decoded");converted=bytes;SDL_free(bytes);s=converted;}
+#endif
  std::string result="\"";for(unsigned char c:s){switch(c){case '"':result+="\\\"";break;case '\\':result+="\\\\";break;case '\n':result+="\\n";break;case '\r':result+="\\r";break;case '\t':result+="\\t";break;default:if(c<32){char b[7];std::snprintf(b,sizeof b,"\\u%04x",c);result+=b;}else result+=char(c);}}result+='"';return result;
 }
+#ifdef _WIN32
+void svc_disconnect(Engine& e){platform::named_pipe_close(e.discordSocket);e.discordSocket=-1;e.discordReady=false;e.discordActivitySent=false;e.discordInput.clear();}
+#else
 void svc_disconnect(Engine& e){if(e.discordSocket>=0)::close(e.discordSocket);e.discordSocket=-1;e.discordReady=false;e.discordActivitySent=false;e.discordInput.clear();}
+#endif
+#ifdef _WIN32
+unsigned long svc_pid(){return platform::process_id();}
+#else
+pid_t svc_pid(){return ::getpid();}
+#endif
 std::uint32_t svc_u32(const std::uint8_t* p){return std::uint32_t(p[0])|(std::uint32_t(p[1])<<8)|(std::uint32_t(p[2])<<16)|(std::uint32_t(p[3])<<24);}
 bool svc_send(Engine& e,std::uint32_t op,std::string_view json){
  if(e.discordSocket<0)return false;std::array<std::uint8_t,8> header{};for(int i=0;i<4;++i){header[i]=std::uint8_t(op>>(8*i));header[4+i]=std::uint8_t(json.size()>>(8*i));}
+#ifdef _WIN32
+ auto send_part=[&](const void* data,std::size_t size){return platform::named_pipe_write(e.discordSocket,data,size);};
+#else
  auto send_part=[&](const void* data,std::size_t size){const char* p=static_cast<const char*>(data);while(size){auto n=::send(e.discordSocket,p,size,MSG_NOSIGNAL);if(n>0){p+=n;size-=std::size_t(n);continue;}if(n<0&&errno==EINTR)continue;if(n<0&&(errno==EAGAIN||errno==EWOULDBLOCK)){pollfd fd{e.discordSocket,POLLOUT,0};if(::poll(&fd,1,100)>0&&(fd.revents&POLLOUT))continue;}return false;}return true;};
+#endif
  if(!send_part(header.data(),header.size())||!send_part(json.data(),json.size())){svc_disconnect(e);return false;}return true;
 }
 void svc_receive(Engine& e){
+#ifdef _WIN32
+ if(e.discordSocket<0)return;std::array<std::uint8_t,4096> chunk;for(;;){auto n=platform::named_pipe_read(e.discordSocket,chunk.data(),chunk.size());if(n>0){if(e.discordInput.size()+std::size_t(n)>1024*1024){svc_disconnect(e);return;}e.discordInput.insert(e.discordInput.end(),chunk.begin(),chunk.begin()+n);}else if(n==0)break;else{svc_disconnect(e);return;}}
+#else
  if(e.discordSocket<0)return;std::array<std::uint8_t,4096> chunk;for(;;){auto n=::recv(e.discordSocket,chunk.data(),chunk.size(),MSG_DONTWAIT);if(n>0){if(e.discordInput.size()+std::size_t(n)>1024*1024){svc_disconnect(e);return;}e.discordInput.insert(e.discordInput.end(),chunk.begin(),chunk.begin()+n);}else if(n==0){svc_disconnect(e);return;}else if(errno==EINTR)continue;else if(errno==EAGAIN||errno==EWOULDBLOCK)break;else{svc_disconnect(e);return;}}
+#endif
  std::size_t consumed=0;while(e.discordInput.size()-consumed>=8){auto* p=e.discordInput.data()+consumed;auto op=svc_u32(p),len=svc_u32(p+4);if(len>1024*1024){svc_disconnect(e);return;}if(e.discordInput.size()-consumed<8+len)break;std::string_view payload(reinterpret_cast<const char*>(p+8),len);if(op==2){svc_disconnect(e);return;}if(op==3){std::string pong(payload);if(!svc_send(e,4,pong))return;}else if(op==1){auto evt=payload.find("\"evt\"");if(evt!=std::string_view::npos){auto colon=payload.find(':',evt+5);if(colon!=std::string_view::npos){auto value=svc_trim(payload.substr(colon+1));if(value.starts_with("\"READY\""))e.discordReady=true;}}}else if(op!=4){svc_disconnect(e);return;}consumed+=8+len;}
  if(consumed)e.discordInput.erase(e.discordInput.begin(),e.discordInput.begin()+static_cast<std::ptrdiff_t>(consumed));
 }
@@ -1316,8 +1347,14 @@ bool svc_connect(Engine& e,std::string_view app){
  svc_receive(e);if(e.discordSocket>=0)return e.discordReady;
  for(char c:app)if(c<'0'||c>'9')throw std::runtime_error("invalid Discord application id");if(app.empty())throw std::runtime_error("empty Discord application id");
  auto now=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();if(std::uint64_t(now)<e.discordRetryAt)return false;e.discordRetryAt=std::uint64_t(now)+1000;
+#if defined(K22_UWP)
+ // Xbox has no Discord client to talk to: the feature reports what an absent Discord does, never connected.
+#elif defined(_WIN32)
+ for(int i=0;i<10;++i){int pipe=platform::named_pipe_open(L"\\\\.\\pipe\\discord-ipc-"+std::to_wstring(i));if(pipe<0)continue;e.discordSocket=pipe;e.discordApplication=app;if(!svc_send(e,0,"{\"v\":1,\"client_id\":"+svc_json(app)+"}"))continue;svc_receive(e);return e.discordReady;}
+#else
  std::array<const char*,5> roots{std::getenv("XDG_RUNTIME_DIR"),std::getenv("TMPDIR"),std::getenv("TMP"),std::getenv("TEMP"),"/tmp"};
  for(const char* root:roots){if(!root||!*root)continue;for(int i=0;i<10;++i){sockaddr_un addr{};addr.sun_family=AF_UNIX;std::string path=std::string(root)+"/discord-ipc-"+std::to_string(i);if(path.size()>=sizeof addr.sun_path)continue;std::memcpy(addr.sun_path,path.c_str(),path.size()+1);int fd=::socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0);if(fd<0)continue;int result=::connect(fd,reinterpret_cast<sockaddr*>(&addr),sizeof addr);if(result<0&&errno==EINPROGRESS){pollfd p{fd,POLLOUT,0};int error=0;socklen_t sz=sizeof error;result=(::poll(&p,1,100)>0&&::getsockopt(fd,SOL_SOCKET,SO_ERROR,&error,&sz)==0&&error==0)?0:-1;}if(result<0){::close(fd);continue;}e.discordSocket=fd;e.discordApplication=app;if(!svc_send(e,0,"{\"v\":1,\"client_id\":"+svc_json(app)+"}"))continue;svc_receive(e);return e.discordReady;}}
+#endif
  return false;
 }
 std::string svc_ini_normalize(std::string_view key,std::string_view value){
@@ -1421,7 +1458,7 @@ std::optional<Value> Engine::service_builtin(Runtime& runtime,ProcessContext&,st
  if(callId=="discordrpc_tryconnect"_sym){count(1);if(!pluginNative)throw std::runtime_error("Discord plugin service not opened");return Value::from_int(svc_connect(*this,text(0)));}
  if(callId=="discordrpc_isconnected"_sym){count(0);if(!pluginNative)throw std::runtime_error("Discord plugin service not opened");svc_receive(*this);return Value::from_int(discordReady);}
  if(callId=="discordrpc_trydisconnect"_sym){count(0);svc_disconnect(*this);return Value{};}
- if(callId=="discordrpc_setstatedetails"_sym){count(2);if(!pluginNative)throw std::runtime_error("Discord plugin service not opened");auto details=text(0),status=text(1);svc_receive(*this);if(!discordReady)return Value{};if(discordActivitySent&&details==discordDetails&&status==discordState)return Value::from_int(1);auto command="{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":"+std::to_string(::getpid())+",\"activity\":{\"details\":"+svc_json(details)+",\"state\":"+svc_json(status)+"}},\"nonce\":\""+std::to_string(discordNonce++)+"\"}";if(!svc_send(*this,1,command))return Value{};discordDetails=details;discordState=status;discordActivitySent=true;return Value::from_int(1);}
+ if(callId=="discordrpc_setstatedetails"_sym){count(2);if(!pluginNative)throw std::runtime_error("Discord plugin service not opened");auto details=text(0),status=text(1);svc_receive(*this);if(!discordReady)return Value{};if(discordActivitySent&&details==discordDetails&&status==discordState)return Value::from_int(1);auto command="{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":"+std::to_string(svc_pid())+",\"activity\":{\"details\":"+svc_json(details)+",\"state\":"+svc_json(status)+"}},\"nonce\":\""+std::to_string(discordNonce++)+"\"}";if(!svc_send(*this,1,command))return Value{};discordDetails=details;discordState=status;discordActivitySent=true;return Value::from_int(1);}
  if(callId=="key_pressed"_sym){
   count(1);int code=raw(0)>>10;
   if(code>=0&&code<127){

@@ -6,12 +6,19 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#ifdef _WIN32
+#include "platform.hpp"
+#include <windows.h>
+#else
 #include <fcntl.h>
+#endif
 #include <fstream>
 #include <iostream>
 #include <map>
 #include <stdexcept>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 namespace k22::saves {
 namespace {
 std::string lower(std::string_view s){std::string out(s);for(char& c:out)if(c>='A'&&c<='Z')c=char(c+32);return out;}
@@ -20,6 +27,19 @@ std::vector<std::uint8_t> read_bounded(const fs::path& path,std::uintmax_t limit
  std::vector<std::uint8_t> bytes(size);std::ifstream in(path,std::ios::binary);if(!in||(size&&!in.read(reinterpret_cast<char*>(bytes.data()),std::streamsize(size))))throw std::runtime_error("cannot read save file: "+path.string());return bytes;
 }
 }
+#ifdef _WIN32
+fs::path root(){return platform::user_data_root();}
+void write_atomic(const fs::path& target,std::span<const std::uint8_t> bytes){
+ fs::create_directories(target.parent_path());
+ auto temporary=target;temporary+=".tmp."+std::to_string(platform::process_id());
+ auto file=platform::open_file(temporary,GENERIC_WRITE,0,CREATE_ALWAYS);if(!file)throw std::runtime_error("cannot write private file: "+temporary.string());
+ auto fail=[&](const char* what){file.reset();std::error_code ignored;fs::remove(temporary,ignored);throw std::runtime_error(what+temporary.string());};
+ if(!platform::write_all(file,bytes.data(),bytes.size()))fail("private file write failed: ");
+ if(!platform::flush(file))fail("private file sync failed: ");file.reset();
+ // MOVEFILE_WRITE_THROUGH: the rename is durable on return, the POSIX directory fsync.
+ if(!platform::replace(temporary,target)){std::error_code ignored;fs::remove(temporary,ignored);throw std::runtime_error("cannot replace private file: "+target.string());}
+}
+#else
 fs::path root(){
  auto* base=std::getenv("XDG_DATA_HOME");if(base&&*base)return fs::path(base)/"kabus22";
  auto* home=std::getenv("HOME");if(!home||!*home)throw std::runtime_error("HOME or XDG_DATA_HOME required for private saves");return fs::path(home)/".local/share/kabus22";
@@ -32,6 +52,7 @@ void write_atomic(const fs::path& target,std::span<const std::uint8_t> bytes){
  fs::rename(temporary,target);
  int dir=::open(target.parent_path().c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC);if(dir<0||::fsync(dir)!=0){if(dir>=0)::close(dir);throw std::runtime_error("private directory sync failed: "+target.parent_path().string());}::close(dir);
 }
+#endif
 int slot_number(std::string_view name){
  auto n=lower(name);if(!n.starts_with("kayit")||!n.ends_with(".sav")||n.size()<10||n.size()>11)return -1;auto digits=std::string_view(n).substr(5,n.size()-9);
  if(digits.size()>1&&digits.front()=='0')return -1;int slot=-1;auto [p,e]=std::from_chars(digits.data(),digits.data()+digits.size(),slot);return e==std::errc{}&&p==digits.data()+digits.size()&&slot>=0&&slot<99?slot:-1;
@@ -44,7 +65,11 @@ void backup(const fs::path& root,const fs::path& relative,int keep){
  for(int n=keep-1;n>=1;--n)if(fs::exists(fs::symlink_status(numbered(n))))fs::rename(numbered(n),numbered(n+1));
  write_atomic(numbered(1),read_bounded(source,64*1024*1024));
 }
+#ifdef _WIN32
+std::string now_utc(){auto t=std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());std::tm tm{};::gmtime_s(&tm,&t);char text[32];std::strftime(text,sizeof text,"%Y-%m-%dT%H:%M:%SZ",&tm);return text;}
+#else
 std::string now_utc(){auto t=std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());std::tm tm{};::gmtime_r(&t,&tm);char text[32];std::strftime(text,sizeof text,"%Y-%m-%dT%H:%M:%SZ",&tm);return text;}
+#endif
 std::string fnv1a64(std::span<const std::uint8_t> bytes){std::uint64_t h=0xcbf29ce484222325ull;for(auto b:bytes){h^=b;h*=0x100000001b3ull;}char text[17];std::snprintf(text,sizeof text,"%016llx",static_cast<unsigned long long>(h));return text;}
 std::string format_meta(const Meta& m){
  auto clean=[](std::string v){for(char& c:v)if(c=='\n'||c=='\r')c=' ';return v;};

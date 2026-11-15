@@ -279,14 +279,25 @@ inline float inverse_tone_map(float gammaValue){
 inline Color inverse_tone_map(Color c){return {inverse_tone_map(c.r),inverse_tone_map(c.g),inverse_tone_map(c.b),c.a};}
 // Blinn-Phong power to GGX roughness (Walter et al. alpha=sqrt(2/(n+2)), roughness=sqrt(alpha)); legacy matte default.
 inline float legacy_roughness(float power){return power>0?std::clamp(std::sqrt(std::sqrt(2/(power+2))),0.05f,1.f):0.8f;}
-// Backend bits for option availability: OpenGL, Vulkan raster, Vulkan ray query.
-constexpr unsigned backendOpenGL=1,backendRaster=2,backendRT=4,backendVulkan=6,backendAll=7;
-inline unsigned backend_bit(std::string_view backend){return backend=="opengl"?backendOpenGL:backend=="vulkan-raster"?backendRaster:backend=="vulkan-rt"?backendRT:0;}
+// Backend bits for option availability: OpenGL, Vulkan raster, Vulkan ray query, Direct3D 12 (admits exactly OpenGL's options).
+constexpr unsigned backendOpenGL=1,backendRaster=2,backendRT=4,backendVulkan=6,backendD3D12=8,backendAll=15;
+inline unsigned backend_bit(std::string_view backend){return backend=="opengl"?backendOpenGL:backend=="vulkan-raster"?backendRaster:backend=="vulkan-rt"?backendRT:backend=="d3d12"?backendD3D12:0;}
+inline std::string_view backend_label(RendererBackend b){return b==RendererBackend::OpenGL?"OpenGL":b==RendererBackend::Vulkan?"Vulkan":"Direct3D 12";}
+// --renderer / --graphics backend default: Direct3D 12 where it is compiled in (Windows), else OpenGL.
+#if K22_HAVE_D3D12
+inline constexpr std::string_view defaultBackend="d3d12";
+#else
+inline constexpr std::string_view defaultBackend="opengl";
+#endif
 // `restricted` names one value that only works on `restrictedBackends` (shadows=rt).
 struct GraphicsOption { std::string_view key,label,fallback; std::array<std::string_view,11> values; std::size_t count; unsigned backends{backendAll}; std::string_view restricted{}; unsigned restrictedBackends{}; };
 // Every implemented --graphics key. Backend availability is probed separately.
-inline constexpr std::array<GraphicsOption,22> graphicsOptions{{
+inline constexpr std::array<GraphicsOption,21> graphicsOptions{{
+#if K22_HAVE_D3D12
+    {"backend","Rendering backend","d3d12",{"opengl","vulkan-raster","vulkan-rt","d3d12"},4},
+#else
     {"backend","Rendering backend","opengl",{"opengl","vulkan-raster","vulkan-rt"},3},
+#endif
     {"pbr","PBR materials (HDR + tone mapping)","0",{"0","1"},2},
     {"anisotropy","Anisotropic filtering","8",{"1","2","4","8","16"},5},
     {"msaa","MSAA samples","4",{"1","2","4","8"},4},
@@ -299,7 +310,6 @@ inline constexpr std::array<GraphicsOption,22> graphicsOptions{{
     {"ssao","Screen-space ambient occlusion","0",{"0","1"},2},
     {"fxaa","FXAA anti-aliasing","0",{"0","1"},2},
     {"taa","Temporal anti-aliasing","0",{"0","1"},2,backendVulkan},
-    {"volumetric_fog","Volumetric fog light scattering","0",{"0","1"},2},
     {"smooth_normals","Smooth vertex normals (raster and ray tracing)","0",{"0","1"},2,backendVulkan},
     {"tessellation","PN-triangle tessellation of models","0",{"0","1"},2,backendVulkan},
     {"texture_upscale","Edge-aware 2x texture upscaling","0",{"0","1"},2,backendVulkan},
@@ -310,7 +320,7 @@ inline constexpr std::array<GraphicsOption,22> graphicsOptions{{
     // Engine (not renderer) option like fps_limit: every preset keeps it on; off = the original LevelYukle fade (docs/SEAMLESS_DOORS.md).
     {"seamless_doors","Seamless doors (next zone visible through the open door, no fade)","on",{"on","off"},2}}};
 struct GraphicsSettings {
-    std::string backend{"opengl"};
+    std::string backend{defaultBackend};
     bool pbr{},texturePacks{},explicitPacks{};
     int anisotropy{},msaa{}; // 0 keeps the legacy/script-controlled default exactly.
     int fpsLimit{}; // 0 = script fps_max, -1 = unlimited.
@@ -320,7 +330,7 @@ struct GraphicsSettings {
 inline GraphicsSettings resolve_graphics(std::string_view preset,std::span<const std::pair<std::string,std::string>> overrides){
     GraphicsSettings g;auto&f=g.features;
     if(preset=="enhanced"){g.backend="vulkan-raster";g.anisotropy=16;g.msaa=4;g.texturePacks=true;f.shadows=ShadowMode::ShadowMap;f.ssao=f.fxaa=true;f.smoothNormals=f.tessellation=f.upscale=f.sharpen=true;}
-    else if(preset=="ultra"){g.backend="vulkan-rt";g.anisotropy=16;g.msaa=4;g.texturePacks=true;g.pbr=true;f.shadows=ShadowMode::RayTraced;f.gi=f.roughReflections=f.denoise=f.bloom=f.taa=f.fog=true;f.smoothNormals=f.tessellation=f.upscale=f.sharpen=true;f.fsr=2;}
+    else if(preset=="ultra"){g.backend="vulkan-rt";g.anisotropy=16;g.msaa=4;g.texturePacks=true;g.pbr=true;f.shadows=ShadowMode::RayTraced;f.gi=f.roughReflections=f.denoise=f.bloom=f.taa=true;f.smoothNormals=f.tessellation=f.upscale=f.sharpen=true;f.fsr=2;}
     else if(preset!="original"&&preset!="custom")throw std::runtime_error("--preset requires original, enhanced, ultra or custom");
     for(const auto&[key,value]:overrides){
         auto option=std::find_if(graphicsOptions.begin(),graphicsOptions.end(),[&](const auto&o){return o.key==key;});
@@ -336,7 +346,7 @@ inline GraphicsSettings resolve_graphics(std::string_view preset,std::span<const
         else if(key=="fsr")f.fsr=std::uint8_t(std::find(option->values.begin(),option->values.end(),value)-option->values.begin());
         else if(key=="frame_generation")f.frameGeneration=value=="on";
         else if(key=="fps_limit")g.fpsLimit=value=="original"?0:value=="unlimited"?-1:std::stoi(value);
-        else if(key=="seamless_doors")g.seamlessDoors=value=="on";else f.fog=on;
+        else if(key=="seamless_doors")g.seamlessDoors=value=="on";
     }
     return g;
 }
@@ -360,12 +370,11 @@ inline GraphicsFeatures admit_features(GraphicsFeatures f,std::string_view backe
     return f;
 }
 // Preset-selected backends degrade along this chain with a stderr notice; explicit choices never do.
-inline std::string_view fallback_backend(std::string_view backend){return backend=="vulkan-rt"?"vulkan-raster":backend=="vulkan-raster"?"opengl":"";}
+inline std::string_view fallback_backend(std::string_view backend){return backend=="vulkan-rt"?"vulkan-raster":backend=="vulkan-raster"?defaultBackend:"";}
 // ---- Wave-2 effect helpers shared by OpenGL and Vulkan (CPU-tested in k22-render-check --policy). ----
 // Background views go through an offscreen composite (resolve, bloom, tone map, TAA, FXAA, sharpen) only when needed.
 inline bool composite_enabled(bool pbr,const GraphicsFeatures&f){return pbr||f.bloom||f.fxaa||f.taa||f.sharpen||f.fsr;}
-// Only shadows=shadowmap renders depth maps; volumetric fog reuses them then, and is unshadowed under shadows=rt
-// (no 7-pass depth render just for fog).
+// Only shadows=shadowmap renders depth maps.
 inline bool shadow_maps_enabled(const GraphicsFeatures&f){return f.shadows==ShadowMode::ShadowMap;}
 inline Matrix inverse(const Matrix&m){
     Matrix r{};

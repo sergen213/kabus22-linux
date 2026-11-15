@@ -36,6 +36,10 @@ Each release also carries `Kabus22-Linux-Installer-x86_64.AppImage.sources.tar.g
 
 Existing installations update from the launcher's **Updates** page (Check, then Apply). The launcher restarts into the new version.
 
+### Windows
+
+Windows 10/11 x64 players download `Kabus22-<version>-Windows-Setup-x64.exe` (per-user setup, no administrator rights) or the portable `kabus22-<version>-windows-x64.zip`. Setup reads the game data from your own ISO, setup `.exe` or installed game folder, like the Linux installer; the engine renders with Direct3D 12 or OpenGL. See [Windows](docs/WINDOWS.md).
+
 ## Requirements
 
 - x86-64 Linux with **glibc 2.38 or newer** and a graphical desktop.
@@ -135,6 +139,8 @@ For players:
 - [Character lock](docs/CHARACTER_LOCK.md) — playing as Demir, Ebru or Inzar throughout.
 - [Seamless doors](docs/SEAMLESS_DOORS.md) — walking through doors without a loading pause.
 - [Known issues](docs/KNOWN_ISSUES.md) — what is missing or not verified.
+- [Windows and Xbox](docs/XBOX.md) — Windows desktop build, Direct3D 12 backend, Xbox Series X|S Dev Mode package and deployment.
+- [Windows](docs/WINDOWS.md) — Windows setup and portable zip for players: game data import, saves, SmartScreen, licences.
 
 For contributors:
 

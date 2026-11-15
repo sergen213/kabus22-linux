@@ -18,7 +18,7 @@ layout(set=0,binding=0,std140) uniform Uniform {
     vec4 dataEffects; // x shadow maps on, y RT bits (1 shadows, 2 GI, 4 reflections signals of the primary view; 8 shadows=rt in every view), z sun shadow texel (world), w cube shadow light index.
     vec4 dataPass; // x pass (0 scene, 1 shadow caster, 2 G-buffer; effect passes: effect mode), y frame seed, zw texel size.
     vec4 dataCamera; // xyz camera forward, w near plane.
-    vec4 dataRange; // x far plane, yz fog start/end, w effect parameter.
+    vec4 dataRange; // x far plane, w effect parameter.
     mat4 dataPreviousModel; // Motion-vector pass: the entity's previous-frame model transform.
     // Seamless door (render.hpp DoorPortal): [0] doorway centre, w mode (0 none, 1 cut the current level's doorway, 2 door
     // world kept inside it), [1] wall normal, w half width, [2] right, w half height, [3] up.

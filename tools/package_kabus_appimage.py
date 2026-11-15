@@ -51,7 +51,7 @@ ODE_SHA = "05c0a0ea84c58c213d05e220adbc6559c473227505d5668a51493eed21b6c2f8"
 # Applied pinned-ODE modifications: source path -> (original, modified SHA-256, recipe, retained diff).
 ODE_MODIFICATIONS = {
     "ode/src/collision_trimesh_box.cpp": ("748b26ef299b6abeb0ddf23d910889673ecf18da01d34f6c94eedb69ccc72970",
-                                          "b4e81e712cd5c833e38d95287b4ce415bc8db32e20deacc2f9eae93b5c6ddd42",
+                                          "378f3d21e5e0317b91c13fbbd6a80a4a08d7d46010a1e963355362938d3faf9d",
                                           "cmake/KabusODEContact.cmake", "GenerateContact.patch"),
     "ode/src/lcp.cpp": ("76b3771a02736a29fa552ec49a163953420eb98aa98d8a3cbe0da21f5ed9d03c",
                         "3467227bf68f38e2ea72785006545a998672952994aca6158492018da9c5ddfa",

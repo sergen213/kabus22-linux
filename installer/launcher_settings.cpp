@@ -817,6 +817,11 @@ void selfCheck() {
             g.preset="enhanced";g.options={{"pbr","0","0"},{"fps_limit","original","original"},{"seamless_doors","off","on"}};back=parsePreferences(lc::merge(merged,lc::edits(g))); // outside custom only fps_limit/seamless_doors are the game's
             require(back.preset=="enhanced"&&back.graphics==decltype(back.graphics){{"rt_only","1"},{"pbr","1"},{"seamless_doors","off"}},"Engine edits outside the custom preset touched the custom set");
             require(parsePreferences(lc::merge("",lc::edits(g))).preset=="enhanced","Engine-created launcher.ini rejected");
+            // launcher.ini from before volumetric_fog was retired: the engine no longer lists it, so it launches without the key,
+            // and the game's next save deletes it under any preset.
+            {Preferences old=user;old.preset="custom";const auto text=encodePreferences(old)+"volumetric_fog=1\n";launch.preferences=parsePreferences(text);
+             require(std::count(launch.preferences.graphics.begin(),launch.preferences.graphics.end(),std::pair<std::string,std::string>{"volumetric_fog","1"})==1&&tail()==Args{"--renderer","opengl","--preset","custom","--graphics","msaa=8","--texture-pack","hd pack"},"Retired volumetric_fog key reached the engine command line");
+             const auto cleaned=lc::merge(text,lc::edits(g));require(cleaned.find("volumetric_fog")==std::string::npos&&parsePreferences(cleaned).graphics==decltype(back.graphics){{"msaa","8"},{"rt_only","1"},{"seamless_doors","off"}},"Engine save kept the retired volumetric_fog key");}
             const auto file=scratch/"config/kabus22/launcher.ini";lc::write(g,file,scratch);auto written=snapshot(file,true);require(written.bytes&&parsePreferences(*written.bytes).renderer=="vulkan-raster","Engine launcher.ini publication regression");
             {Fd held(privateLock(scratch));rejects([&]{lc::write(g,file,scratch);});} // the launcher's lock excludes the engine writer
             launch.preferences=saved;}

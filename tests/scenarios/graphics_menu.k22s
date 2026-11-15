@@ -37,10 +37,10 @@ press Up
 frames 2
 press Up
 frames 2
-assert $gfxrow == 26
+assert $gfxrow == 25
 press Up
 frames 2
-assert $gfxrow == 25 && $doors == 1
+assert $gfxrow == 24 && $doors == 1
 press Right
 frames 2
 assert $doors == 0

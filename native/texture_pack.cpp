@@ -18,7 +18,10 @@ extern "C" {
 #include <map>
 #include <stdexcept>
 #include <unordered_set>
+#include "platform.hpp"
+#ifndef _WIN32
 #include <iconv.h>
+#endif
 #include <thread>
 
 namespace k22 {
@@ -33,6 +36,17 @@ struct FrameFree { void operator()(AVFrame* p) const { av_frame_free(&p); } };
 struct PacketFree { void operator()(AVPacket* p) const { av_packet_free(&p); } };
 struct SwsFree { void operator()(SwsContext* p) const { sws_freeContext(p); } };
 // Original resource/material names are Windows-1254 bytes; index.tsv is UTF-8 with TSV control bytes replaced.
+#ifdef _WIN32
+std::string tsv_utf8(std::string_view name) {
+    std::string out;
+    for (unsigned char byte : name) {
+        if (byte < 0x20) { out += '_'; continue; }
+        const char32_t cp = platform::cp1254_to_unicode(byte);
+        if (cp == platform::cp1254Undefined) out += '?'; else platform::append_utf8(out, cp);
+    }
+    return out;
+}
+#else
 std::string tsv_utf8(std::string_view name) {
     std::string out;iconv_t converter = iconv_open("UTF-8", "WINDOWS-1254");
     if (converter == (iconv_t)-1) throw std::runtime_error("Windows-1254 conversion unavailable");
@@ -43,6 +57,7 @@ std::string tsv_utf8(std::string_view name) {
     }
     iconv_close(converter);return out;
 }
+#endif
 using Codec = std::unique_ptr<AVCodecContext, CodecFree>;
 using Frame = std::unique_ptr<AVFrame, FrameFree>;
 using Packet = std::unique_ptr<AVPacket, PacketFree>;
@@ -248,6 +263,9 @@ Image upscale_texture_2x(const Image& in, bool wrap) {
     return out;
 }
 
+#ifdef _WIN32
+fs::path texture_pack_root() { return platform::user_data_root() / "packs"; }
+#else
 fs::path texture_pack_root() {
     const char* xdg = std::getenv("XDG_DATA_HOME");
     if (xdg && *xdg && fs::path(xdg).is_absolute()) return fs::path(xdg) / "kabus22/packs";
@@ -255,6 +273,7 @@ fs::path texture_pack_root() {
     if (!home || !*home) throw std::runtime_error("HOME or XDG_DATA_HOME required for texture packs");
     return fs::path(home) / ".local/share/kabus22/packs";
 }
+#endif
 
 TexturePack load_texture_pack(const fs::path& directory) {
     TexturePack pack;
@@ -300,7 +319,7 @@ TexturePack load_texture_pack(const fs::path& directory) {
             raw.push_back({std::stoull(std::string(fields[0]), nullptr, 16), kind, std::string(fields[2])});
         }
         if (!hasName || !hasLicense) { pack.detail = "pack.txt: missing name or license"; return pack; }
-        const auto root = fs::canonical(directory);
+        const auto root = platform::canonical_path(directory);
         for (const auto& entry : raw) {
             auto reject = [&](const std::string& reason) {
                 std::cerr << "kabus22: texture pack " << pack.name << ": " << texture_key_hex(entry.key) << ' ' << kindNames[entry.kind] << ": " << reason << '\n';
@@ -309,7 +328,7 @@ TexturePack load_texture_pack(const fs::path& directory) {
             if (relative.empty() || relative.is_absolute() || relative.has_root_path()) { reject("path must be relative"); continue; }
             if (std::any_of(relative.begin(), relative.end(), [](const fs::path& part) { return part == ".."; })) { reject("path must not contain '..'"); continue; }
             if (lower(relative.extension().string()) != ".png") { reject("only .png files are accepted"); continue; }
-            auto file = fs::canonical(root / relative, ec);
+            auto file = platform::canonical_path(root / relative, ec);
             if (ec) { reject("missing file"); continue; }
             if (!inside(file, root) || file == root) { reject("path escapes pack directory"); continue; }
             if (!fs::is_regular_file(file, ec)) { reject("not a regular file"); continue; }
@@ -405,10 +424,10 @@ std::optional<PackTexture> TexturePackSet::find(const Image& original) const {
 }
 
 std::size_t dump_textures(const fs::path& data, bool bonus, const fs::path& output) {
-    const auto dataRoot = fs::canonical(data);
-    if (inside(fs::weakly_canonical(fs::absolute(output)), dataRoot)) throw std::runtime_error("dump output must not be inside the game data directory");
+    const auto dataRoot = platform::canonical_path(data);
+    if (inside(platform::weakly_canonical_path(fs::absolute(output)), dataRoot)) throw std::runtime_error("dump output must not be inside the game data directory");
     fs::create_directories(output);
-    const auto outputRoot = fs::canonical(output);
+    const auto outputRoot = platform::canonical_path(output);
     if (inside(outputRoot, dataRoot)) throw std::runtime_error("dump output must not be inside the game data directory");
     Assets assets(data, bonus);
     if (bonus) assets.mount("K22_mode.wrs");

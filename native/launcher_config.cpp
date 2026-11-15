@@ -6,17 +6,28 @@
 #include <cstring>
 #include <stdexcept>
 #include <thread>
+#ifdef _WIN32
+#include "platform.hpp"
+#include <system_error>
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 namespace k22::launcher_config {
 namespace fs = std::filesystem;
 namespace {
+#ifndef _WIN32
 struct Fd { int value; explicit Fd(int fd):value(fd){} ~Fd(){if(value>=0)::close(value);} Fd(const Fd&)=delete; Fd& operator=(const Fd&)=delete; };
+#endif
 std::string_view trim_left(std::string_view s){while(!s.empty()&&(s.front()==' '||s.front()=='\t'))s.remove_prefix(1);return s;}
 std::string_view trim_right(std::string_view s){while(!s.empty()&&(s.back()==' '||s.back()=='\t'||s.back()=='\r'||s.back()=='\n'))s.remove_suffix(1);return s;}
+#ifdef _WIN32
+std::string win32_error(){return std::system_category().message(int(GetLastError()));}
+#else
 fs::path xdg(const char* variable,const char* fallback){
     const char* v=std::getenv(variable);if(v&&*v&&fs::path(v).is_absolute())return v; // GLib ignores a relative XDG_* value
     const char* home=std::getenv("HOME");if(!home||!*home)throw std::runtime_error(std::string("HOME or ")+variable+" required for launcher.ini");
@@ -26,6 +37,7 @@ fs::path xdg(const char* variable,const char* fallback){
 void private_directories(const fs::path& path){
     fs::path at;for(const auto& part:fs::absolute(path).lexically_normal()){at/=part;if(::mkdir(at.c_str(),0700)!=0&&errno!=EEXIST)throw std::runtime_error("cannot create "+at.string()+": "+std::strerror(errno));}
 }
+#endif
 }
 std::string merge(std::string_view text,const std::vector<Edit>& edits){
     struct Line { std::string text, group, key; bool header{}, keyLine{}; };
@@ -69,10 +81,52 @@ std::vector<Edit> edits(const Graphics& g){
     for(const auto& [key,value,fallback]:g.options){
         if(key=="backend"||key=="texture_packs")continue;
         if(g.preset!="custom"&&key!="fps_limit"&&key!="seamless_doors")continue;
-        out.push_back({"Graphics",key,value==fallback?std::nullopt:std::optional<std::string>(value)});
+        // Xbox: uwp_main.cpp defaults an absent fps_limit to 120 (the console's refresh), so "original" must be written out.
+#if K22_UWP
+        const bool explicitValue=key=="fps_limit";
+#else
+        const bool explicitValue=false;
+#endif
+        out.push_back({"Graphics",key,value==fallback&&!explicitValue?std::nullopt:std::optional<std::string>(value)});
     }
+    for(auto key:retiredGraphicsKeys)out.push_back({"Graphics",std::string(key),std::nullopt});
     return out;
 }
+#ifdef _WIN32
+// %LOCALAPPDATA%\Kabus22\config\launcher.ini (UWP: LocalState\config); the lock beside the saves in the user data root.
+fs::path path(){return platform::user_data_root()/"config"/"launcher.ini";}
+fs::path lock_root(){return platform::user_data_root();}
+void write(const Graphics& g,const fs::path& file,const fs::path& lockRoot){
+    std::error_code created;fs::create_directories(lockRoot,created);if(created)throw std::runtime_error("cannot create "+lockRoot.string()+": "+created.message());
+    // The POSIX flock(.launcher.lock): LockFileEx over the whole file, released when the handle closes.
+    const auto lockPath=lockRoot/".launcher.lock";platform::FileStatus st{};
+    auto lock=platform::open_file(lockPath,GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,OPEN_ALWAYS);
+    if(!lock||!platform::file_status(lock,st)||st.directory||st.links!=1)throw std::runtime_error("unsafe launcher settings lock "+lockPath.string());
+    for(int attempt=0;;++attempt){OVERLAPPED whole{};if(LockFileEx(lock.get(),LOCKFILE_EXCLUSIVE_LOCK|LOCKFILE_FAIL_IMMEDIATELY,0,MAXDWORD,MAXDWORD,&whole))break;if(attempt==50)throw std::runtime_error("the launcher is applying settings; launcher.ini not updated");std::this_thread::sleep_for(std::chrono::milliseconds(20));}
+    std::string bytes;bool existed=false;
+    if(auto in=platform::open_file(file,GENERIC_READ,FILE_SHARE_READ,OPEN_EXISTING)){
+        // The launcher's snapshot() bounds: a regular file of at most 16 KiB.
+        if(!platform::file_status(in,st)||st.directory||st.size>16384)throw std::runtime_error("launcher.ini is not a bounded user-owned regular file: "+file.string());
+        bytes.resize(std::size_t(st.size));std::size_t offset=0;
+        while(offset<bytes.size()){auto n=platform::read_at(in,offset,bytes.data()+offset,bytes.size()-offset);if(n<=0)throw std::runtime_error("launcher.ini changed during reading");offset+=std::size_t(n);}
+        existed=true;
+    }else if(GetLastError()!=ERROR_FILE_NOT_FOUND&&GetLastError()!=ERROR_PATH_NOT_FOUND)throw std::runtime_error("cannot read "+file.string()+": "+win32_error());
+    const auto merged=merge(bytes,edits(g));
+    if(existed&&merged==bytes)return;
+    if(merged.size()>16384)throw std::runtime_error("launcher.ini would exceed the launcher's 16 KiB bound");
+    fs::create_directories(file.parent_path(),created);if(created)throw std::runtime_error("cannot create "+file.parent_path().string()+": "+created.message());
+    // mkostemp: a new uniquely named file (CREATE_NEW) beside the target.
+    fs::path temporary;platform::Handle out;
+    for(unsigned attempt=0;!out&&attempt<100;++attempt){temporary=file.parent_path()/(".launcher-"+std::to_string(platform::process_id())+"-"+std::to_string(GetTickCount64()+attempt));out=platform::open_file(temporary,GENERIC_WRITE,0,CREATE_NEW);if(!out&&GetLastError()!=ERROR_FILE_EXISTS)break;}
+    if(!out)throw std::runtime_error("cannot create a temporary launcher.ini: "+win32_error());
+    try{
+        if(!platform::write_all(out,merged.data(),merged.size()))throw std::runtime_error("cannot write launcher.ini");
+        if(!platform::flush(out))throw std::runtime_error("cannot synchronize launcher.ini");out.reset();
+        // MOVEFILE_WRITE_THROUGH: durable on return, the POSIX directory fsync.
+        if(!platform::replace(temporary,file))throw std::runtime_error("cannot publish launcher.ini: "+win32_error());
+    }catch(...){out.reset();std::error_code ignored;fs::remove(temporary,ignored);throw;}
+}
+#else
 fs::path path(){return xdg("XDG_CONFIG_HOME",".config")/"kabus22/launcher.ini";}
 fs::path lock_root(){return xdg("XDG_DATA_HOME",".local/share")/"kabus22";}
 void write(const Graphics& g,const fs::path& file,const fs::path& lockRoot){
@@ -103,4 +157,5 @@ void write(const Graphics& g,const fs::path& file,const fs::path& lockRoot){
     }catch(...){::unlink(temporary.c_str());throw;}
     Fd folder(::open(file.parent_path().c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC));if(folder.value<0||::fsync(folder.value)!=0)throw std::runtime_error("cannot synchronize "+file.parent_path().string());
 }
+#endif
 }

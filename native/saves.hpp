@@ -10,10 +10,11 @@
 #include <vector>
 namespace k22::saves {
 namespace fs=std::filesystem;
-// ${XDG_DATA_HOME:-~/.local/share}/kabus22; original scripts write kayitN.sav/kysd.sav/ftz.k22 relative to it
+// ${XDG_DATA_HOME:-~/.local/share}/kabus22 (Windows: platform::user_data_root(), %LOCALAPPDATA%\Kabus22 or UWP LocalState);
+// original scripts write kayitN.sav/kysd.sav/ftz.k22 relative to it
 // (patched K22Widescreen scripts use _data/saves/ for kayit/kysd).
 fs::path root();
-// temp + fsync + rename + directory fsync; never leaves a partial target.
+// temp + fsync + rename + directory fsync (Windows: FlushFileBuffers + MoveFileExW write-through); never leaves a partial target.
 void write_atomic(const fs::path&,std::span<const std::uint8_t>);
 int slot_number(std::string_view filename); // kayit<0-98>.sav (YukleMenu.wdl SLG_MaxKayit 99) or -1
 bool rotated(std::string_view filename);    // slot saves and the kysd.sav index keep backups

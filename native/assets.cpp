@@ -30,9 +30,14 @@ SOFTWARE.
 #include <tuple>
 #include <utility>
 #include <stdexcept>
+#include "platform.hpp"
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 namespace k22 {
 bool model_has_entity_skins(const Model& model) noexcept {
@@ -98,6 +103,50 @@ std::string safe_name(std::string_view value) {
     if(name.back()=='/') malformed("empty resource path component");
     return name;
 }
+#ifdef _WIN32
+// The POSIX openat walk on Windows: every component is opened itself (never through a reparse point) while its parent stays open
+// without FILE_SHARE_DELETE, so no ancestor can be renamed or replaced mid-walk.
+struct File {
+    platform::Handle handle;
+    File(const std::filesystem::path& root,const std::filesystem::path& path,bool=false) {
+        auto relative=path.lexically_relative(root); if(relative.empty()||relative.is_absolute()||relative.has_root_name()) malformed("resource outside root");
+        auto missing=[](DWORD error){return error==ERROR_FILE_NOT_FOUND||error==ERROR_PATH_NOT_FOUND||error==ERROR_ACCESS_DENIED;};
+        constexpr DWORD share=FILE_SHARE_READ|FILE_SHARE_WRITE;
+        platform::Handle parent=platform::open_file(root,GENERIC_READ,share,OPEN_EXISTING,true);
+        if(!parent) {
+            if(missing(GetLastError()))throw ResourceReadFailure("asset: cannot open data root");
+            malformed("cannot open data root");
+        }
+        auto at=root;
+        for(auto it=relative.begin();it!=relative.end();++it) {
+            if(*it==".."||*it==".")malformed("resource outside root");
+            auto next=it;++next;at/=*it;
+            platform::Handle child=platform::open_file(at,GENERIC_READ,share,OPEN_EXISTING,next!=relative.end());
+            if(!child) {
+                if(missing(GetLastError()))throw ResourceReadFailure("asset: cannot open resource: "+path.string());
+                malformed("cannot safely open resource: "+path.string());
+            }
+            parent=std::move(child);
+        }
+        handle=std::move(parent);
+    }
+    std::vector<uint8_t> bytes(uint64_t off,size_t size) const {
+        if(size>assetLimit) malformed("resource exceeds asset limit");
+        std::vector<uint8_t> result(size);size_t done=0;
+        while(done<size) { auto n=platform::read_at(handle,off+done,result.data()+done,size-done);if(n<=0)throw ResourceReadFailure("asset: truncated resource read");done+=size_t(n); }
+        return result;
+    }
+    std::vector<uint8_t> stable_bytes(size_t limit) const {
+        platform::FileStatus before{},after{};
+        if(!platform::file_status(handle,before)||before.directory||before.size>limit)
+            malformed("font source must be a bounded regular file");
+        auto result=bytes(0,size_t(before.size));
+        if(!platform::file_status(handle,after)||before.size!=after.size||before.written!=after.written||before.changed!=after.changed)
+            malformed("font source changed while reading");
+        return result;
+    }
+};
+#else
 struct File {
     int fd{-1};
     File(const std::filesystem::path& root,const std::filesystem::path& path,bool stable=false) {
@@ -141,6 +190,7 @@ struct File {
         return result;
     }
 };
+#endif
 uint32_t big32(std::span<const uint8_t> s) {return(uint32_t(s[0])<<24)|(uint32_t(s[1])<<16)|(uint32_t(s[2])<<8)|s[3];}
 void charge(size_t& cache,size_t amount) {if(amount>cacheLimit-cache)malformed("decoded asset cache exceeds 1 GiB; release Assets before loading another game");cache+=amount;}
 void source_render_links(Model& model) {
@@ -195,7 +245,7 @@ void native_lightmap_ramp(std::array<uint8_t,256>& ramp,float gamma,bool inverte
 }
 }
 
-Assets::Assets(std::filesystem::path root,bool bonusProfile):root_(std::filesystem::canonical(root)),bonusProfile_(bonusProfile) {
+Assets::Assets(std::filesystem::path root,bool bonusProfile):root_(platform::canonical_path(root)),bonusProfile_(bonusProfile) {
     if(!std::filesystem::is_directory(root_))malformed("data root is not a directory");
     for(auto& entry:std::filesystem::recursive_directory_iterator(root_)) {
         if(entry.is_symlink())continue;
@@ -249,7 +299,7 @@ std::vector<std::string> Assets::names() const {
     std::sort(result.begin(),result.end());return result;
 }
 size_t Assets::add_mod(const std::filesystem::path& dataDir) {
-    auto root=std::filesystem::canonical(dataDir);std::unordered_map<std::string,std::filesystem::path> files;
+    auto root=platform::canonical_path(dataDir);std::unordered_map<std::string,std::filesystem::path> files;
     for(auto& entry:std::filesystem::recursive_directory_iterator(root)) {
         if(entry.is_symlink()||!entry.is_regular_file())continue;
         auto name=safe_name(entry.path().lexically_relative(root).generic_string());

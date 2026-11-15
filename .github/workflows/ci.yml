@@ -37,3 +37,7 @@ jobs:
         run: python3 tools/check_wrs2.py
       - name: Packaging policy self-check
         run: python3 tools/package_kabus_appimage.py --self-check
+  # Windows desktop build (MSVC + vcpkg, Direct3D 12 and OpenGL): artifacts kabus22-windows-x64 (portable zip) and
+  # kabus22-windows-setup-x64 (setup exe), docs/WINDOWS.md.
+  windows:
+    uses: ./.github/workflows/windows-build.yml

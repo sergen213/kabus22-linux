@@ -1,0 +1,108 @@
+# Coop Inzar+Inzar (docs/COOP.md "Inzar's spell menu"), New Game from 2 PLAYER, Start4 (Demir's story; P1's lock is Inzar). Both
+# players open the original KoruyucuMenu and choose their own spell (buyu_no is banked): P1 on the keyboard (M, arrows, Return) and
+# on its pad (two pads: P1 slot 0, P2 slot 1; raw JOY_4 = Key_Menu and JOY_2 = Key_Ates, the d-pad as the arrows), P2 on pad 1
+# (Start opens it in bank 1, d-pad, A/A choose, B or Start close). While P2's menu is open P1's M and Return do nothing.
+# Each casts the chosen spell and only its own mana falls by buyu_gereksinimi.
+realtime off
+pad 0 axis leftx 0
+pad 1 axis leftx 0
+wait until ParlaklikMenuAcik == 1 || AMP_YeniOyun.visible == 1 timeout 3600
+press-until Return ParlaklikMenuAcik == 0
+wait until AMP_YeniOyun.visible == 1 && AM_Cursor == 0 timeout 600
+frames 30
+press Up
+press Return
+wait until $coopmenu == 2 timeout 60
+# P1 Right, Right -> INZAR (keyboard); P2 joins on pad 1 (EBRU), d-pad right -> INZAR, A READY.
+press Right
+press Right
+pad 1 press a
+pad 1 press dpright
+assert $pick1 == 2 && $pick2 == 2
+pad 1 press a
+press Return
+wait until YMP_Normal.visible == 1 timeout 120
+press Return
+frames 300
+press Space
+wait until oyun_ilk_basladi == 1 timeout 600
+assert $coop == 1 && $coop1 == 2 && $coop2 == 2 && $character == 2
+wait until $level == "start4.wmb" && $movie == 1 timeout 7200
+frames 60
+press-until Return $movie == 0 && LY_AktifLevelID == 1 && level_yuklendi_ok == 1 && player != 0 timeout 1200
+wait until LY_AktifLevelID == 1 && level_yuklendi_ok == 1 && player != 0 && koruyucu_pasif == 0 timeout 3600
+wait until oyun_ilk_basladi == 0 && EnvaterAcilabilirmi == 1 timeout 600
+wait until $p2 != 0 timeout 600
+store p2 $p2
+frames 60
+assert $count(oyuncu_koruyucu) == 2 && $bank1(player) == @p2 && buyu_no == 2 && $bank1(buyu_no) == 2
+assert koruyucu_mana == 230 && $bank1(koruyucu_mana) == 230
+# P1, keyboard: M opens the spell menu on the current spell; Right x4 -> spell 6 (suzme), Return twice chooses it.
+press M
+wait until KOM_Acik == 1 timeout 120
+assert KOM_Cursor == 1 && freeze_mode == 1
+press-until Right KOM_Cursor == 5 timeout 300
+press-until Return KOM_Cursor1 == 0 timeout 120
+press-until Return KOM_Acik == 0 timeout 120
+assert buyu_no == 6 && $bank1(buyu_no) == 2 && freeze_mode == 0
+press Q 4
+wait until koruyucu_mana < 230 timeout 300
+assert koruyucu_mana == 230 - buyu_gereksinimi[6] && $bank1(koruyucu_mana) == 230
+frames 25
+capture coop_inzar_menu_p1_spell6
+frames 150
+# P2, pad 1: Start opens the menu in bank 1 (cursor on P2's spell 2); B closes it.
+pad 1 press start
+wait until KOM_Acik == 1 timeout 60
+assert KOM_Cursor == 1 && freeze_mode == 1
+capture coop_inzar_menu_p2_open
+pad 1 press b
+wait until KOM_Acik == 0 timeout 60
+assert $bank1(buyu_no) == 2 && freeze_mode == 0
+frames 10
+# Start toggles it closed as M does for P1.
+pad 1 press start
+wait until KOM_Acik == 1 timeout 60
+pad 1 press start
+wait until KOM_Acik == 0 timeout 60
+frames 10
+# Open again: P1's M and Return do not reach P2's menu; the d-pad moves to spell 4 (aduket), A, A choose it for P2 only.
+pad 1 press start
+wait until KOM_Acik == 1 timeout 60
+press M
+frames 10
+assert KOM_Acik == 1 && EM_Acik == 0
+press Return
+frames 10
+assert KOM_Cursor1 == -1
+pad 1 press-until dpright KOM_Cursor == 3 timeout 300
+pad 1 press-until a KOM_Cursor1 == 0 timeout 120
+pad 1 press-until a KOM_Acik == 0 timeout 120
+assert $bank1(buyu_no) == 4 && buyu_no == 6 && freeze_mode == 0 && EM_Acik == 0
+frames 10
+# P2 casts spell 4 with Y: P2's mana falls, P1's does not.
+store m1 koruyucu_mana
+store m2 $bank1(koruyucu_mana)
+pad 1 press y
+wait until $bank1(koruyucu_mana) < @m2 timeout 300
+assert $bank1(koruyucu_mana) == @m2 - buyu_gereksinimi[4] && koruyucu_mana == @m1
+frames 20
+capture coop_inzar_menu_p2_spell4
+frames 150
+# P1, pad 0 (original controller mode: the raw joystick of P1's pad): JOY_4 opens the menu, d-pad left x4 -> spell 2, JOY_2 twice.
+joy 0 pad 0
+joy 0 button 3 down
+wait until KOM_Acik == 1 timeout 60
+joy 0 button 3 up
+assert KOM_Cursor == 5
+pad 0 press-until dpleft KOM_Cursor == 1 timeout 300
+joy 0 button 1 down
+frames 3
+joy 0 button 1 up
+wait until KOM_Cursor1 == 0 timeout 60
+joy 0 button 1 down
+frames 3
+joy 0 button 1 up
+wait until KOM_Acik == 0 timeout 60
+assert buyu_no == 2 && $bank1(buyu_no) == 4 && EM_Acik == 0
+frames 30

@@ -42,7 +42,9 @@ int Engine::weapon_character()const{const int b=body_character(),w=int(number("A
 // spell menu everywhere; outside her own story the items are needed too, so there M cycles: closed → spell menu → (M) the spell
 // menu closes and the item inventory opens on the next frame (character_tick) → (M) closed. The three reads of one press see one
 // answer (latched until the next frame). The level-entry gate (:315, M not held) sees the story. Unlocked: Aktif_Player.
+// Coop: while P2's spell menu is open (coop_play) M opens nothing (no character matches).
 int Engine::menu_character(){
+ if(coopMenu_)return -1;
  const int s=story_character();
  if(characterLock<0||characterLock==s)return s;
  if(characterLock!=2)return s==2?characterLock:s;
@@ -76,10 +78,13 @@ void Engine::configure_characters(Runtime& runtime,int defaultLock){
  // strings; Action_Zaman[Aktif_Silah*20+n], 160), called from cinematic.wdl, BUL_Saat.wdl and kotu_koruyucu.wdl buyukes_koruses.
  // An Ebru body there may still hold her magnum (8): those reads see the pistol (1).
  runtime.reroute_reads("Aktif_Silah","k22_pose_weapon",posingFunctions);
- // Coop (native/coop.cpp, docs/COOP.md): the game over starts only when both players are down; P2's reload key is its pad's A.
- static constexpr std::array<std::string_view,1> gameOver{"game_over_strtr"};
+ // Coop (native/coop.cpp, docs/COOP.md): the game over starts only when both players are down; P2's reload key is its pad's A, and
+ // in P2's spell menu (KoruyucuMenu.wdl run in bank 1) Enter and Escape are its pad's A and B.
+ static constexpr std::array<std::string_view,1> gameOver{"game_over_strtr"},spellMenu{"KoruyucuMenu.wdl"};
  runtime.reroute_reads("game_over_start","k22_coop_game_over",gameOver);
  runtime.reroute_reads("key_enter","k22_coop_enter",{},{},demirEbruFiles);
+ runtime.reroute_reads("key_enter","k22_coop_enter",{},{},spellMenu);
+ runtime.reroute_reads("key_esc","k22_coop_esc",{},{},spellMenu);
  // The story swaps the inventories at its switches (DemirYedekle/EbruYedekle park the live one, DemirYukle/EbruYukle load one;
  // Ornek_Yasin.wdl:3957-4100, called from cinematic.wdl, LevelYonetim.wdl LevelYukle, seytan.wdl). While a locked body holds its own
  // firearms their weapon copies read their destination (k22_weapon_copy, a no-op copy); items and documents are copied as written.

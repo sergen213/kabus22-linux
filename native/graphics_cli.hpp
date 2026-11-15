@@ -1,5 +1,6 @@
 #pragma once
 // Contract D graphics command line: --list-capabilities, --dump-textures, --preset, --graphics, --texture-pack.
+#include "platform.hpp"
 #include "render.hpp"
 #include "render_policy.hpp"
 #include "texture_pack.hpp"
@@ -32,7 +33,7 @@ inline Request extract(int& argc,char** argv){
         auto value=[&]{if(i+1>=argc)throw std::runtime_error("missing value for "+std::string(a));return std::string(argv[++i]);};
         if(a=="--preset"){r.preset=value();r.active=true;}
         else if(a=="--graphics"){auto v=value();auto eq=v.find('=');if(eq==std::string::npos||!eq)throw std::runtime_error("--graphics requires KEY=VALUE");r.overrides.emplace_back(v.substr(0,eq),v.substr(eq+1));r.active=true;}
-        else if(a=="--texture-pack"){auto v=value();if(v.empty()||v.find('/')!=std::string::npos||v=="."||v=="..")throw std::runtime_error("--texture-pack requires a pack directory name");r.packs.push_back(v);r.active=true;}
+        else if(a=="--texture-pack"){auto v=value();if(v.empty()||v.find_first_of(platform::pathSeparators)!=std::string::npos||v=="."||v=="..")throw std::runtime_error("--texture-pack requires a pack directory name");r.packs.push_back(v);r.active=true;}
         else{if(a=="--renderer"||a=="--ray-tracing")r.rendererFlag=true;argv[kept++]=argv[i];}
     }
     argc=kept;argv[argc]=nullptr;
@@ -40,8 +41,21 @@ inline Request extract(int& argc,char** argv){
     if(r.rendererFlag&&r.backendOverride)throw std::runtime_error("--graphics backend conflicts with --renderer/--ray-tracing");
     return r;
 }
-inline void select_backend(RenderOptions&o,std::string_view backend){o.backend=backend=="opengl"?RendererBackend::OpenGL:RendererBackend::Vulkan;o.rayTracing=backend=="vulkan-rt";}
-inline std::string_view backend_name(const RenderOptions&o){return o.backend==RendererBackend::OpenGL?"opengl":o.rayTracing?"vulkan-rt":"vulkan-raster";}
+inline void select_backend(RenderOptions&o,std::string_view backend){o.backend=backend=="opengl"?RendererBackend::OpenGL:backend=="d3d12"?RendererBackend::D3D12:RendererBackend::Vulkan;o.rayTracing=backend=="vulkan-rt";}
+inline std::string_view backend_name(const RenderOptions&o){return o.backend==RendererBackend::OpenGL?"opengl":o.backend==RendererBackend::D3D12?"d3d12":o.rayTracing?"vulkan-rt":"vulkan-raster";}
+// Backends compiled into this build, in capability-listing order, with their option bits.
+struct BackendEntry { const char* name; RendererBackend backend; bool rayTracing; unsigned bit; };
+inline constexpr BackendEntry compiledBackends[]{
+#if K22_HAVE_OPENGL
+    {"opengl",RendererBackend::OpenGL,false,render_policy::backendOpenGL},
+#endif
+#if K22_HAVE_VULKAN
+    {"vulkan-raster",RendererBackend::Vulkan,false,render_policy::backendRaster},{"vulkan-rt",RendererBackend::Vulkan,true,render_policy::backendRT},
+#endif
+#if K22_HAVE_D3D12
+    {"d3d12",RendererBackend::D3D12,false,render_policy::backendD3D12},
+#endif
+};
 // No graphics option keeps RenderOptions untouched, so default behavior is exactly the original path.
 inline void apply(RenderOptions&o,Request&r){
     if(!r.active)return;
@@ -79,16 +93,15 @@ inline std::unique_ptr<Renderer> create(RenderOptions o,const Request&r){
 }
 inline int list_capabilities(){
     std::string out="{\"version\":"+json(K22_VERSION)+",\"backends\":{";
-    const std::array<std::pair<const char*,std::pair<RendererBackend,bool>>,3> backends{{{"opengl",{RendererBackend::OpenGL,false}},{"vulkan-raster",{RendererBackend::Vulkan,false}},{"vulkan-rt",{RendererBackend::Vulkan,true}}}};
-    for(std::size_t i=0;i<backends.size();++i){auto [available,detail]=Renderer::probe(backends[i].second.first,backends[i].second.second);out+=(i?",":"")+json(backends[i].first)+":{\"available\":"+(available?"true":"false")+",\"detail\":"+json(detail)+"}";}
+    for(std::size_t i=0;i<std::size(compiledBackends);++i){const auto&b=compiledBackends[i];auto [available,detail]=Renderer::probe(b.backend,b.rayTracing);out+=(i?",":"")+json(b.name)+":{\"available\":"+(available?"true":"false")+",\"detail\":"+json(detail)+"}";}
     out+="},\"presets\":[\"original\",\"enhanced\",\"ultra\",\"custom\"],\"options\":[";
     for(std::size_t i=0;i<render_policy::graphicsOptions.size();++i){
         const auto&o=render_policy::graphicsOptions[i];out+=std::string(i?",":"")+"{\"key\":"+json(o.key)+",\"values\":[";
         for(std::size_t v=0;v<o.count;++v)out+=(v?",":"")+json(o.values[v]);
         out+="],\"default\":"+json(o.fallback)+",\"backends\":[";bool firstBackend=true;
-        for(auto [bit,name]:{std::pair{render_policy::backendOpenGL,"opengl"},{render_policy::backendRaster,"vulkan-raster"},{render_policy::backendRT,"vulkan-rt"}})if(o.backends&bit){out+=std::string(firstBackend?"":",")+json(name);firstBackend=false;}
+        for(const auto&b:compiledBackends)if(o.backends&b.bit){out+=std::string(firstBackend?"":",")+json(b.name);firstBackend=false;}
         out+="]";
-        if(!o.restricted.empty()){out+=",\"value_backends\":{"+json(o.restricted)+":[";firstBackend=true;for(auto [bit,name]:{std::pair{render_policy::backendOpenGL,"opengl"},{render_policy::backendRaster,"vulkan-raster"},{render_policy::backendRT,"vulkan-rt"}})if(o.restrictedBackends&bit){out+=std::string(firstBackend?"":",")+json(name);firstBackend=false;}out+="]}";}
+        if(!o.restricted.empty()){out+=",\"value_backends\":{"+json(o.restricted)+":[";firstBackend=true;for(const auto&b:compiledBackends)if(o.restrictedBackends&b.bit){out+=std::string(firstBackend?"":",")+json(b.name);firstBackend=false;}out+="]}";}
         out+=",\"label\":"+json(o.label)+"}";
     }
     out+="],\"texture_packs\":[";bool first=true;

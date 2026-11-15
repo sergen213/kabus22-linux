@@ -15,14 +15,14 @@
 namespace k22 {
 
 enum class WindowMode { Windowed, Fullscreen, Borderless };
-enum class RendererBackend { OpenGL, Vulkan };
+enum class RendererBackend { OpenGL, Vulkan, D3D12 };
 struct WindowMetrics { int width{}, height{}, drawableWidth{}, drawableHeight{}; float scaleX{1}, scaleY{1}; };
 class TexturePackSet;
 enum class ShadowMode : std::uint8_t { Original, ShadowMap, RayTraced };
 // Wave-2 optional effects; all default off, so a default-constructed value is the original path.
 struct GraphicsFeatures {
     ShadowMode shadows{ShadowMode::Original};
-    bool gi{}, roughReflections{}, denoise{}, bloom{}, ssao{}, fxaa{}, taa{}, fog{};
+    bool gi{}, roughReflections{}, denoise{}, bloom{}, ssao{}, fxaa{}, taa{};
     // Vulkan-only visual upgrades: smoothed vertex normals, PN-triangle tessellation, load-time texture upscaling, sharpening.
     bool smoothNormals{}, tessellation{}, upscale{}, sharpen{};
     // AMD FSR 3.1.4 upscaling (Vulkan): 0 off, 1 native AA, 2 quality, 3 balanced, 4 performance, 5 ultra performance.

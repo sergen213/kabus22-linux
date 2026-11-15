@@ -2,6 +2,7 @@ name: Release
 # Tag vMAJOR.MINOR.PATCH[-pre] -> pinned AppImage assembly, signed update payload, DRAFT
 # GitHub release. Updaters ignore drafts: nothing is offered until the owner publishes
 # it after qualification. Never ships game assets (see docs/RELEASE_PROCESS.md).
+# The windows jobs build the Windows zip, setup exe and sources archive and attach them to the tag's release if it exists.
 on:
   push:
     tags: ["v*"]
@@ -86,3 +87,42 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" --draft --verify-tag $PRERELEASE \
             --title "Kabus22 Linux $VERSION" --notes "Draft: qualify, then publish. Channel: $CHANNEL." "$DIST"/*
+  # Windows desktop zip, setup exe and vcpkg sources archive (docs/WINDOWS.md). Independent of the Linux job, which cannot
+  # sign in CI: always kept as workflow artifacts, and attached to the tag's release once one exists (draft or published).
+  windows:
+    uses: ./.github/workflows/windows-build.yml
+    with:
+      version: ${{ github.ref_name }}
+      sources: true
+  windows-attach:
+    needs: windows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: kabus22-windows-*
+          path: windows-dist
+          merge-multiple: true
+      - name: Attach to the tag's release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -l windows-dist
+          for attempt in $(seq 10); do
+            if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+              gh release upload "$GITHUB_REF_NAME" windows-dist/* --clobber
+              # Add the Windows files to the release's SHA256SUMS (replacing earlier lines for the same names).
+              if gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS --dir sums; then
+                (cd windows-dist && sha256sum -- *) > windows.sums
+                awk 'NR == FNR { name = $0; sub(/^[0-9a-f]+  \*?/, "", name); windows[name] = 1; next }
+                     { name = $0; sub(/^[0-9a-f]+  \*?/, "", name); if (!(name in windows)) print }' windows.sums sums/SHA256SUMS > SHA256SUMS
+                cat windows.sums >> SHA256SUMS
+                gh release upload "$GITHUB_REF_NAME" SHA256SUMS --clobber
+              fi
+              exit 0
+            fi
+            sleep 60
+          done
+          echo "::notice::No release for $GITHUB_REF_NAME yet: publish it, then attach the Windows files (docs/RELEASE_PROCESS.md)."

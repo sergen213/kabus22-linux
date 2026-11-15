@@ -13,20 +13,27 @@
 #include <cstdio>
 #include <functional>
 #include <iostream>
+#include "platform.hpp"
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 namespace k22 {
 namespace {
 using render_policy::GraphicsOption;using render_policy::graphicsOptions;
-constexpr std::array<std::string_view,3> backendNames{"opengl","vulkan-raster","vulkan-rt"},backendLabels{"OPENGL","VULKAN","VULKAN RT"};
+// Only backends compiled into this build are listed (graphics_cli::compiledBackends); Engine::graphicsBackends_ holds three slots.
+constexpr std::size_t backendCount=std::size(graphics_cli::compiledBackends);
+static_assert(backendCount>=1&&backendCount<=3,"Engine::graphicsBackends_ holds three renderer slots");
+constexpr auto backendNames=[]{std::array<std::string_view,backendCount> n{};for(std::size_t i=0;i<backendCount;++i)n[i]=graphics_cli::compiledBackends[i].name;return n;}();
+constexpr auto backendLabels=[]{std::array<std::string_view,backendCount> n{};for(std::size_t i=0;i<backendCount;++i){const std::string_view b=backendNames[i];n[i]=b=="opengl"?"OPENGL":b=="vulkan-raster"?"VULKAN":b=="vulkan-rt"?"VULKAN RT":"DIRECT3D 12";}return n;}();
 constexpr std::array<std::string_view,4> presetNames{"original","enhanced","ultra","custom"};
 constexpr std::array<std::string_view,3> windowNames{"windowed","fullscreen","borderless"},windowLabels{"WINDOWED","FULLSCREEN","BORDERLESS"}; // WindowMode order
-enum Row : int {Renderer_,Preset,Window,Resolution,Vsync,Fps,Packs=24,Doors=25,Back=26};
+enum Row : int {Renderer_,Preset,Window,Resolution,Vsync,Fps,Packs=23,Doors=24,Back=25};
 struct RowInfo {std::string_view label,key;};
-constexpr std::array<RowInfo,27> rows{{{"RENDERER",{}},{"PRESET",{}},{"WINDOW MODE",{}},{"RESOLUTION",{}},{"VSYNC",{}},{"FRAME LIMIT","fps_limit"},
+constexpr std::array<RowInfo,26> rows{{{"RENDERER",{}},{"PRESET",{}},{"WINDOW MODE",{}},{"RESOLUTION",{}},{"VSYNC",{}},{"FRAME LIMIT","fps_limit"},
     {"AMD FSR","fsr"},{"FRAME GENERATION","frame_generation"},{"MSAA","msaa"},{"ANISOTROPIC FILTERING","anisotropy"},{"SHADOWS","shadows"},
     {"GLOBAL ILLUMINATION","gi"},{"REFLECTIONS","reflections"},{"DENOISE","denoise"},{"BLOOM","bloom"},{"AMBIENT OCCLUSION","ssao"},{"FXAA","fxaa"},
-    {"VOLUMETRIC FOG","volumetric_fog"},{"TAA","taa"},{"SHARPEN","sharpen"},{"SMOOTH NORMALS","smooth_normals"},{"TESSELLATION","tessellation"},
+    {"TAA","taa"},{"SHARPEN","sharpen"},{"SMOOTH NORMALS","smooth_normals"},{"TESSELLATION","tessellation"},
     {"TEXTURE UPSCALE","texture_upscale"},{"PBR MATERIALS","pbr"},{"TEXTURE PACKS",{}},{"SEAMLESS DOORS","seamless_doors"},{"BACK",{}}}};
 const GraphicsOption& option(std::string_view key){
     auto it=std::find_if(graphicsOptions.begin(),graphicsOptions.end(),[&](const auto& o){return o.key==key;});
@@ -44,7 +51,7 @@ std::string value_of(const render_policy::GraphicsSettings& g,std::string_view k
     if(key=="msaa")return g.msaa?std::to_string(g.msaa):std::string(option(key).fallback);
     if(key=="shadows")return f.shadows==ShadowMode::RayTraced?"rt":f.shadows==ShadowMode::ShadowMap?"shadowmap":"original";
     if(key=="gi")return b(f.gi);if(key=="reflections")return f.roughReflections?"rough":"original";if(key=="denoise")return b(f.denoise);
-    if(key=="bloom")return b(f.bloom);if(key=="ssao")return b(f.ssao);if(key=="fxaa")return b(f.fxaa);if(key=="taa")return b(f.taa);if(key=="volumetric_fog")return b(f.fog);
+    if(key=="bloom")return b(f.bloom);if(key=="ssao")return b(f.ssao);if(key=="fxaa")return b(f.fxaa);if(key=="taa")return b(f.taa);
     if(key=="smooth_normals")return b(f.smoothNormals);if(key=="tessellation")return b(f.tessellation);if(key=="texture_upscale")return b(f.upscale);if(key=="sharpen")return b(f.sharpen);
     if(key=="fsr")return std::string(option(key).values[f.fsr]);if(key=="frame_generation")return f.frameGeneration?"on":"off";
     if(key=="fps_limit")return g.fpsLimit==0?"original":g.fpsLimit<0?"unlimited":std::to_string(g.fpsLimit);
@@ -64,12 +71,24 @@ std::string shown(std::string_view key,std::string_view v){
 }
 // `kabus22 --list-capabilities` of this very binary: its hidden-window probes run in a child process, so they never touch this
 // process's GL context or SDL video state.
+#if defined(K22_UWP)
+std::string self_capabilities(){return {};} // a UWP app cannot start a child process
+#elif defined(_WIN32)
 std::string self_capabilities(){
-    char path[4096];auto n=::readlink("/proc/self/exe",path,sizeof path-1);if(n<=0)return {};
-    std::string command="'";for(char c:std::string_view(path,std::size_t(n)))command+=c=='\''?std::string("'\\''"):std::string(1,c);command+="' --list-capabilities 2>/dev/null";
+    const auto path=platform::executable_path();if(path.empty())return {};
+    // cmd /c strips the outer quote pair: ""C:\...\kabus22.exe" --list-capabilities 2>NUL"
+    const std::wstring command=L"\"\""+path.native()+L"\" --list-capabilities 2>NUL\"";
+    std::FILE* pipe=::_wpopen(command.c_str(),L"rb");if(!pipe)return {};
+    std::string out;char buffer[4096];for(std::size_t k;(k=std::fread(buffer,1,sizeof buffer,pipe))>0;)out.append(buffer,k);::_pclose(pipe);return out;
+}
+#else
+std::string self_capabilities(){
+    const auto path=platform::executable_path().string();if(path.empty())return {};
+    std::string command="'";for(char c:path)command+=c=='\''?std::string("'\\''"):std::string(1,c);command+="' --list-capabilities 2>/dev/null";
     std::FILE* pipe=::popen(command.c_str(),"r");if(!pipe)return {};
     std::string out;char buffer[4096];for(std::size_t k;(k=std::fread(buffer,1,sizeof buffer,pipe))>0;)out.append(buffer,k);::pclose(pipe);return out;
 }
+#endif
 }
 void Engine::configure_graphics(const RenderOptions& base,const RenderOptions& launched,std::string_view preset,std::span<const std::pair<std::string,std::string>> overrides){
     graphicsBase_=base;graphicsBase_.packs=nullptr;graphicsBase_.features={};graphicsPacks_=launched.packs;
@@ -78,7 +97,7 @@ void Engine::configure_graphics(const RenderOptions& base,const RenderOptions& l
     for(const auto& o:graphicsOptions)if(o.key!="backend"&&o.key!="texture_packs")c.values.emplace(std::string(o.key),value_of(g,o.key));
     c.vsync=launched.vsync||g.fpsLimit<0;c.packs=launched.packs!=nullptr; // unlimited turned vsync off (graphics_cli::apply); the choice is still on
     graphicsWant_=graphicsApplied_=c;fpsLimit=g.fpsLimit;graphicsConfigured_=true;
-    graphicsBackends_={-1,-1,-1};graphicsBackends_[std::size_t(std::find(backendNames.begin(),backendNames.end(),c.backend)-backendNames.begin())]=1;
+    for(std::size_t i=0;i<graphicsBackends_.size();++i)graphicsBackends_[i]=i<backendCount?-1:0;graphicsBackends_[std::size_t(std::find(backendNames.begin(),backendNames.end(),c.backend)-backendNames.begin())]=1;
 }
 // The launcher's command line for this choice (launcher_settings.cpp command()), resolved as graphics_cli::apply does; window and
 // title stay the current ones. Texture packs come from the launch (the launcher's checked packs), never rediscovered.
@@ -124,7 +143,7 @@ void Engine::graphics_step(Runtime& runtime,int row,int direction,bool wrap){
         for(int i=index,n=0;n<count;++n){i+=direction;if(i<0||i>=count){if(!wrap)return -1;i=(i%count+count)%count;}if(i==index)return -1;if(valid(i))return i;}return -1;};
     auto& w=graphicsWant_;auto& a=graphicsApplied_;
     if(row==Renderer_){
-        int i=next(3,int(std::find(backendNames.begin(),backendNames.end(),w.backend)-backendNames.begin()),[&](int k){return graphicsBackends_[std::size_t(k)]==1;});
+        int i=next(int(backendCount),int(std::find(backendNames.begin(),backendNames.end(),w.backend)-backendNames.begin()),[&](int k){return graphicsBackends_[std::size_t(k)]==1;});
         if(i>=0){w.backend=std::string(backendNames[std::size_t(i)]);graphics_renderer_changed();}return;
     }
     if(row==Preset){
@@ -212,7 +231,7 @@ bool Engine::graphics_menu_tick(Runtime& runtime,const Input& in){
     if(state.profile==SemanticProfile::CampaignA6&&!host){graphicsOpen_=false;graphics_update();return false;}
     if(graphicsProbe_.valid()&&graphicsProbe_.wait_for(std::chrono::seconds(0))==std::future_status::ready){
         const auto json=graphicsProbe_.get(); // graphics_cli::list_capabilities: "NAME":{"available":true|false,...}
-        for(std::size_t i=0;i<3;++i)if(graphicsBackends_[i]<0)graphicsBackends_[i]=json.find('"'+std::string(backendNames[i])+"\":{\"available\":true")!=std::string::npos;
+        for(std::size_t i=0;i<backendCount;++i)if(graphicsBackends_[i]<0)graphicsBackends_[i]=json.find('"'+std::string(backendNames[i])+"\":{\"available\":true")!=std::string::npos;
     }
     auto key=[&](std::initializer_list<SDL_Scancode> keys){return std::any_of(keys.begin(),keys.end(),[&](auto k){return bool(in.pressed[k]);});};
     auto sound=[&](std::string_view name){const auto s=global(name);if(!s.bits)return;ProcessContext context;std::array<Argument,3> args{{{s,{}},{Value::from_double(number("GA_Efekt")),{}},{Value{},{}}}};builtin(runtime,context,"snd_play",args);}; // Kabusdismenu.wdl DM_TusKontrol

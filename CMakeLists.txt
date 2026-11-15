@@ -4,6 +4,15 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 add_compile_definitions(K22_VERSION="${PROJECT_VERSION}")
+# Platform-independent engine sources; each platform adds its renderer backends and platform layer.
+set(K22_CORE_SOURCES native/engine.cpp native/wdl.cpp native/assets.cpp native/render.cpp
+  native/media.cpp native/physics.cpp native/texture_pack.cpp native/controller.cpp native/saves.cpp native/console.cpp native/save_menu.cpp native/graphics_menu.cpp native/launcher_config.cpp native/seamless_doors.cpp
+  native/character.cpp native/coop_menu.cpp native/coop.cpp native/mods.cpp native/model_gltf.cpp native/platform.cpp)
+if(WIN32)
+  # Windows desktop (OpenGL + Direct3D 12) and Xbox UWP Dev Mode (Direct3D 12): docs/XBOX.md.
+  include(cmake/KabusWindows.cmake)
+  return()
+endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
 pkg_check_modules(EPOXY REQUIRED IMPORTED_TARGET epoxy)
@@ -85,10 +94,9 @@ target_include_directories(kabus22_fsr3 SYSTEM PRIVATE "${K22_FFX}/sdk/include" 
 target_include_directories(kabus22_fsr3 PRIVATE native)
 target_compile_options(kabus22_fsr3 PRIVATE -include "${CMAKE_CURRENT_SOURCE_DIR}/third_party/k22-ffx-posix/k22_ffx_posix.h")
 install(FILES "${K22_FFX}/LICENSE.txt" DESTINATION share/doc/kabus22/third_party RENAME FidelityFX-SDK-LICENSE.txt)
-add_library(kabus22_core native/engine.cpp native/wdl.cpp native/assets.cpp native/render.cpp
-  native/render_gl.cpp native/render_vulkan.cpp native/render_vulkan_raster.cpp native/render_vulkan_rt.cpp native/vulkan_loader.cpp
-  native/media.cpp native/physics.cpp native/texture_pack.cpp native/controller.cpp native/saves.cpp native/console.cpp native/save_menu.cpp native/graphics_menu.cpp native/launcher_config.cpp native/seamless_doors.cpp
-  native/character.cpp native/coop_menu.cpp native/coop.cpp native/mods.cpp native/model_gltf.cpp "${K22_SHADER_HEADER}")
+add_library(kabus22_core ${K22_CORE_SOURCES}
+  native/render_gl.cpp native/render_vulkan.cpp native/render_vulkan_raster.cpp native/render_vulkan_rt.cpp native/vulkan_loader.cpp "${K22_SHADER_HEADER}")
+target_compile_definitions(kabus22_core PUBLIC K22_HAVE_OPENGL=1 K22_HAVE_VULKAN=1)
 target_include_directories(kabus22_core PUBLIC native PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${Vulkan_INCLUDE_DIRS})
 # cgltf v1.15 (MIT): mod glTF model import (native/model_gltf.cpp).
 target_include_directories(kabus22_core SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cgltf")
