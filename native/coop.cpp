@@ -21,9 +21,9 @@ constexpr std::array<std::string_view,6> playerFiles{"oyuncu2.wdl","oyuncu2_ebru
 // Enemy AI and its hit effects: they find "the player" only through `player` (klasik_yara.wdl:294-417, 1088-1094) and write its
 // hit globals; plus every *_yara.wdl.
 constexpr std::array<std::string_view,7> enemyFiles{"bond_bekci.wdl","boss.wdl","latex.wdl","seytan.wdl","kotu_koruyucu.wdl","efect2.wdl","klasik_generate.wdl"};
-// Read by enemies or written for the player by other scripts, not assigned in the player files.
-constexpr std::array<std::string_view,17> extra{"player","Key_Ileri","Key_Geri","Key_Sag","Key_Sol","Key_SilahKaldir","Key_Ates","Key_Kosma","Key_Menu",
- "Key_Harita","Key_Buyu","dmr_yaralan_tip","d_yaralan_source","koyucu_yaralan_tip","game_over_start","Aktif_Silah","player_morph_ok"};
+// Read by enemies or written for the player by other scripts, not assigned in the player files (buyu_no: KoruyucuMenu.wdl KOM_Kernel).
+constexpr std::array<std::string_view,18> extra{"player","Key_Ileri","Key_Geri","Key_Sag","Key_Sol","Key_SilahKaldir","Key_Ates","Key_Kosma","Key_Menu",
+ "Key_Harita","Key_Buyu","dmr_yaralan_tip","d_yaralan_source","koyucu_yaralan_tip","game_over_start","Aktif_Silah","player_morph_ok","buyu_no"};
 // Shared by both players although the player files write them: story gates, the inventory and its ammo pool, level state, time,
 // engine scratch and camera globals, and Inzar's effect-trail scratch arrays (47k elements: swapping them at every bank switch
 // cost ~1 ms a frame; ponytail: two Inzars swinging at once share trail buffers, bank them per entity if that ever matters)
@@ -34,9 +34,12 @@ constexpr std::array<std::string_view,40> shared{"oyuncu_pasif","koruyucu_pasif"
  "ucak_olum_ok","oyun_finish_start","cadde_yara_adet","v_dmryakalan_ok","unic_obje_dizi","boss_ebruhedefpan","result",
  "buyuparca_dizi","solsword_alt_dizi","solsword_ust_dizi","sagsword_alt_dizi","sagsword_ust_dizi","effectenerji1_alt_dizi","effectenerji1_ust_dizi",
  "effectenerji2_alt_dizi","effectenerji2_ust_dizi"};
-// Run only for P1: HUD panels (P2's HUD is native, coop_hud) and the inventory/spell menus (P2 has no menu key).
-constexpr std::array<std::string_view,7> p1Only{"PEM_Ac","PEM_Kapat","KVM_Ac","KVM_Kapat","EnvanterAcKapat","KoruyucuAcKapat","EM_Kernel"};
-enum Kind : std::int8_t {WorldSide,PlayerSide,EnemySide,P1Only};
+// Run only for P1: HUD panels (P2's HUD is native, coop_hud) and the inventory menu and M key (P2 has no menu key).
+constexpr std::array<std::string_view,6> p1Only{"PEM_Ac","PEM_Kapat","KVM_Ac","KVM_Kapat","EnvanterAcKapat","EM_Kernel"};
+// Inzar's spell menu runs in its caller's bank: P1's from EM_Kernel (bank 0), P2's from coop_play (bank 1), so it reads that
+// player's Key_*, health and mana and sets that player's buyu_no. Its panels, cursor and KOM_Acik are shared: one menu at a time.
+constexpr std::array<std::string_view,1> menuFiles{"KoruyucuMenu.wdl"};
+enum Kind : std::int8_t {WorldSide,PlayerSide,EnemySide,P1Only,MenuSide};
 bool listed(auto& list,std::string_view s){return std::any_of(list.begin(),list.end(),[&](auto x){return case_equal(x,s);});}
 }
 int Engine::coop_pad(int player)const{
@@ -52,13 +55,14 @@ int Engine::coop_resolve(Runtime& runtime,FunctionId f,ObjectId my,int inherited
  if(f>=coopKinds_.size())coopKinds_.resize(f+1,-1);
  auto& kind=coopKinds_[f];
  if(kind<0){const auto file=runtime.function_file(f);const auto name=runtime.function_name(f);
-  kind=listed(p1Only,name)||name.starts_with("BEM_")||name.starts_with("bem_")?P1Only:listed(playerFiles,file)?PlayerSide:listed(enemyFiles,file)||(file.size()>9&&case_equal(file.substr(file.size()-9),"_yara.wdl"))?EnemySide:WorldSide;}
+  kind=listed(p1Only,name)||name.starts_with("BEM_")||name.starts_with("bem_")?P1Only:listed(playerFiles,file)?PlayerSide:listed(menuFiles,file)?MenuSide:listed(enemyFiles,file)||(file.size()>9&&case_equal(file.substr(file.size()-9),"_yara.wdl"))?EnemySide:WorldSide;}
  const auto p1=[&]{auto v=runtime.bank_value(0,"player");return v.kind==Value::Kind::Object?v.bits:ObjectId{};};
  switch(kind){
   case PlayerSide:
    if(my&&my==coopP2_)return 1;if(my&&my==p1())return 0;
    return coopSpawn_>=0&&inherited==0?coopSpawn_:std::max(0,inherited); // a native spawn (coop_spawn) starts in its bank
   case P1Only:return inherited==1?Runtime::BankSkip:0;
+  case MenuSide:return coopSpawn_>=0&&inherited==0?coopSpawn_:std::max(0,inherited); // coop_play opens P2's in bank 1
   case EnemySide:{
    if(inherited!=Runtime::BankDynamic)return Runtime::BankDynamic;
    if(!my||!entities.contains(my))return 0;
@@ -71,7 +75,7 @@ int Engine::coop_resolve(Runtime& runtime,FunctionId f,ObjectId my,int inherited
 }
 void Engine::coop_banks(Runtime& runtime,bool on){
  if(on==coopBanks_)return;
- coopBanks_=on;coopKinds_.clear();coopOver_=coopHidden_=false;coopDown_={};coopLeash_=0;coopSettle_=0;rumbleEntity.fill(0);
+ coopBanks_=on;coopKinds_.clear();coopOver_=coopHidden_=coopMenu_=false;coopDown_={};coopLeash_=0;coopSettle_=0;rumbleEntity.fill(0);
  if(on)coopP2_=0;
  if(!on){ // coop ends: P2's body, gun and radio go (in the next level they are gone already), the globals are shared again
   if(const auto p2=coop_body(1)){for(auto name:{"a_Silah","a_Telsiz"})if(auto v=runtime.bank_value(1,name);v.kind==Value::Kind::Object&&v.bits&&v.bits!=runtime.bank_value(0,name).bits&&v.bits!=p2)remove_entity(runtime,v.bits);remove_entity(runtime,p2);}
@@ -90,11 +94,14 @@ void Engine::coop_banks(Runtime& runtime,bool on){
  std::string list;for(auto& n:names)list+=(list.empty()?"":" ")+n;
  std::cerr<<"kabus22: coop banks ("<<names.size()<<"): "<<list<<'\n';
 }
-// Native reads (character.cpp configure_characters): game_over_strtr's game_over_start, Demir's/Ebru's reload key.
+// Native reads (character.cpp configure_characters): game_over_strtr's game_over_start, Demir's/Ebru's reload key, the spell menu's
+// KEY_ENTER/KEY_ESC. In bank 1 the keys are P2's pad A/B (the keyboard and P1's pad are P1's).
 Value Engine::coop_read(Runtime& runtime,std::string_view call){
- if(call=="k22_coop_enter"){
-  if(!coop.active||runtime.active_bank()!=1)return global("key_enter");
-  const int pad=coop_pad(1);return Value::from_int(pad>=0&&(input.controllerButtons[pad][SDL_CONTROLLER_BUTTON_A]||input.controllerPressed[pad][SDL_CONTROLLER_BUTTON_A]));
+ if(call=="k22_coop_enter"||call=="k22_coop_esc"){
+  const bool esc=call=="k22_coop_esc";
+  if(!coop.active||runtime.active_bank()!=1)return global(esc?"key_esc":"key_enter");
+  const auto b=esc?SDL_CONTROLLER_BUTTON_B:SDL_CONTROLLER_BUTTON_A;
+  const int pad=coop_pad(1);return Value::from_int(pad>=0&&(input.controllerButtons[pad][b]||input.controllerPressed[pad][b]));
  }
  const auto own=global("game_over_start");if(!coop.active||!coopBanks_)return own;
  // Game over when both players are down, when one is down and the other has no living body to respawn beside, or for a
@@ -139,9 +146,9 @@ ObjectId Engine::coop_spawn(Runtime& runtime,int bank,ObjectId anchor,bool helpe
  if(bank==1){coopP2_=id;coopHidden_=false;}
  return id;
 }
-// P2 weapon choice (no inventory or spell menu for P2): d-pad right/left cycles the shared inventory's firearms the P2 body can
-// hold, the way EM_KuBiGoSMenu equips one (KuBiGoMenu.wdl:44-47: Aktif_Silah, Demir's gun model morphed to Silah_isimleri[Aktif_Silah]);
-// Inzar's spells 1-6 as KoruyucuMenu.wdl KOM_Kernel sets buyu_no (every spell is selectable there).
+// P2 weapon choice (no inventory for P2): d-pad right/left cycles the shared inventory's firearms the P2 body can hold, the way
+// EM_KuBiGoSMenu equips one (KuBiGoMenu.wdl:44-47: Aktif_Silah, Demir's gun model morphed to Silah_isimleri[Aktif_Silah]);
+// Inzar's spells 1-6 as KoruyucuMenu.wdl KOM_Kernel sets buyu_no (every spell is selectable there; her menu is in coop_play).
 void Engine::coop_weapon(Runtime& runtime){
  const int pad=coop_pad(1),c=coop.characters[1];if(pad<0||!coop_body(1))return;
  const bool next=input.controllerPressed[pad][SDL_CONTROLLER_BUTTON_DPAD_RIGHT],prev=input.controllerPressed[pad][SDL_CONTROLLER_BUTTON_DPAD_LEFT];
@@ -170,20 +177,35 @@ void Engine::coop_play(Runtime& runtime){
   if(!down(0)&&number("LY_AktifLevelID")==0){coop={};coop_banks(runtime,false);}
   return;
  }
- const double dt=std::clamp(input.dt,0.0,0.25);
+ const double dt=std::clamp(input.dt,0.0,0.25);bool menuPressed=false;
  // P2 input: bank 1's Key_* from P2's pad as Tuslari_Esitle (GenelAyarlar.wdl:103-119) sets bank 0's from P1's keys and
  // Joy_Takip's JOY_*: the modern mapping (controller.cpp apply_modern_controller: digital forward/back, analog turn, deadzone).
- {Input pad=input;const Vec3 force=apply_modern_controller(controller,pad,coop_pad(1),coopHeld_);
+ {Input pad=input;const int slot=coop_pad(1);const Vec3 force=apply_modern_controller(controller,pad,slot,coopHeld_);
   auto jt=global("GA_JTuslar");auto* table=jt.kind==Value::Kind::Object?state.get(jt.bits):nullptr;
-  auto button=[&](std::size_t j){const int n=table&&j<table->array.size()?int(table->array[j].value.real()):int(j)+1;return Value::from_int(n>=1&&n<=12&&pad.joystickButtons[0][std::size_t(n-1)]);};
-  const std::array<std::pair<std::string_view,Value>,10> keys{{{"Key_Ileri",Value::from_double(std::max(0.f,force.y/2))},{"Key_Geri",Value::from_double(std::max(0.f,-force.y/2))},
-   {"Key_Sag",Value::from_double(std::max(0.f,force.x/2))},{"Key_Sol",Value::from_double(std::max(0.f,-force.x/2))},{"Key_SilahKaldir",button(0)},{"Key_Ates",button(1)},
+  auto mapped=[&](std::size_t j){const int n=table&&j<table->array.size()?int(table->array[j].value.real()):int(j)+1;return n>=1&&n<=12?n:0;};
+  auto button=[&](std::size_t j){const int n=mapped(j);return Value::from_int(n&&pad.joystickButtons[0][std::size_t(n-1)]);};
+  // In P2's spell menu the d-pad steers it too, as the d-pad (the arrow keys) does P1's.
+  auto dpad=[&](SDL_GameControllerButton b){return coopMenu_&&slot>=0&&(pad.controllerButtons[slot][b]||pad.controllerPressed[slot][b])?1.f:0.f;};
+  const std::array<std::pair<std::string_view,Value>,10> keys{{{"Key_Ileri",Value::from_double(std::max({0.f,force.y/2,dpad(SDL_CONTROLLER_BUTTON_DPAD_UP)}))},
+   {"Key_Geri",Value::from_double(std::max({0.f,-force.y/2,dpad(SDL_CONTROLLER_BUTTON_DPAD_DOWN)}))},{"Key_Sag",Value::from_double(std::max({0.f,force.x/2,dpad(SDL_CONTROLLER_BUTTON_DPAD_RIGHT)}))},
+   {"Key_Sol",Value::from_double(std::max({0.f,-force.x/2,dpad(SDL_CONTROLLER_BUTTON_DPAD_LEFT)}))},{"Key_SilahKaldir",button(0)},{"Key_Ates",button(1)},
    {"Key_Kosma",button(2)},{"Key_Menu",Value{}},{"Key_Harita",Value{}},{"Key_Buyu",button(5)}}};
-  for(auto& [name,value]:keys)runtime.set_bank_value(1,name,value);}
- coop_weapon(runtime);
+  for(auto& [name,value]:keys)runtime.set_bank_value(1,name,value);
+  const int menu=mapped(3);menuPressed=menu&&pad.joystickPressed[0][std::size_t(menu-1)];}
  rumbleEntity.fill(0);if(const int pad=coop_pad(1);pad>=0)rumbleEntity[std::size_t(pad)]=coop_body(1);
  const ObjectId p1=coop_body(0),p2=coop_body(1);
  auto live=[&](ObjectId id){return id&&field(id,"skill1")>0;};
+ // P2 Inzar's spell menu: P2's menu button (GA_JTuslar[3], Start by default) toggles the original KoruyucuMenu in bank 1, as
+ // EM_Kernel (Envantermenu.wdl:329-337) does for P1's M. Not over another menu or a cutscene; P1's M does nothing while it is open
+ // (menu_character). It closes on a choice, B or LB (Esc), or the menu button again.
+ if(coopMenu_&&number("KOM_Acik")==0)coopMenu_=false;
+ if(menuPressed&&coop.characters[1]==2&&live(p2)&&!down(1)&&!coopHidden_&&(coopMenu_||(number("EnvaterAcilabilirmi")!=0&&number("DM_Acik")==0&&number("STM_Acik")==0&&
+   number("EM_Acik")==0&&number("KOM_Acik")==0&&number("freeze_mode")==0))){
+  coopMenu_=!coopMenu_;coopSpawn_=1;
+  try{runtime.start("KoruyucuAcKapat");}catch(...){coopSpawn_=-1;throw;}
+  coopSpawn_=-1;
+ }
+ if(!coopMenu_)coop_weapon(runtime);
  if(!down(0)&&!down(1))coopLevelOk_=number("level_yuklendi_ok")!=0;
  // Death: the dead player's body stays down ~5 s, then that player respawns beside the living partner with full health.
  for(int b=0;b<2;++b){
@@ -223,9 +245,10 @@ bool Engine::coop_shove(ObjectId mover,ObjectId body,Vec3 by){
  set_position(body,h.position);return true;
 }
 // P2's HUD, top-right: PlayerEnerji_Menu.wdl PEM_Ac (Demir, Ebru: energy ring and heart) or KoruViewMenu.wdl KVM_Ac (Inzar: health,
-// mana, spell), mirrored from P1's top-left corner, from the same BMAPs and P2's own values. Shown while P1's HUD is.
+// mana, spell), mirrored from P1's top-left corner, from the same BMAPs and P2's own values. Shown while P1's HUD is, hidden under the
+// spell menu (KoruyucuMenu.wdl KOM_Ac's black backdrop videokara_fon_pnl covers P1's).
 void Engine::coop_hud(){
- if(!coop.active||!coopBanks_||!coopRuntime_||coopHidden_)return;
+ if(!coop.active||!coopBanks_||!coopRuntime_||coopHidden_||number("KOM_Acik")!=0)return;
  const auto p2=coop_body(1);if(!p2||(number("PEM_Acik")==0&&number("KVM_Acik")==0))return;
  auto& runtime=*coopRuntime_;const int c=coop.characters[1];
  auto bmap=[&](Value v)->const Object*{auto* o=v.bits?state.get(v.bits):nullptr;return o&&o->alive&&o->kind==Object::Kind::Bmap?o:nullptr;};

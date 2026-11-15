@@ -135,6 +135,7 @@ For players:
 - [Character lock](docs/CHARACTER_LOCK.md) — playing as Demir, Ebru or Inzar throughout.
 - [Seamless doors](docs/SEAMLESS_DOORS.md) — walking through doors without a loading pause.
 - [Known issues](docs/KNOWN_ISSUES.md) — what is missing or not verified.
+- [Windows and Xbox](docs/XBOX.md) — Windows desktop build, Direct3D 12 backend, Xbox Series X|S Dev Mode package and deployment.
 
 For contributors:
 

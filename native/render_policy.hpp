@@ -279,14 +279,25 @@ inline float inverse_tone_map(float gammaValue){
 inline Color inverse_tone_map(Color c){return {inverse_tone_map(c.r),inverse_tone_map(c.g),inverse_tone_map(c.b),c.a};}
 // Blinn-Phong power to GGX roughness (Walter et al. alpha=sqrt(2/(n+2)), roughness=sqrt(alpha)); legacy matte default.
 inline float legacy_roughness(float power){return power>0?std::clamp(std::sqrt(std::sqrt(2/(power+2))),0.05f,1.f):0.8f;}
-// Backend bits for option availability: OpenGL, Vulkan raster, Vulkan ray query.
-constexpr unsigned backendOpenGL=1,backendRaster=2,backendRT=4,backendVulkan=6,backendAll=7;
-inline unsigned backend_bit(std::string_view backend){return backend=="opengl"?backendOpenGL:backend=="vulkan-raster"?backendRaster:backend=="vulkan-rt"?backendRT:0;}
+// Backend bits for option availability: OpenGL, Vulkan raster, Vulkan ray query, Direct3D 12 (admits exactly OpenGL's options).
+constexpr unsigned backendOpenGL=1,backendRaster=2,backendRT=4,backendVulkan=6,backendD3D12=8,backendAll=15;
+inline unsigned backend_bit(std::string_view backend){return backend=="opengl"?backendOpenGL:backend=="vulkan-raster"?backendRaster:backend=="vulkan-rt"?backendRT:backend=="d3d12"?backendD3D12:0;}
+inline std::string_view backend_label(RendererBackend b){return b==RendererBackend::OpenGL?"OpenGL":b==RendererBackend::Vulkan?"Vulkan":"Direct3D 12";}
+// --renderer / --graphics backend default: Direct3D 12 where it is compiled in (Windows), else OpenGL.
+#if K22_HAVE_D3D12
+inline constexpr std::string_view defaultBackend="d3d12";
+#else
+inline constexpr std::string_view defaultBackend="opengl";
+#endif
 // `restricted` names one value that only works on `restrictedBackends` (shadows=rt).
 struct GraphicsOption { std::string_view key,label,fallback; std::array<std::string_view,11> values; std::size_t count; unsigned backends{backendAll}; std::string_view restricted{}; unsigned restrictedBackends{}; };
 // Every implemented --graphics key. Backend availability is probed separately.
 inline constexpr std::array<GraphicsOption,22> graphicsOptions{{
+#if K22_HAVE_D3D12
+    {"backend","Rendering backend","d3d12",{"opengl","vulkan-raster","vulkan-rt","d3d12"},4},
+#else
     {"backend","Rendering backend","opengl",{"opengl","vulkan-raster","vulkan-rt"},3},
+#endif
     {"pbr","PBR materials (HDR + tone mapping)","0",{"0","1"},2},
     {"anisotropy","Anisotropic filtering","8",{"1","2","4","8","16"},5},
     {"msaa","MSAA samples","4",{"1","2","4","8"},4},
@@ -310,7 +321,7 @@ inline constexpr std::array<GraphicsOption,22> graphicsOptions{{
     // Engine (not renderer) option like fps_limit: every preset keeps it on; off = the original LevelYukle fade (docs/SEAMLESS_DOORS.md).
     {"seamless_doors","Seamless doors (next zone visible through the open door, no fade)","on",{"on","off"},2}}};
 struct GraphicsSettings {
-    std::string backend{"opengl"};
+    std::string backend{defaultBackend};
     bool pbr{},texturePacks{},explicitPacks{};
     int anisotropy{},msaa{}; // 0 keeps the legacy/script-controlled default exactly.
     int fpsLimit{}; // 0 = script fps_max, -1 = unlimited.
@@ -360,7 +371,7 @@ inline GraphicsFeatures admit_features(GraphicsFeatures f,std::string_view backe
     return f;
 }
 // Preset-selected backends degrade along this chain with a stderr notice; explicit choices never do.
-inline std::string_view fallback_backend(std::string_view backend){return backend=="vulkan-rt"?"vulkan-raster":backend=="vulkan-raster"?"opengl":"";}
+inline std::string_view fallback_backend(std::string_view backend){return backend=="vulkan-rt"?"vulkan-raster":backend=="vulkan-raster"?defaultBackend:"";}
 // ---- Wave-2 effect helpers shared by OpenGL and Vulkan (CPU-tested in k22-render-check --policy). ----
 // Background views go through an offscreen composite (resolve, bloom, tone map, TAA, FXAA, sharpen) only when needed.
 inline bool composite_enabled(bool pbr,const GraphicsFeatures&f){return pbr||f.bloom||f.fxaa||f.taa||f.sharpen||f.fsr;}

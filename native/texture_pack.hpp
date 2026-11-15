@@ -36,7 +36,7 @@ struct PackTexture {
     bool roughness{}, metallic{}, ao{};
     std::uint32_t scale{1};
 };
-std::filesystem::path texture_pack_root(); // ${XDG_DATA_HOME:-~/.local/share}/kabus22/packs
+std::filesystem::path texture_pack_root(); // ${XDG_DATA_HOME:-~/.local/share}/kabus22/packs (Windows: <user data root>/packs)
 TexturePack load_texture_pack(const std::filesystem::path& directory); // Never throws for pack content; valid=false with detail.
 std::vector<TexturePack> discover_texture_packs(); // Every child directory of the root, sorted by directory name.
 class TexturePackSet {

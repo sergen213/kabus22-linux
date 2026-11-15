@@ -25,8 +25,8 @@ struct Graphics {
 // from its fallback; outside the custom preset only fps_limit and seamless_doors are the game's (the rest stay the user's
 // custom set). backend and texture_packs have dedicated launcher controls and are never [Graphics] keys.
 std::vector<Edit> edits(const Graphics&);
-std::filesystem::path path();      // ${XDG_CONFIG_HOME:-~/.config}/kabus22/launcher.ini (g_get_user_config_dir)
-std::filesystem::path lock_root(); // ${XDG_DATA_HOME:-~/.local/share}/kabus22: the launcher's privateLock folder
+std::filesystem::path path();      // ${XDG_CONFIG_HOME:-~/.config}/kabus22/launcher.ini (g_get_user_config_dir); Windows <user data root>/config/launcher.ini
+std::filesystem::path lock_root(); // ${XDG_DATA_HOME:-~/.local/share}/kabus22: the launcher's privateLock folder; Windows the user data root
 // Under the launcher's flock(.launcher.lock): re-read `file`, merge, publish atomically (0600 temp, fsync, rename, fsync dir).
 void write(const Graphics&, const std::filesystem::path& file = path(), const std::filesystem::path& lockRoot = lock_root());
 }

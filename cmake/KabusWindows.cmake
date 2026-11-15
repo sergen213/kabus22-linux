@@ -1,0 +1,90 @@
+include_guard(GLOBAL)
+# Windows build of the engine (MSVC, dependencies from vcpkg: windows/vcpkg.json).
+#   Desktop (x64-windows):  Direct3D 12 and OpenGL backends, console executable.
+#   Xbox UWP Dev Mode (CMAKE_SYSTEM_NAME=WindowsStore, x64-uwp): Direct3D 12 only, packaged by windows/uwp (docs/XBOX.md).
+# Vulkan, hardware ray tracing and FSR stay Linux-only. The CTest suites are POSIX-only and are not built here.
+if(NOT MSVC)
+  message(FATAL_ERROR "The Windows build requires MSVC (Visual Studio 2026)")
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+  set(K22_UWP ON)
+else()
+  set(K22_UWP OFF)
+endif()
+# CMake's MSVC RelWithDebInfo uses /Ob1 (only __inline functions); the engine's interpreter and frame code depend on full
+# inlining, so RelWithDebInfo gets Release's /Ob2 and keeps its PDBs.
+string(REPLACE "/Ob1" "/Ob2" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
+string(REPLACE "/Ob1" "/Ob2" CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO}")
+option(K22_D3D12 "Direct3D 12 renderer backend" ON)
+option(K22_OPENGL "OpenGL renderer backend (desktop only)" ON)
+if(K22_UWP)
+  set(K22_OPENGL OFF CACHE BOOL "OpenGL renderer backend (desktop only)" FORCE)
+  if(NOT K22_D3D12)
+    message(FATAL_ERROR "The UWP build renders only with Direct3D 12 (K22_D3D12=ON)")
+  endif()
+endif()
+if(NOT K22_D3D12 AND NOT K22_OPENGL)
+  message(FATAL_ERROR "Enable at least one renderer backend (K22_D3D12 or K22_OPENGL)")
+endif()
+
+find_package(SDL2 CONFIG REQUIRED)
+find_package(Freetype REQUIRED)
+find_package(FFMPEG REQUIRED)
+find_package(Threads REQUIRED)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+include(cmake/KabusODE.cmake)
+if(K22_UWP)
+  # ODE's Windows dError/dDebug/dMessage call MessageBox, which UWP lacks (config.h forces WIN32 on).
+  set_source_files_properties("${kabus_ode_SOURCE_DIR}/ode/src/error.cpp" TARGET_DIRECTORY ODE PROPERTIES
+    COMPILE_OPTIONS "/FI${CMAKE_CURRENT_SOURCE_DIR}/cmake/ode_uwp_error.h")
+endif()
+
+set(K22_BACKEND_SOURCES)
+set(K22_BACKEND_DEFINITIONS)
+set(K22_BACKEND_LIBRARIES)
+if(K22_OPENGL)
+  find_path(K22_EPOXY_INCLUDE_DIR epoxy/gl.h REQUIRED)
+  find_library(K22_EPOXY_LIBRARY NAMES epoxy REQUIRED)
+  list(APPEND K22_BACKEND_SOURCES native/render_gl.cpp)
+  list(APPEND K22_BACKEND_DEFINITIONS K22_HAVE_OPENGL=1)
+  # render_gl.cpp embeds the PBR/effects GLSL shared with Vulkan; re-run configure when they change.
+  foreach(k22_glsl IN ITEMS pbr effects)
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/native/shaders/${k22_glsl}.glsl" K22_GLSL_TEXT)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/native/shaders/${k22_glsl}.glsl")
+    file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/render_${k22_glsl}_glsl.hpp" CONTENT "#pragma once\ninline constexpr const char* ${k22_glsl}GLSL=R\"K22(@K22_GLSL_TEXT@)K22\";\n" @ONLY)
+  endforeach()
+  list(APPEND K22_BACKEND_LIBRARIES "${K22_EPOXY_LIBRARY}" opengl32)
+endif()
+if(K22_D3D12)
+  list(APPEND K22_BACKEND_SOURCES native/render_d3d12.cpp)
+  list(APPEND K22_BACKEND_DEFINITIONS K22_HAVE_D3D12=1)
+  list(APPEND K22_BACKEND_LIBRARIES d3d12 dxgi dxguid)
+endif()
+
+add_library(kabus22_core STATIC ${K22_CORE_SOURCES} ${K22_BACKEND_SOURCES})
+target_compile_definitions(kabus22_core PUBLIC ${K22_BACKEND_DEFINITIONS} NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS
+  "$<$<BOOL:${K22_UWP}>:K22_UWP=1;WINAPI_FAMILY=WINAPI_FAMILY_APP>")
+target_include_directories(kabus22_core PUBLIC native PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_include_directories(kabus22_core SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cgltf" ${FFMPEG_INCLUDE_DIRS})
+if(K22_OPENGL)
+  target_include_directories(kabus22_core SYSTEM PRIVATE "${K22_EPOXY_INCLUDE_DIR}")
+endif()
+target_link_libraries(kabus22_core PUBLIC SDL2::SDL2 Freetype::Freetype ${FFMPEG_LIBRARIES} Threads::Threads ODE dwrite ${K22_BACKEND_LIBRARIES})
+target_link_directories(kabus22_core PUBLIC ${FFMPEG_LIBRARY_DIRS})
+# /utf-8: sources hold UTF-8 literals; /bigobj: engine.cpp exceeds the default section count.
+set(K22_MSVC_OPTIONS /utf-8 /bigobj /permissive- /Zc:__cplusplus /Zc:preprocessor /W3 /MP)
+target_compile_options(kabus22_core PRIVATE ${K22_MSVC_OPTIONS})
+if(K22_D3D12)
+  # Build-time HLSL -> DXIL (dxc from the Windows SDK), embedded like the Vulkan SPIR-V.
+  include(cmake/KabusD3D12Shaders.cmake)
+endif()
+
+if(K22_UWP)
+  include(cmake/KabusUWP.cmake)
+else()
+  add_executable(kabus22 native/main.cpp native/scenario.cpp)
+  target_compile_options(kabus22 PRIVATE ${K22_MSVC_OPTIONS})
+  target_link_libraries(kabus22 PRIVATE kabus22_core $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main>)
+  # vcpkg's applocal step copies SDL2/FFmpeg/FreeType DLLs next to kabus22.exe.
+  install(TARGETS kabus22 RUNTIME DESTINATION bin)
+endif()

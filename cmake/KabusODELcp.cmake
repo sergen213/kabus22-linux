@@ -28,7 +28,10 @@ if(_kabus_lcp_actual_sha256 STREQUAL _kabus_lcp_original_sha256)
     if(NOT _kabus_lcp_result_sha256 STREQUAL _kabus_lcp_modified_sha256)
         message(FATAL_ERROR "ODE lcp state recipe/hash mismatch: ${_kabus_lcp_result_sha256}")
     endif()
-    file(WRITE "${_kabus_lcp_file}" "${_kabus_lcp_source}")
+    # file(WRITE) translates "\n" to "\r\n" on Windows. CONFIGURE with UNIX newlines writes the bytes as they are,
+    # plus one final "\n", which the content (ending in a newline) therefore leaves out.
+    string(REGEX REPLACE "\n$" "" _kabus_lcp_unterminated "${_kabus_lcp_source}")
+    file(CONFIGURE OUTPUT "${_kabus_lcp_file}" CONTENT "@_kabus_lcp_unterminated@" @ONLY NEWLINE_STYLE UNIX)
     file(SHA256 "${_kabus_lcp_file}" _kabus_lcp_actual_sha256)
     if(NOT _kabus_lcp_actual_sha256 STREQUAL _kabus_lcp_modified_sha256)
         message(FATAL_ERROR "Written ODE lcp source SHA256 mismatch: ${_kabus_lcp_actual_sha256}")

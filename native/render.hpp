@@ -15,7 +15,7 @@
 namespace k22 {
 
 enum class WindowMode { Windowed, Fullscreen, Borderless };
-enum class RendererBackend { OpenGL, Vulkan };
+enum class RendererBackend { OpenGL, Vulkan, D3D12 };
 struct WindowMetrics { int width{}, height{}, drawableWidth{}, drawableHeight{}; float scaleX{1}, scaleY{1}; };
 class TexturePackSet;
 enum class ShadowMode : std::uint8_t { Original, ShadowMap, RayTraced };

@@ -6,7 +6,8 @@
 #include <iosfwd>
 #include <string_view>
 namespace k22 {
-// Contract F: ${XDG_CONFIG_HOME:-~/.config}/kabus22/controller.ini. Absent file or mode=original leaves Input untouched.
+// Contract F: ${XDG_CONFIG_HOME:-~/.config}/kabus22/controller.ini (Windows: <user data root>/config/controller.ini). Absent file or
+// mode=original leaves Input untouched; on Xbox (UWP) an absent file selects modern mode with the default bindings.
 struct ControllerConfig {
  static constexpr int LeftTrigger=SDL_CONTROLLER_BUTTON_MAX,RightTrigger=SDL_CONTROLLER_BUTTON_MAX+1,Sources=SDL_CONTROLLER_BUTTON_MAX+2;
  bool modern=false,vibration=true;float deadzone=0.15f,sensitivity=1;

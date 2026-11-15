@@ -1,5 +1,5 @@
 #pragma once
-// Game-file mods (docs/MODDING.md): ${XDG_DATA_HOME:-~/.local/share}/kabus22/mods/<id>/{mod.txt,data/**}.
+// Game-file mods (docs/MODDING.md): ${XDG_DATA_HOME:-~/.local/share}/kabus22/mods/<id>/{mod.txt,data/**} (Windows: <user data root>/mods).
 #include <filesystem>
 #include <string>
 

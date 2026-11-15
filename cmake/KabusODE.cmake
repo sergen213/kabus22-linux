@@ -34,13 +34,18 @@ include("${CMAKE_CURRENT_LIST_DIR}/KabusODELcp.cmake")
 add_subdirectory("${kabus_ode_SOURCE_DIR}" "${kabus_ode_BINARY_DIR}")
 # Source-local options preserve live PC64 operation order without changing the
 # rest of ODE or the engine's compiler/solver defaults.
-if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
-    message(FATAL_ERROR "Kabus ODE contact precision requires GCC or Clang")
+if(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
+    set(K22_ODE_CONTACT_OPTIONS "-fno-fast-math;-ffp-contract=off")
+elseif(MSVC)
+    # /fp:precise without /fp:contract: no FMA contraction, the same operation order as -ffp-contract=off.
+    set(K22_ODE_CONTACT_OPTIONS "/fp:precise")
+else()
+    message(FATAL_ERROR "Kabus ODE contact precision requires GCC, Clang or MSVC")
 endif()
 set_source_files_properties(
     "${kabus_ode_SOURCE_DIR}/ode/src/collision_trimesh_box.cpp"
     TARGET_DIRECTORY ODE
-    PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off"
+    PROPERTIES COMPILE_OPTIONS "${K22_ODE_CONTACT_OPTIONS}"
 )
 # Upstream target ODE exports its generated/source includes and dIDESINGLE PUBLIC.
 # Consumers exposing <ode/ode.h> in their headers must link ODE PUBLIC.

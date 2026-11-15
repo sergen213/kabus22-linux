@@ -1,12 +1,25 @@
 #include "render.hpp"
+#if K22_HAVE_OPENGL
 #include "render_gl.hpp"
+#endif
+#if K22_HAVE_VULKAN
 #include "render_vulkan.hpp"
+#endif
+#if K22_HAVE_D3D12
+#include "render_d3d12.hpp"
+#endif
 #include "render_policy.hpp"
+#if K22_HAVE_VULKAN
 #include <SDL_vulkan.h>
+#endif
 #include <ft2build.h>
 #include FT_FREETYPE_H
+#ifdef _WIN32
+#include "platform.hpp"
+#else
 #include <fontconfig/fontconfig.h>
 #include <iconv.h>
+#endif
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -21,14 +34,65 @@
 #include <vector>
 
 namespace k22 {
-namespace { using namespace render_policy; }
+namespace {
+using namespace render_policy;
+#ifdef _WIN32
+// The original K22.exe read an Xbox pad through DirectInput: JOY_1..10 = A,B,X,Y,LB,RB,Back,Start,LS,RS, axes X,Y = left stick,
+// Z = LT-RT, Rx,Ry = right stick (Linux xpad keeps the first eight buttons and both sticks' X/Y). SDL's Windows and UWP drivers
+// (XInput, RawInput, Windows.Gaming.Input) number raw buttons and axes differently, so a joystick that is a game controller
+// presents that DirectInput layout, read through its controller mapping. Others keep their raw numbering.
+SDL_GameController* legacy_controller(SDL_Joystick* joy){return joy?SDL_GameControllerFromInstanceID(SDL_JoystickInstanceID(joy)):nullptr;}
+void legacy_state(SDL_GameController* pad,std::bitset<32>& buttons,std::array<float,6>& axes){
+    constexpr SDL_GameControllerButton order[]{SDL_CONTROLLER_BUTTON_A,SDL_CONTROLLER_BUTTON_B,SDL_CONTROLLER_BUTTON_X,SDL_CONTROLLER_BUTTON_Y,SDL_CONTROLLER_BUTTON_LEFTSHOULDER,
+        SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,SDL_CONTROLLER_BUTTON_BACK,SDL_CONTROLLER_BUTTON_START,SDL_CONTROLLER_BUTTON_LEFTSTICK,SDL_CONTROLLER_BUTTON_RIGHTSTICK};
+    buttons.reset();for(std::size_t b=0;b<std::size(order);++b)buttons.set(b,SDL_GameControllerGetButton(pad,order[b]));
+    auto axis=[&](SDL_GameControllerAxis a){int v=SDL_GameControllerGetAxis(pad,a);return v/(v<0?32768.0f:32767.0f);};
+    axes={axis(SDL_CONTROLLER_AXIS_LEFTX),axis(SDL_CONTROLLER_AXIS_LEFTY),std::clamp(axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT)-axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT),-1.f,1.f),
+        axis(SDL_CONTROLLER_AXIS_RIGHTX),axis(SDL_CONTROLLER_AXIS_RIGHTY),0.f};
+}
+#endif
+}
 struct Renderer::Impl {
     SDL_Window* window{}; std::array<SDL_GameController*,Input::Pads> controllers{};
     std::array<SDL_Joystick*,2> joysticks{};
     bool quit{},sdlInitialized{}; std::uint64_t counter{};
     RenderOptions options; FT_Library freetype{};
     std::unordered_map<std::string,std::unique_ptr<FontAtlas>> fonts;
-    std::unique_ptr<GLBackend> gl; std::unique_ptr<VulkanBackend> vk;
+#if K22_HAVE_OPENGL
+    std::unique_ptr<GLBackend> gl;
+#endif
+#if K22_HAVE_VULKAN
+    std::unique_ptr<VulkanBackend> vk;
+#endif
+#if K22_HAVE_D3D12
+    std::unique_ptr<D3D12Backend> d3d;
+#endif
+    // The one constructed backend; all three share GLBackend's interface.
+    template<class F> decltype(auto) backend(F&& f)const{
+#if K22_HAVE_OPENGL
+        if(gl)return f(*gl);
+#endif
+#if K22_HAVE_VULKAN
+        if(vk)return f(*vk);
+#endif
+#if K22_HAVE_D3D12
+        if(d3d)return f(*d3d);
+#endif
+        throw std::logic_error("Renderer has no constructed backend");
+    }
+    bool opengl()const{
+#if K22_HAVE_OPENGL
+        if(gl)return true;
+#endif
+        return false;
+    }
+    bool vulkan()const{
+#if K22_HAVE_VULKAN
+        if(vk)return true;
+#endif
+        return false;
+    }
+    std::string_view admission_backend(bool rayTracing)const{return opengl()?"opengl":vulkan()?(rayTracing?"vulkan-rt":"vulkan-raster"):"d3d12";}
     explicit Impl(RenderOptions o):options(std::move(o)) {
         try {
             if(SDL_InitSubSystem(SDL_INIT_VIDEO|SDL_INIT_GAMECONTROLLER|SDL_INIT_EVENTS))throw std::runtime_error(SDL_GetError());
@@ -37,13 +101,27 @@ struct Renderer::Impl {
                 SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION,3);SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION,3);SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,SDL_GL_CONTEXT_PROFILE_CORE);
                 SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER,1);SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,24);
             }
-            const auto backendFlag=options.backend==RendererBackend::OpenGL?SDL_WINDOW_OPENGL:SDL_WINDOW_VULKAN;
+            // Direct3D 12 presents through DXGI on the plain window (HWND / CoreWindow): no SDL graphics-API flag.
+            const Uint32 backendFlag=options.backend==RendererBackend::OpenGL?SDL_WINDOW_OPENGL:options.backend==RendererBackend::Vulkan?SDL_WINDOW_VULKAN:0;
             window=SDL_CreateWindow(options.title.c_str(),SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,options.width,options.height,backendFlag|SDL_WINDOW_RESIZABLE|SDL_WINDOW_ALLOW_HIGHDPI|(options.hidden?SDL_WINDOW_HIDDEN:0));
             if(!window)throw std::runtime_error(SDL_GetError());
-            if(options.backend==RendererBackend::OpenGL)gl=std::make_unique<GLBackend>(window,options);
-            else vk=std::make_unique<VulkanBackend>(window,options);
+            switch(options.backend){
+#if K22_HAVE_OPENGL
+            case RendererBackend::OpenGL:gl=std::make_unique<GLBackend>(window,options);break;
+#endif
+#if K22_HAVE_VULKAN
+            case RendererBackend::Vulkan:vk=std::make_unique<VulkanBackend>(window,options);break;
+#endif
+#if K22_HAVE_D3D12
+            case RendererBackend::D3D12:d3d=std::make_unique<D3D12Backend>(window,options);break;
+#endif
+            default:throw std::runtime_error(std::string(backend_label(options.backend))+" renderer backend is not compiled into this build");
+            }
             sync();
-            if(FT_Init_FreeType(&freetype))throw std::runtime_error("FreeType initialization failed");if(!FcInit())throw std::runtime_error("Fontconfig initialization failed");
+            if(FT_Init_FreeType(&freetype))throw std::runtime_error("FreeType initialization failed");
+#ifndef _WIN32
+            if(!FcInit())throw std::runtime_error("Fontconfig initialization failed");
+#endif
             counter=SDL_GetPerformanceCounter();
             for(int device=0;device<SDL_NumJoysticks();++device)open_joystick(device);
             for(int device=0;device<SDL_NumJoysticks();++device)open_controller(device);
@@ -65,7 +143,15 @@ struct Renderer::Impl {
         }
     }
     void destroy(){
-        vk.reset();gl.reset();
+#if K22_HAVE_D3D12
+        d3d.reset();
+#endif
+#if K22_HAVE_VULKAN
+        vk.reset();
+#endif
+#if K22_HAVE_OPENGL
+        gl.reset();
+#endif
         for(auto&joy:joysticks)if(joy){SDL_JoystickClose(joy);joy=nullptr;}
         if(freetype){FT_Done_FreeType(freetype);freetype=nullptr;}
         for(auto&pad:controllers)if(pad){SDL_GameControllerClose(pad);pad=nullptr;}
@@ -73,23 +159,42 @@ struct Renderer::Impl {
         if(sdlInitialized){SDL_QuitSubSystem(SDL_INIT_VIDEO|SDL_INIT_GAMECONTROLLER|SDL_INIT_EVENTS);sdlInitialized=false;}
     }
     ~Impl(){destroy();}
-    void drain(){if(gl)gl->drain();else vk->drain();}
-    void invalidate(){if(gl)gl->invalidate(options.mode);else vk->invalidate();}
+    void drain(){backend([](auto&b){b.drain();});}
+    void invalidate(){
+#if K22_HAVE_VULKAN
+        if(vk){vk->invalidate();return;}
+#endif
+        backend([&](auto&b){if constexpr(requires{b.invalidate(options.mode);})b.invalidate(options.mode);});
+    }
     // Window state (size/mode/title/hidden) is owned here; the rest mirrors the backend's admitted, clamped copy.
-    void sync(){const auto&b=gl?gl->options():vk->options();options.samples=b.samples;options.anisotropy=b.anisotropy;options.vsync=b.vsync;options.pbr=b.pbr;options.forceAnisotropy=b.forceAnisotropy;options.packs=b.packs;options.features=b.features;if(vk)options.rayTracing=b.rayTracing;}
+    void sync(){const auto&b=backend([](auto&b)->const RenderOptions&{return b.options();});options.samples=b.samples;options.anisotropy=b.anisotropy;options.vsync=b.vsync;options.pbr=b.pbr;options.forceAnisotropy=b.forceAnisotropy;options.packs=b.packs;options.features=b.features;if(vulkan())options.rayTracing=b.rayTracing;}
 };
 Renderer::Renderer(const RenderOptions&o):impl_(std::make_unique<Impl>(o)){set_mode(o.width,o.height,o.mode);}
 Renderer::~Renderer()=default;
-WindowMetrics Renderer::metrics()const{WindowMetrics m;SDL_GetWindowSize(impl_->window,&m.width,&m.height);if(impl_->gl)SDL_GL_GetDrawableSize(impl_->window,&m.drawableWidth,&m.drawableHeight);else SDL_Vulkan_GetDrawableSize(impl_->window,&m.drawableWidth,&m.drawableHeight);m.scaleX=m.width?float(m.drawableWidth)/m.width:1;m.scaleY=m.height?float(m.drawableHeight)/m.height:1;return m;}
+WindowMetrics Renderer::metrics()const{WindowMetrics m;SDL_GetWindowSize(impl_->window,&m.width,&m.height);
+#if K22_HAVE_OPENGL
+    if(impl_->gl)SDL_GL_GetDrawableSize(impl_->window,&m.drawableWidth,&m.drawableHeight);
+#endif
+#if K22_HAVE_VULKAN
+    if(impl_->vk)SDL_Vulkan_GetDrawableSize(impl_->window,&m.drawableWidth,&m.drawableHeight);
+#endif
+#if K22_HAVE_D3D12
+    if(impl_->d3d)SDL_GetWindowSizeInPixels(impl_->window,&m.drawableWidth,&m.drawableHeight);
+#endif
+#if K22_UWP
+    // The whole frame (layout and drawable) at the TV's output resolution, like a desktop at that size; see platform::output_mode.
+    if(platform::OutputMode o;platform::output_mode(o)){m.width=m.drawableWidth=o.width;m.height=m.drawableHeight=o.height;}
+#endif
+    m.scaleX=m.width?float(m.drawableWidth)/m.width:1;m.scaleY=m.height?float(m.drawableHeight)/m.height:1;return m;}
 void Renderer::set_mode(int w,int h,WindowMode mode){if(w<1||h<1)throw std::runtime_error("Window resolution must be positive");auto&i=*impl_;i.drain();if(SDL_SetWindowFullscreen(i.window,0))throw std::runtime_error(SDL_GetError());SDL_SetWindowBordered(i.window,mode==WindowMode::Borderless?SDL_FALSE:SDL_TRUE);SDL_SetWindowSize(i.window,w,h);if(mode==WindowMode::Fullscreen){SDL_DisplayMode display{};display.w=w;display.h=h;if(SDL_SetWindowDisplayMode(i.window,&display)||SDL_SetWindowFullscreen(i.window,SDL_WINDOW_FULLSCREEN))throw std::runtime_error(SDL_GetError());}else if(mode==WindowMode::Borderless){if(SDL_SetWindowFullscreen(i.window,SDL_WINDOW_FULLSCREEN_DESKTOP))throw std::runtime_error(SDL_GetError());}i.options.width=w;i.options.height=h;i.options.mode=mode;i.invalidate();}
 const RenderOptions& Renderer::options()const{return impl_->options;}
 bool Renderer::reconfigure(const RenderOptions& requested){
     auto&i=*impl_;RenderOptions next=requested;
     next.width=i.options.width;next.height=i.options.height;next.mode=i.options.mode;next.title=i.options.title;next.hidden=i.options.hidden;
-    if(next.backend!=i.options.backend||(i.vk&&next.rayTracing!=i.options.rayTracing))return false; // another device/context
-    if(i.gl)next.rayTracing=i.options.rayTracing;
-    std::vector<std::string> notices;next.features=admit_features(next.features,i.gl?"opengl":next.rayTracing?"vulkan-rt":"vulkan-raster",notices);
-    if(!(i.gl?i.gl->reconfigure(next):i.vk->reconfigure(next)))return false;
+    if(next.backend!=i.options.backend||(i.vulkan()&&next.rayTracing!=i.options.rayTracing))return false; // another device/context
+    if(!i.vulkan())next.rayTracing=i.options.rayTracing;
+    std::vector<std::string> notices;next.features=admit_features(next.features,i.admission_backend(next.rayTracing),notices);
+    if(!i.backend([&](auto&b){return b.reconfigure(next);}))return false;
     for(auto&n:notices)std::cerr<<"kabus22: graphics: "<<n<<'\n';
     i.sync();return true;
 }
@@ -98,18 +203,18 @@ void Renderer::set_position(int x,int y){SDL_SetWindowPosition(impl_->window,x,y
 void Renderer::set_mouse_mode(bool visible,bool relative){SDL_ShowCursor(visible?SDL_ENABLE:SDL_DISABLE);if(SDL_SetRelativeMouseMode(relative?SDL_TRUE:SDL_FALSE))throw std::runtime_error(SDL_GetError());}
 void Renderer::rumble(int pad,float strength,std::uint32_t milliseconds){if(pad>=0&&pad<Input::Pads&&impl_->controllers[pad]){auto level=Uint16(std::clamp(strength,0.f,1.f)*65535);SDL_GameControllerRumble(impl_->controllers[pad],level,level,milliseconds);}}
 void Renderer::request_quit(){impl_->quit=true;}
-int Renderer::shader_version()const{return impl_->gl?impl_->gl->shader_version():impl_->vk->shader_version();}
-PresentationState Renderer::presentation_state()const{return impl_->gl?impl_->gl->presentation_state():impl_->vk->presentation_state();}
-void Renderer::purge_model(const Model*model){if(impl_->gl)impl_->gl->purge_model(model);else impl_->vk->purge_model(model);}
-void Renderer::purge_image(const Image*image){if(impl_->gl)impl_->gl->purge_image(image);else impl_->vk->purge_image(image);}
+int Renderer::shader_version()const{return impl_->backend([](auto&b){return b.shader_version();});}
+PresentationState Renderer::presentation_state()const{return impl_->backend([](auto&b){return b.presentation_state();});}
+void Renderer::purge_model(const Model*model){impl_->backend([&](auto&b){b.purge_model(model);});}
+void Renderer::purge_image(const Image*image){impl_->backend([&](auto&b){b.purge_image(image);});}
 void Renderer::release_scene(const Model* keep){release_scene(keep?std::span<const Model* const>(&keep,1):std::span<const Model* const>{});}
-void Renderer::release_scene(std::span<const Model* const> keep){if(impl_->gl)impl_->gl->release_scene(keep);else impl_->vk->release_scene(keep);}
-void Renderer::draw(const RenderFrame&frame){auto m=metrics();if(impl_->gl)impl_->gl->draw(frame,m);else impl_->vk->draw(frame,m);}
-void Renderer::capture(std::string_view path)const{auto m=metrics();if(impl_->gl)impl_->gl->capture(path,m);else impl_->vk->capture(path,m);}
-std::string Renderer::description()const{return impl_->gl?impl_->gl->description():impl_->vk->description();}
+void Renderer::release_scene(std::span<const Model* const> keep){impl_->backend([&](auto&b){b.release_scene(keep);});}
+void Renderer::draw(const RenderFrame&frame){auto m=metrics();impl_->backend([&](auto&b){b.draw(frame,m);});}
+void Renderer::capture(std::string_view path)const{auto m=metrics();impl_->backend([&](auto&b){b.capture(path,m);});}
+std::string Renderer::description()const{return impl_->backend([](auto&b){return b.description();});}
 std::pair<bool,std::string> Renderer::probe(RendererBackend backend,bool rayTracing){
     RenderOptions o;o.backend=backend;o.rayTracing=rayTracing;o.hidden=true;o.vsync=false;o.width=64;o.height=64;
-    try{Impl impl(o);return {true,impl.gl?impl.gl->description():impl.vk->description()};}
+    try{Impl impl(o);return {true,impl.backend([](auto&b){return b.description();})};}
     catch(const std::exception&e){return {false,e.what()};}
 }
 Vec3 Renderer::project(Vec3 position,const Camera&camera,WindowMetrics metrics){
@@ -200,7 +305,11 @@ void Renderer::poll(Input&in){
         }
         case SDL_JOYBUTTONDOWN:case SDL_JOYBUTTONUP:{
             int index=joystick_slot(event.jbutton.which);
-            if(index>=0&&event.jbutton.button<32){bool down=event.type==SDL_JOYBUTTONDOWN;in.joystickButtons[index].set(event.jbutton.button,down);(down?in.joystickPressed[index]:in.joystickReleased[index]).set(event.jbutton.button);}
+            bool raw=index>=0&&event.jbutton.button<32;
+#ifdef _WIN32
+            raw=raw&&!legacy_controller(i.joysticks[index]); // its raw numbering is not the legacy layout; the state pass below sets it
+#endif
+            if(raw){bool down=event.type==SDL_JOYBUTTONDOWN;in.joystickButtons[index].set(event.jbutton.button,down);(down?in.joystickPressed[index]:in.joystickReleased[index]).set(event.jbutton.button);}
             break;
         }
         case SDL_CONTROLLERDEVICEADDED:
@@ -226,6 +335,13 @@ void Renderer::poll(Input&in){
         auto*joy=i.joysticks[index];in.joystickConnected[index]=joy!=nullptr;in.joystickPad[index]=-1;
         if(!joy)continue;
         for(int p=0;p<Input::Pads;++p)if(i.controllers[p]&&SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(i.controllers[p]))==SDL_JoystickInstanceID(joy))in.joystickPad[index]=p;
+#ifdef _WIN32
+        if(auto*pad=legacy_controller(joy)){
+            std::bitset<32> now;legacy_state(pad,now,in.joystickAxes[index]);
+            in.joystickPressed[index]|=now&~in.joystickButtons[index];in.joystickReleased[index]|=in.joystickButtons[index]&~now;in.joystickButtons[index]=now;
+            continue;
+        }
+#endif
         for(int axis=0;axis<6;++axis){int value=axis<SDL_JoystickNumAxes(joy)?SDL_JoystickGetAxis(joy,axis):0;in.joystickAxes[index][axis]=value/(value<0?32768.0f:32767.0f);}
         for(int button=0;button<32;++button){bool down=button<SDL_JoystickNumButtons(joy)&&SDL_JoystickGetButton(joy,button);if(down!=in.joystickButtons[index][button]){(down?in.joystickPressed[index]:in.joystickReleased[index]).set(button);in.joystickButtons[index].set(button,down);}}
     }
@@ -236,6 +352,12 @@ const FontAtlas&Renderer::font_atlas(std::string_view family,int pixels,bool bol
     if(pixels<1||pixels>512)throw std::runtime_error("Invalid native font pixel size");
     std::string key=std::string(family)+"|"+std::to_string(pixels)+"|"+std::to_string(bold)+std::to_string(italic);
     auto&i=*impl_;auto found=i.fonts.find(key);if(found!=i.fonts.end())return *found->second;
+#ifdef _WIN32
+    // DirectWrite resolves the family to font bytes; `memory` outlives the face (declared before its guard).
+    std::string path(family);platform::FontFile memory;
+    if(path.find_first_of("/\\")==std::string::npos)memory=platform::system_font(family,bold,italic);
+    FT_Face face{};if(memory.bytes.empty()?FT_New_Face(i.freetype,path.c_str(),0,&face):FT_New_Memory_Face(i.freetype,memory.bytes.data(),FT_Long(memory.bytes.size()),memory.face,&face))throw std::runtime_error("Cannot load native font "+path);
+#else
     std::string path(family);
     if(path.find('/')==std::string::npos){
         FcPattern*pattern=FcPatternCreate();if(!pattern)throw std::bad_alloc();
@@ -248,14 +370,21 @@ const FontAtlas&Renderer::font_atlas(std::string_view family,int pixels,bool bol
         path=reinterpret_cast<const char*>(file);FcPatternDestroy(match);
     }
     FT_Face face{};if(FT_New_Face(i.freetype,path.c_str(),0,&face))throw std::runtime_error("Cannot load native font "+path);
+#endif
     struct FaceGuard{FT_Face face;~FaceGuard(){FT_Done_Face(face);}}guard{face};
     FT_Size_RequestRec size{FT_SIZE_REQUEST_TYPE_REAL_DIM,0,pixels*64,0,0};
     if(FT_Request_Size(face,&size))throw std::runtime_error("Cannot size native font");
     auto font=std::make_unique<FontAtlas>();font->lineHeight=pixels;font->ascent=face->size->metrics.ascender/64.0f;
     std::array<std::vector<std::uint8_t>,256>bitmaps;int rowX=1,rowY=1,rowHeight=0;const int atlasWidth=1024;
+#ifdef _WIN32
+    auto codepoint=[](int ch){const char32_t cp=platform::cp1254_to_unicode(std::uint8_t(ch));return cp==platform::cp1254Undefined?std::uint32_t(ch):std::uint32_t(cp);};
+#else
     iconv_t converter=iconv_open("UTF-32LE","WINDOWS-1254");if(converter==(iconv_t)-1)throw std::runtime_error("Native Turkish code page conversion unavailable");
-    for(int ch=0;ch<256;++ch){std::uint32_t cp=ch;char byte=char(ch),output[4]{};char*input=&byte,*out=output;size_t inputLength=1,outputLength=4;if(iconv(converter,&input,&inputLength,&out,&outputLength)!=size_t(-1)&&outputLength==0)std::memcpy(&cp,output,4);if(FT_Load_Char(face,cp,FT_LOAD_RENDER)){iconv_close(converter);throw std::runtime_error("Native font glyph rasterization failed");}auto&slot=*face->glyph;auto&g=font->glyphs[ch];int w=slot.bitmap.width,h=slot.bitmap.rows;if(rowX+w+1>atlasWidth){rowX=1;rowY+=rowHeight+1;rowHeight=0;}g.pixels={float(rowX),float(rowY),float(w),float(h)};g.bearing={float(slot.bitmap_left),float(slot.bitmap_top)};g.advance=slot.advance.x/64.0f;auto&bitmap=bitmaps[ch];bitmap.resize(w*h);for(int y=0;y<h;++y){const auto*src=slot.bitmap.buffer+(slot.bitmap.pitch>=0?y:h-1-y)*std::abs(slot.bitmap.pitch);if(slot.bitmap.pixel_mode==FT_PIXEL_MODE_GRAY)std::memcpy(bitmap.data()+y*w,src,w);else if(slot.bitmap.pixel_mode==FT_PIXEL_MODE_MONO)for(int x=0;x<w;++x)bitmap[y*w+x]=(src[x/8]&(0x80>>(x%8)))?255:0;else{iconv_close(converter);throw std::runtime_error("Unsupported native font bitmap format");}}rowX+=w+1;rowHeight=std::max(rowHeight,h);}
-    iconv_close(converter);font->image.width=atlasWidth;font->image.height=rowY+rowHeight+1;font->image.rgba.resize(std::size_t(font->image.width)*font->image.height*4,0);for(int ch=0;ch<256;++ch){const auto&g=font->glyphs[ch];int w=g.pixels.width,h=g.pixels.height;for(int y=0;y<h;++y)for(int x=0;x<w;++x){size_t p=((size_t(g.pixels.y)+y)*atlasWidth+size_t(g.pixels.x)+x)*4;font->image.rgba[p]=font->image.rgba[p+1]=font->image.rgba[p+2]=255;font->image.rgba[p+3]=bitmaps[ch][y*w+x];}}return *i.fonts.emplace(std::move(key),std::move(font)).first->second;
+    struct ConverterGuard{iconv_t converter;~ConverterGuard(){iconv_close(converter);}}converterGuard{converter};
+    auto codepoint=[&](int ch){std::uint32_t cp=ch;char byte=char(ch),output[4]{};char*input=&byte,*out=output;size_t inputLength=1,outputLength=4;if(iconv(converter,&input,&inputLength,&out,&outputLength)!=size_t(-1)&&outputLength==0)std::memcpy(&cp,output,4);return cp;};
+#endif
+    for(int ch=0;ch<256;++ch){const std::uint32_t cp=codepoint(ch);if(FT_Load_Char(face,cp,FT_LOAD_RENDER))throw std::runtime_error("Native font glyph rasterization failed");auto&slot=*face->glyph;auto&g=font->glyphs[ch];int w=slot.bitmap.width,h=slot.bitmap.rows;if(rowX+w+1>atlasWidth){rowX=1;rowY+=rowHeight+1;rowHeight=0;}g.pixels={float(rowX),float(rowY),float(w),float(h)};g.bearing={float(slot.bitmap_left),float(slot.bitmap_top)};g.advance=slot.advance.x/64.0f;auto&bitmap=bitmaps[ch];bitmap.resize(w*h);for(int y=0;y<h;++y){const auto*src=slot.bitmap.buffer+(slot.bitmap.pitch>=0?y:h-1-y)*std::abs(slot.bitmap.pitch);if(slot.bitmap.pixel_mode==FT_PIXEL_MODE_GRAY)std::memcpy(bitmap.data()+y*w,src,w);else if(slot.bitmap.pixel_mode==FT_PIXEL_MODE_MONO)for(int x=0;x<w;++x)bitmap[y*w+x]=(src[x/8]&(0x80>>(x%8)))?255:0;else throw std::runtime_error("Unsupported native font bitmap format");}rowX+=w+1;rowHeight=std::max(rowHeight,h);}
+    font->image.width=atlasWidth;font->image.height=rowY+rowHeight+1;font->image.rgba.resize(std::size_t(font->image.width)*font->image.height*4,0);for(int ch=0;ch<256;++ch){const auto&g=font->glyphs[ch];int w=g.pixels.width,h=g.pixels.height;for(int y=0;y<h;++y)for(int x=0;x<w;++x){size_t p=((size_t(g.pixels.y)+y)*atlasWidth+size_t(g.pixels.x)+x)*4;font->image.rgba[p]=font->image.rgba[p+1]=font->image.rgba[p+2]=255;font->image.rgba[p+3]=bitmaps[ch][y*w+x];}}return *i.fonts.emplace(std::move(key),std::move(font)).first->second;
 }
 }
 

@@ -1,0 +1,76 @@
+# Coop Ebru+Inzar (docs/COOP.md), New Game from 2 PLAYER, Start4 (Demir's story; P1's lock is Ebru, P2 Inzar on pad 1). No saves.
+# P1 Ebru walks on the keyboard while P2 stays; P1's original inventory opens (M) and P2's Start does not open her spell menu over it;
+# Ebru equips the shared pistol there (Silahlar[0]) and aims and fires it (S, D), P2 neither aims nor moves. P2's spell menu then
+# opens on Start and P1's M does nothing until P2 closes it (B); P1's inventory opens again afterwards.
+realtime off
+wait until ParlaklikMenuAcik == 1 || AMP_YeniOyun.visible == 1 timeout 3600
+press-until Return ParlaklikMenuAcik == 0
+wait until AMP_YeniOyun.visible == 1 && AM_Cursor == 0 timeout 600
+frames 30
+press Up
+press Return
+wait until $coopmenu == 2 timeout 60
+press Right
+pad 1 press a
+pad 1 press dpright
+assert $pick1 == 1 && $pick2 == 2
+pad 1 press a
+press Return
+wait until YMP_Normal.visible == 1 timeout 120
+press Return
+frames 300
+press Space
+wait until oyun_ilk_basladi == 1 timeout 600
+assert $coop == 1 && $coop1 == 1 && $coop2 == 2 && $character == 1
+wait until $level == "start4.wmb" && $movie == 1 timeout 7200
+frames 60
+press-until Return $movie == 0 && LY_AktifLevelID == 1 && level_yuklendi_ok == 1 && player != 0 timeout 1200
+wait until LY_AktifLevelID == 1 && level_yuklendi_ok == 1 && player != 0 && oyuncu_pasif == 0 timeout 3600
+wait until oyun_ilk_basladi == 0 && EnvaterAcilabilirmi == 1 timeout 600
+wait until $p2 != 0 timeout 600
+store p2 $p2
+frames 60
+assert $count(Oyuncu_Ebru) == 1 && $count(oyuncu_koruyucu) == 1 && $count(Oyuncu_Demir) == 0 && $bank1(player) == @p2
+store x1 player.x
+store y1 player.y
+store x2 $p2x
+down Up
+frames 60
+up Up
+assert player.x != @x1 || player.y != @y1
+assert $p2x == @x2
+press M
+wait until EM_Acik == 1 && EM_Bolge == 1 && freeze_mode == 1 timeout 300
+pad 1 press start
+frames 10
+assert KOM_Acik == 0
+press Return
+wait until EM_Bolge == 2 timeout 300
+press Up
+press-until Left EM_CursorNesne+EM_NesneKafa <= 0 timeout 600
+press Return
+wait until EM_Bolge == 6 timeout 300
+press Return
+wait until EM_Bolge == 2 && Aktif_Silah == Silahlar[0] timeout 300
+press M
+wait until EM_Acik == 0 && freeze_mode == 0 timeout 300
+down S
+wait until silah_kaldir == 1 && player.skill32 >= 100 timeout 600
+store rounds S_Kursun_Sayisi[Aktif_Silah]
+press-until D S_Kursun_Sayisi[Aktif_Silah] < @rounds timeout 600
+up S
+wait until silah_kaldir == 0 timeout 900
+assert $bank1(silah_kaldir) == 0
+# The inventory gate (EnvaterAcilabilirmi) closes while aiming; P2 opens her spell menu once it is back. P1's M is ignored meanwhile.
+wait until EnvaterAcilabilirmi == 1 timeout 600
+pad 1 press start
+wait until KOM_Acik == 1 timeout 60
+press M
+frames 10
+assert EM_Acik == 0 && KOM_Acik == 1
+pad 1 press b
+wait until KOM_Acik == 0 timeout 60
+press M
+wait until EM_Acik == 1 timeout 120
+press M
+wait until EM_Acik == 0 && freeze_mode == 0 timeout 300

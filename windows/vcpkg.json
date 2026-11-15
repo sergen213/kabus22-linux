@@ -1,0 +1,19 @@
+{
+  "name": "kabus22-windows",
+  "version-string": "0.4.17",
+  "description": "Windows desktop and Xbox (UWP Dev Mode) dependencies of the Kabus22 engine",
+  "builtin-baseline": "4702e381dbbd9b54d3f7e1eb565cd8981c1814cd",
+  "dependencies": [
+    "sdl2",
+    "freetype",
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": ["avcodec", "avformat", "swresample", "swscale"]
+    },
+    {
+      "name": "libepoxy",
+      "platform": "!uwp"
+    }
+  ]
+}

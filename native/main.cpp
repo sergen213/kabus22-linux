@@ -20,14 +20,47 @@
 #include <unordered_map>
 #include <optional>
 #include <cerrno>
+#include "platform.hpp"
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 extern "C" {
 #include <libavutil/log.h>
 }
+#if defined(_WIN32) && !defined(K22_UWP)
+// Hybrid-graphics laptops: run on the discrete GPU (NVIDIA Optimus / AMD PowerXpress read these exports from the .exe);
+// without them OpenGL lands on the integrated GPU. D3D12 picks DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE itself.
+extern "C" {
+__declspec(dllexport) unsigned long NvOptimusEnablement = 1;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
+#ifdef _WIN32
+#define K22_HELP_CONFIG "%LOCALAPPDATA%\\Kabus22\\config"
+#define K22_HELP_DATA "%LOCALAPPDATA%\\Kabus22"
+#else
+#define K22_HELP_CONFIG "${XDG_CONFIG_HOME:-~/.config}/kabus22"
+#define K22_HELP_DATA "${XDG_DATA_HOME:-~/.local/share}/kabus22"
+#endif
 namespace {
 std::string lower(std::string_view text){std::string out;out.reserve(text.size());for(unsigned char c:text)out.push_back(c=='\\'?'/':c>='A'&&c<='Z'?char(c+32):char(c));return out;}
+#ifdef _WIN32
+// <user data root>/ygm.k22 (%LOCALAPPDATA%\Kabus22, UWP LocalState): the file itself, never through a reparse point.
+std::optional<std::string> private_bonus_locale(){
+ const auto path=k22::platform::user_data_root()/"ygm.k22";
+ auto file=k22::platform::open_file(path,GENERIC_READ,FILE_SHARE_READ,OPEN_EXISTING);
+ if(!file){const auto error=GetLastError();if(error==ERROR_FILE_NOT_FOUND||error==ERROR_PATH_NOT_FOUND)return std::nullopt;throw std::runtime_error("unsafe or unreadable private Bonus locale");}
+ k22::platform::FileStatus st{};
+ if(!k22::platform::file_status(file,st)||st.directory||st.links!=1||st.size<3||st.size>16)throw std::runtime_error("private Bonus locale is not a bounded user-owned regular file");
+ char bytes[17]{};const auto count=k22::platform::read_at(file,0,bytes,sizeof(bytes));
+ if(count<0||std::uint64_t(count)!=st.size)throw std::runtime_error("private Bonus locale changed during reading");
+ return std::string(bytes,std::size_t(count));
+}
+#else
 std::optional<std::string> private_bonus_locale(){
  const auto* xdg=std::getenv("XDG_DATA_HOME");const auto* home=std::getenv("HOME");
  if((!xdg||!*xdg)&&(!home||!*home))throw std::runtime_error("HOME or XDG_DATA_HOME required for private Bonus locale");
@@ -48,20 +81,28 @@ std::optional<std::string> private_bonus_locale(){
  // Bonus launcher 0x52973/0x529de: 111 -> tr, 222 -> de, anything else (its own 000) -> en.
  return std::string(bytes,std::size_t(count));
 }
+#endif
 std::pair<int,int> resolution(std::string_view text){
  auto split=text.find('x');if(split==std::string_view::npos||text.find('x',split+1)!=std::string_view::npos)throw std::runtime_error("--resolution requires WIDTHxHEIGHT");
  int width=0,height=0;auto component=[](std::string_view value,int& result){auto [end,error]=std::from_chars(value.data(),value.data()+value.size(),result);return !value.empty()&&error==std::errc{}&&end==value.data()+value.size();};
  if(!component(text.substr(0,split),width)||!component(text.substr(split+1),height)||width<1280||height<720||width>16384||height>16384)throw std::runtime_error("--resolution requires1280x720 through16384x16384");
  return {width,height};
 }
-void help(){std::cout<<"kabus22 native engine\nUsage: kabus22 --data GAME_ROOT [--mode campaign|bonus] [--script ENTRY] [--display native|authored] [--resolution WIDTHxHEIGHT] [--window-mode windowed|fullscreen|borderless] [--language tr|en|de|es|ru|pl] [--audio-language tr|en] [--camera original|first-person] [--character original|demir|ebru|inzar] [--define SYMBOL] [--renderer opengl|vulkan] [--ray-tracing on|off] [--headless] [--frames N] [--capture FILE]\nOriginal auto-selected campaign defaults to native desktop-sized borderless widescreen. Native resolution minimum1280x720, maximum16384x16384; borderless always uses desktop dimensions. --display authored restores original resolution services. Custom --script, patched campaign and Bonus retain authored display behavior.\nOpenGL is the default. Vulkan defaults to hardware ray tracing; --renderer vulkan --ray-tracing off selects raster only. Requested unsupported Vulkan/RT fails explicitly, without fallback.\nDefault mode is campaign. Bonus defaults to K22_mode.wdl, remembered ygm.k22 locale (otherwise en), and defanti_0; --define defanti_0|1|2|3 selects Bonus AA.\n--language es|ru|pl selects the community patch's DD_Dil 3-5 and requires its installed language data (K22Widescreen.wrs, _data/language/spanish|russian|polish).\n--camera first-person: optional community-patch 1.8.5 style first-person camera for Demir and Ebru on the original campaign scripts (default original; patched scripts keep their own F5 camera).\nReads the supplied original game data/scripts; uses private XDG saves. No proprietary assets are embedded.\n"
+#if K22_HAVE_D3D12
+#define K22_RENDERER_CHOICES "opengl|vulkan|d3d12"
+#define K22_RENDERER_DEFAULT "Direct3D 12 is the default; a backend not compiled into this build is rejected. "
+#else
+#define K22_RENDERER_CHOICES "opengl|vulkan"
+#define K22_RENDERER_DEFAULT "OpenGL is the default. "
+#endif
+void help(){std::cout<<"kabus22 native engine\nUsage: kabus22 --data GAME_ROOT [--mode campaign|bonus] [--script ENTRY] [--display native|authored] [--resolution WIDTHxHEIGHT] [--window-mode windowed|fullscreen|borderless] [--language tr|en|de|es|ru|pl] [--audio-language tr|en] [--camera original|first-person] [--character original|demir|ebru|inzar] [--define SYMBOL] [--renderer " K22_RENDERER_CHOICES "] [--ray-tracing on|off] [--headless] [--frames N] [--capture FILE]\nOriginal auto-selected campaign defaults to native desktop-sized borderless widescreen. Native resolution minimum1280x720, maximum16384x16384; borderless always uses desktop dimensions. --display authored restores original resolution services. Custom --script, patched campaign and Bonus retain authored display behavior.\n" K22_RENDERER_DEFAULT "Vulkan defaults to hardware ray tracing; --renderer vulkan --ray-tracing off selects raster only. Requested unsupported Vulkan/RT fails explicitly, without fallback.\nDefault mode is campaign. Bonus defaults to K22_mode.wdl, remembered ygm.k22 locale (otherwise en), and defanti_0; --define defanti_0|1|2|3 selects Bonus AA.\n--language es|ru|pl selects the community patch's DD_Dil 3-5 and requires its installed language data (K22Widescreen.wrs, _data/language/spanish|russian|polish).\n--camera first-person: optional community-patch 1.8.5 style first-person camera for Demir and Ebru on the original campaign scripts (default original; patched scripts keep their own F5 camera).\nReads the supplied original game data/scripts; uses private XDG saves. No proprietary assets are embedded.\n"
  "kabus22 --import-saves WINDOWS_GAME_DIR [--data GAME_ROOT] imports a validated original Windows save set (kayit*.sav, kysd.sav, ftz.k22) into the private save root, rotating replaced files into backups/.\n"
  "Testing: --scenario FILE [--scenario-out DIR] runs a scripted gameplay scenario (docs/GAMEPLAY_TESTING.md) with a fixed 1/60 s step, headless or rendered; exit code 0 only if every step passed.\n"
  "Graphics: kabus22 --list-capabilities prints backend/option/texture-pack JSON without game data. kabus22 --dump-textures DIR --data GAME_ROOT [--mode campaign|bonus] writes every decodable original texture as DIR/<key>.png plus DIR/index.tsv.\n"
- "  --preset original|enhanced|ultra|custom (absent = original), --graphics KEY=VALUE (repeatable; backend, pbr, anisotropy, msaa, texture_packs, fps_limit=original|30..240|unlimited, ... see --list-capabilities), --texture-pack NAME (repeatable, priority order; ${XDG_DATA_HOME:-~/.local/share}/kabus22/packs/NAME). Preset backends degrade with a notice; explicit --renderer/--ray-tracing/--graphics backend fail hard.\n"
+ "  --preset original|enhanced|ultra|custom (absent = original), --graphics KEY=VALUE (repeatable; backend, pbr, anisotropy, msaa, texture_packs, fps_limit=original|30..240|unlimited, ... see --list-capabilities), --texture-pack NAME (repeatable, priority order; " K22_HELP_DATA "/packs/NAME). Preset backends degrade with a notice; explicit --renderer/--ray-tracing/--graphics backend fail hard.\n"
  "Seamless doors: --graphics seamless_doors=on|off (default on). kabus22 --door-table LEVELS.tsv --data GAME_ROOT prints every LY_Kapi doorway and whether it is seamless (docs/SEAMLESS_DOORS.md).\n"
- "Controller: ${XDG_CONFIG_HOME:-~/.config}/kabus22/controller.ini mode=original|modern (absent = original).\n"
- "Mods (docs/MODDING.md): --mod ID (repeatable, priority order; ${XDG_DATA_HOME:-~/.local/share}/kabus22/mods/ID) replaces or adds game files by name. kabus22 --export-files OUT --data GAME_ROOT [--mode campaign|bonus] writes every original game file as OUT/<name>, the layout of a mod's data/.\n"
+ "Controller: " K22_HELP_CONFIG "/controller.ini mode=original|modern (absent = original).\n"
+ "Mods (docs/MODDING.md): --mod ID (repeatable, priority order; " K22_HELP_DATA "/mods/ID) replaces or adds game files by name. kabus22 --export-files OUT --data GAME_ROOT [--mode campaign|bonus] writes every original game file as OUT/<name>, the layout of a mod's data/.\n"
  "  kabus22 --list-models --data GAME_ROOT [--mode campaign|bonus] [--mod ID ...] prints <model>\\t<original|mod id>. kabus22 --export-model NAME OUT_DIR --data GAME_ROOT [--mode ...] [--mod ID ...] writes the model as the engine loads it as OUT_DIR/<stem>.gltf (+ .bin, skin PNGs); a mod's <stem>.gltf/.glb replaces <stem>.mdl.\n";}
 // Start-up archive first, then RESOURCE order: patch exe K22Widescreen.wrs -> k22.wrs -> kaynak.k22; ISO K22.wrs -> kaynak.k22.
 std::vector<std::string> mount_archives(k22::Assets& assets,bool bonus){
@@ -73,7 +114,7 @@ int export_files(int argc,char** argv){
  for(int i=1;i<argc;++i){std::string_view a=argv[i];if(i+1>=argc)throw std::runtime_error("missing value for "+std::string(a));if(a=="--export-files")out=argv[++i];else if(a=="--data")data=argv[++i];else if(a=="--mode")mode=argv[++i];else throw std::runtime_error("--export-files accepts only --data GAME_ROOT and --mode campaign|bonus");}
  if(data.empty())throw std::runtime_error("--data GAME_ROOT is required");if(mode!="campaign"&&mode!="bonus")throw std::runtime_error("unsupported mode; choose campaign or bonus");
  k22::Assets assets(data,mode=="bonus");auto archives=mount_archives(assets,mode=="bonus");
- out=std::filesystem::weakly_canonical(std::filesystem::absolute(out));auto inside=out.lexically_relative(assets.root());
+ out=k22::platform::weakly_canonical_path(std::filesystem::absolute(out));auto inside=out.lexically_relative(assets.root());
  if(!inside.empty()&&*inside.begin()!="..")throw std::runtime_error("--export-files OUT must not be inside GAME_ROOT");
  if(std::filesystem::exists(out)&&!(std::filesystem::is_directory(out)&&std::filesystem::is_empty(out)))throw std::runtime_error("--export-files OUT must not exist or be an empty directory");
  std::size_t count=0;
@@ -119,8 +160,10 @@ int import_saves(int argc,char** argv){
 }
 }
 int main(int argc,char** argv){try{
+ // The option passes below compact argv in place: they work on a copy, since SDL2main on Windows frees every original entry after main.
+ std::vector<char*> arguments(argv,argv+argc+1);argv=arguments.data();
  av_log_set_level(AV_LOG_ERROR); // FFmpeg warnings about the original media (vorbis timestamps, wmv3 extra data) flood the logs; keep errors.
- std::filesystem::path data,entry,capture;bool headless=false;std::uint64_t frames=0;bool frameLimit=false;std::string mode="campaign",language,audioLanguage,rendererName="opengl",rayTracing,display="native";std::vector<std::string> defines;int displayWidth=0,displayHeight=0;k22::WindowMode windowMode=k22::WindowMode::Borderless;bool displayDimensions=false,displayMode=false;
+ std::filesystem::path data,entry,capture;bool headless=false;std::uint64_t frames=0;bool frameLimit=false;std::string mode="campaign",language,audioLanguage,rendererName(k22::render_policy::defaultBackend),rayTracing,display="native";std::vector<std::string> defines;int displayWidth=0,displayHeight=0;k22::WindowMode windowMode=k22::WindowMode::Borderless;bool displayDimensions=false,displayMode=false;
  for(int i=1;i<argc;++i)if(std::string_view(argv[i])=="--import-saves")return import_saves(argc,argv);
  for(int i=1;i<argc;++i){std::string_view a=argv[i];if(a=="--list-capabilities"){if(argc!=2)throw std::runtime_error("--list-capabilities takes no other options");return k22::graphics_cli::list_capabilities();}if(a=="--dump-textures")return k22::graphics_cli::dump(argc,argv);if(a=="--door-table")return k22::door_table(argc,argv);if(a=="--export-files")return export_files(argc,argv);if(a=="--list-models"||a=="--export-model")return models(argc,argv);}
  auto graphics=k22::graphics_cli::extract(argc,argv);
@@ -131,7 +174,13 @@ int main(int argc,char** argv){try{
  for(int i=1;i<argc;++i){std::string_view a=argv[i];auto value=[&](){if(i+1>=argc)throw std::runtime_error("missing value for "+std::string(a));return std::string(argv[++i]);};if(a=="--help"||a=="-h"){help();return 0;}if(a=="--version"){std::cout<<"kabus22 native engine " K22_VERSION "\n";return 0;}if(a=="--data")data=value();else if(a=="--mode")mode=value();else if(a=="--script")entry=value();else if(a=="--display"){display=value();if(display!="native"&&display!="authored")throw std::runtime_error("--display requires native or authored");}else if(a=="--resolution"){auto [w,h]=resolution(value());displayWidth=w;displayHeight=h;displayDimensions=true;}else if(a=="--window-mode"){auto name=value();if(name=="windowed")windowMode=k22::WindowMode::Windowed;else if(name=="fullscreen")windowMode=k22::WindowMode::Fullscreen;else if(name=="borderless")windowMode=k22::WindowMode::Borderless;else throw std::runtime_error("--window-mode requires windowed, fullscreen or borderless");displayMode=true;}else if(a=="--language")language=value();else if(a=="--audio-language")audioLanguage=value();else if(a=="--define")defines.push_back(value());else if(a=="--renderer")rendererName=value();else if(a=="--ray-tracing"){rayTracing=value();if(rayTracing!="on"&&rayTracing!="off")throw std::runtime_error("--ray-tracing requires on or off");}else if(a=="--capture")capture=value();else if(a=="--headless")headless=true;else if(a=="--frames"){auto n=value();auto [p,e]=std::from_chars(n.data(),n.data()+n.size(),frames);if(e!=std::errc{}||p!=n.data()+n.size())throw std::runtime_error("invalid frame limit");frameLimit=true;}else throw std::runtime_error("unknown option "+std::string(a));}
  if(display=="authored"&&(displayDimensions||displayMode))throw std::runtime_error("--resolution and --window-mode require --display native");
  if(data.empty())throw std::runtime_error("--data GAME_ROOT is required");if(headless&&!capture.empty())throw std::runtime_error("--capture requires actual renderer output, not --headless");
+#if K22_HAVE_D3D12
+ if(rendererName!="opengl"&&rendererName!="vulkan"&&rendererName!="d3d12")throw std::runtime_error("unsupported renderer; choose opengl, vulkan or d3d12");
+#else
  if(rendererName!="opengl"&&rendererName!="vulkan")throw std::runtime_error("unsupported renderer; choose opengl or vulkan");
+#endif
+ {std::string compiled;bool built=false;for(const auto& b:k22::graphics_cli::compiledBackends){std::string_view n=b.name;if(n=="vulkan-rt")continue;if(n=="vulkan-raster")n="vulkan";built|=n==rendererName;compiled+=(compiled.empty()?"":", ")+std::string(n);}
+  if(!built)throw std::runtime_error("--renderer "+rendererName+" is not compiled into this build; choose "+compiled);}
  if(!rayTracing.empty()&&rendererName!="vulkan")throw std::runtime_error("--ray-tracing applies only to --renderer vulkan");
  if(headless&&rendererName=="vulkan")throw std::runtime_error("--renderer vulkan requires a real window, not --headless");
  if(mode!="campaign"&&mode!="bonus")throw std::runtime_error("unsupported mode; choose campaign or bonus");const bool bonus=mode=="bonus";
@@ -139,7 +188,11 @@ int main(int argc,char** argv){try{
  k22::Assets assets(data,bonus);
  add_mods(assets,mods);
  if(language.empty()&&bonus){language="en";auto marker=private_bonus_locale();if(!marker&&assets.contains("ygm.k22"))marker=assets.text("ygm.k22");if(marker){auto remembered=std::string_view(*marker).substr(0,marker->find_first_of("\r\n"));if(remembered=="111")language="tr";else if(remembered=="222")language="de";}}
+#ifdef _WIN32
+ if(language.empty()){auto name=lower(k22::platform::user_locale_name());language=name.starts_with("tr")?"tr":name.starts_with("de")?"de":"en";}if(audioLanguage.empty())audioLanguage=language=="tr"?"tr":"en";
+#else
  if(language.empty()){const char* locale=std::getenv("LC_ALL");if(!locale||!*locale)locale=std::getenv("LC_MESSAGES");if(!locale||!*locale)locale=std::getenv("LANG");auto name=locale?lower(locale):std::string{};language=name.starts_with("tr")?"tr":name.starts_with("de")?"de":"en";}if(audioLanguage.empty())audioLanguage=language=="tr"?"tr":"en";
+#endif
  // Patch DilMenu adds es/ru/pl (DD_Dil 3-5); they exist only with its scripts and _data/language/<folder> files.
  if(language!="tr"&&language!="en"&&language!="de"){
   static constexpr std::array<std::pair<std::string_view,std::string_view>,3> patchLanguages{{{"es","spanish"},{"ru","russian"},{"pl","polish"}}};
@@ -154,13 +207,13 @@ int main(int argc,char** argv){try{
  if(bonusAnti<0)bonusAnti=0;
  mount_archives(assets,bonus);
  std::unordered_map<std::string,std::filesystem::path> sourceFiles;std::string entryName;
- if(!entry.empty()&&(!bonus||entry.is_absolute())&&std::filesystem::is_regular_file(entry)){entry=std::filesystem::canonical(entry);auto sourceRoot=entry.parent_path();for(const auto& f:std::filesystem::recursive_directory_iterator(sourceRoot)){if(f.is_symlink())continue;if(f.is_regular_file()&&lower(f.path().extension().string())==".wdl")sourceFiles.emplace(lower(f.path().lexically_relative(sourceRoot).generic_string()),f.path());}entryName=entry.filename().string();}
+ if(!entry.empty()&&(!bonus||entry.is_absolute())&&std::filesystem::is_regular_file(entry)){entry=k22::platform::canonical_path(entry);auto sourceRoot=entry.parent_path();for(const auto& f:std::filesystem::recursive_directory_iterator(sourceRoot)){if(f.is_symlink())continue;if(f.is_regular_file()&&lower(f.path().extension().string())==".wdl")sourceFiles.emplace(lower(f.path().lexically_relative(sourceRoot).generic_string()),f.path());}entryName=entry.filename().string();}
  else if(bonus)entryName=entry.empty()?"K22_mode.wdl":entry.generic_string();
  else if(!entry.empty())entryName=entry.generic_string();else if(assets.contains("K22Widescreen.wdl"))entryName="K22Widescreen.wdl";else if(assets.contains("K22.wdl"))entryName="K22.wdl";else throw std::runtime_error("no full game WDL entry in supplied game data; provide --script ENTRY");
  // A6 00420120: .WDL is archive-only (0062119c set in ISO and patch executables); only an explicit --script may be loose.
  auto source=[&](std::string_view name){auto key=lower(name);auto it=sourceFiles.find(key);if(it!=sourceFiles.end()){std::ifstream in(it->second,std::ios::binary);if(!in)throw std::runtime_error("cannot read script "+it->second.string());auto size=std::filesystem::file_size(it->second);if(size>16*1024*1024)throw std::runtime_error("script exceeds16MiB safety bound");std::string text(size,'\0');if(size&&!in.read(text.data(),std::streamsize(size)))throw std::runtime_error("truncated script read");return text;}return bonus||entry.empty()?assets.archive_text(name):assets.text(name);};
  // K22.wdl original:580-584 / ISO:649-653: legacy campaign gate, not a D3D backend declaration.
- k22::RenderOptions renderOptions;renderOptions.backend=rendererName=="vulkan"?k22::RendererBackend::Vulkan:k22::RendererBackend::OpenGL;renderOptions.rayTracing=rayTracing!="off";if(bonus){constexpr int samples[]={0,1,4,9};renderOptions.samples=samples[bonusAnti];}
+ k22::RenderOptions renderOptions;renderOptions.backend=rendererName=="vulkan"?k22::RendererBackend::Vulkan:rendererName=="d3d12"?k22::RendererBackend::D3D12:k22::RendererBackend::OpenGL;renderOptions.rayTracing=rayTracing!="off";if(bonus){constexpr int samples[]={0,1,4,9};renderOptions.samples=samples[bonusAnti];}
  const auto renderBase=renderOptions; // what a graphics key left at its fallback keeps (in-game graphics menu)
  k22::graphics_cli::apply(renderOptions,graphics);
  std::unique_ptr<k22::Renderer> renderer;if(!headless)renderer=k22::graphics_cli::create(renderOptions,graphics);k22::Media media(assets,!headless);k22::State state;if(bonus)state.profile=k22::SemanticProfile::BonusA7;k22::Engine engine(assets,renderer.get(),media,state);
@@ -197,7 +250,11 @@ int main(int argc,char** argv){try{
   // K22_FRAME_TIMING=FILE: one line per frame, microseconds: frame poll+scenario tick draw finish_frame, then live particles, door phase, held (seamless doors).
   static std::FILE* timingLog=[]{const char* p=std::getenv("K22_FRAME_TIMING");return p&&*p?std::fopen(p,"w"):nullptr;}();
   // K22_STATE_DIGEST=FILE: one line per frame, "frame digest" (Engine::state_digest, hex) after the tick. A directory: DIR/<scenario name>.digest.
+#ifdef _WIN32
+  static std::FILE* digestLog=[&]{const char* p=std::getenv("K22_STATE_DIGEST");if(!p||!*p)return static_cast<std::FILE*>(nullptr);std::filesystem::path file=p;if(std::filesystem::is_directory(file))file/=(scenarioFile.empty()?std::string("frames"):scenarioFile.stem().string())+".digest";return ::_wfopen(file.c_str(),L"w");}();
+#else
   static std::FILE* digestLog=[&]{const char* p=std::getenv("K22_STATE_DIGEST");if(!p||!*p)return static_cast<std::FILE*>(nullptr);std::filesystem::path file=p;if(std::filesystem::is_directory(file))file/=(scenarioFile.empty()?std::string("frames"):scenarioFile.stem().string())+".digest";return std::fopen(file.c_str(),"w");}();
+#endif
   const auto t0=timingLog?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
   // In-game graphics menu (docs/GRAPHICS_MENU.md): a change Renderer::reconfigure cannot apply live gets a new renderer here, before
   // poll, keeping the window mode/size. A chosen backend fails hard (no preset degradation); then the previous options come back.
@@ -217,7 +274,7 @@ int main(int argc,char** argv){try{
   if(renderer&&!engine.hold_presentation())renderer->draw(engine.frame());
   const auto t3=timingLog?std::chrono::steady_clock::now():t0;
   engine.finish_frame(runtime);++count;
-  if(timingLog){const auto t4=std::chrono::steady_clock::now();auto us=[](auto d){return (long long)std::chrono::duration_cast<std::chrono::microseconds>(d).count();};std::fprintf(timingLog,"%llu %lld %lld %lld %lld %zu %d %d\n",(unsigned long long)count-1,us(t1-t0),us(t2-t1),us(t3-t2),us(t4-t3),engine.activeParticles.size(),engine.door_phase(),int(engine.hold_presentation()));}
+  if(timingLog){const auto t4=std::chrono::steady_clock::now();auto us=[](auto d){return (long long)std::chrono::duration_cast<std::chrono::microseconds>(d).count();};std::fprintf(timingLog,"%llu %lld %lld %lld %lld %zu %d %d\n",(unsigned long long)count-1,us(t1-t0),us(t2-t1),us(t3-t2),us(t4-t3),engine.activeParticles.size(),engine.door_phase(),int(engine.hold_presentation()));if(count%256==0)std::fflush(timingLog);} // readable while running (the Xbox app is stopped, not exited)
   // K22_PARTICLE_CENSUS=FILE: every 0.5 s of scenario time, "seconds total name=count ..." (live particles per birth action).
   static std::FILE* censusLog=[]{const char* p=std::getenv("K22_PARTICLE_CENSUS");return p&&*p?std::fopen(p,"w"):nullptr;}();
   if(censusLog&&scenario&&std::floor(double(count)*step*2)!=std::floor(double(count-1)*step*2)){std::map<std::string,int> census;for(const auto& p:engine.activeParticles)++census[std::string(runtime.function_name(p.callback))];std::fprintf(censusLog,"%.1f %zu",double(count)*step,engine.activeParticles.size());for(const auto& [name,n]:census)std::fprintf(censusLog," %s=%d",name.c_str(),n);std::fprintf(censusLog,"\n");}
