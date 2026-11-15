@@ -1,5 +1,6 @@
 @echo off
-rem Runs one command inside the Visual Studio 2026 x64 developer environment (cl, link, cmake, ninja, dxc).
+rem Runs one command inside the x64 developer environment (cl, link, cmake, ninja, dxc) of the newest Visual Studio
+rem with the C++ x64 tools that vswhere finds (2022 or later).
 rem   windows\dev.cmd cmake ...          desktop libraries
 rem   windows\dev.cmd --uwp cmake ...    UWP store CRT and WindowsApp libraries (Xbox build)
 setlocal
@@ -10,3 +11,4 @@ if not defined K22_VS (echo kabus22: Visual Studio with the C++ x64 tools not fo
 call "%K22_VS%\VC\Auxiliary\Build\vcvarsall.bat" x64 %K22_PLATFORM% >nul || exit /b 1
 if defined K22_PLATFORM (set "K22_ARGS=%*" & call set "K22_ARGS=%%K22_ARGS:*--uwp =%%") else set "K22_ARGS=%*"
 %K22_ARGS%
+exit /b %ERRORLEVEL%

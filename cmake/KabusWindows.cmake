@@ -4,7 +4,12 @@ include_guard(GLOBAL)
 #   Xbox UWP Dev Mode (CMAKE_SYSTEM_NAME=WindowsStore, x64-uwp): Direct3D 12 only, packaged by windows/uwp (docs/XBOX.md).
 # Vulkan, hardware ray tracing and FSR stay Linux-only. The CTest suites are POSIX-only and are not built here.
 if(NOT MSVC)
-  message(FATAL_ERROR "The Windows build requires MSVC (Visual Studio 2026)")
+  message(FATAL_ERROR "The Windows build requires MSVC (Visual Studio 2022 or later)")
+endif()
+if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+  # clang-cl also sets MSVC, but it has no 64-significand-bit long double, which the patched ODE contact merge requires
+  # outside cl.exe (cmake/KabusODEContact.cmake #error).
+  message(FATAL_ERROR "The Windows build requires the MSVC compiler cl.exe; ${CMAKE_CXX_COMPILER_ID} (clang-cl) is not supported")
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
   set(K22_UWP ON)
@@ -31,7 +36,6 @@ find_package(SDL2 CONFIG REQUIRED)
 find_package(Freetype REQUIRED)
 find_package(FFMPEG REQUIRED)
 find_package(Threads REQUIRED)
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
 include(cmake/KabusODE.cmake)
 if(K22_UWP)
   # ODE's Windows dError/dDebug/dMessage call MessageBox, which UWP lacks (config.h forces WIN32 on).
@@ -85,6 +89,39 @@ else()
   add_executable(kabus22 native/main.cpp native/scenario.cpp)
   target_compile_options(kabus22 PRIVATE ${K22_MSVC_OPTIONS})
   target_link_libraries(kabus22 PRIVATE kabus22_core $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main>)
-  # vcpkg's applocal step copies SDL2/FFmpeg/FreeType DLLs next to kabus22.exe.
-  install(TARGETS kabus22 RUNTIME DESTINATION bin)
+  # Portable folder (docs/WINDOWS.md): `cmake --install BUILD --prefix DIR` is what windows/package-windows.ps1 zips and
+  # windows/installer/kabus22.iss packs. vcpkg's applocal step copies the SDL2/FFmpeg/FreeType/libepoxy DLLs next to
+  # kabus22.exe in the build tree and, by x_vcpkg_install_local_dependencies (the toolchain's install() override exists only
+  # when X_VCPKG_APPLOCAL_DEPS_INSTALL is set before it loads), into the install tree. The MSVC runtime DLLs are deployed
+  # app-locally (the UCRT is part of Windows 10 and later). No game data is ever installed.
+  install(TARGETS kabus22 RUNTIME DESTINATION .)
+  if(COMMAND x_vcpkg_install_local_dependencies)
+    x_vcpkg_install_local_dependencies(TARGETS kabus22 DESTINATION .)
+  endif()
+  set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION .)
+  include(InstallRequiredSystemLibraries)
+  install(FILES windows/Kabus22.cmd windows/import-data.ps1 windows/prepare-data.ps1 DESTINATION .)
+  install(FILES docs/WINDOWS.md DESTINATION . RENAME README.md)
+  install(FILES LICENSE DESTINATION licenses RENAME kabus22-LICENSE.txt)
+  install(FILES third_party/ode-LICENSE-BSD.TXT third_party/ode-ou-LICENSE-BSD.TXT DESTINATION licenses)
+  install(FILES third_party/cgltf/LICENSE DESTINATION licenses RENAME cgltf-LICENSE.txt)
+  if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
+    # Every vcpkg port's notice (share/<port>/copyright) and the exact port versions; the release also carries their sources.
+    file(GLOB K22_VCPKG_NOTICES "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/*/copyright")
+    foreach(notice IN LISTS K22_VCPKG_NOTICES)
+      get_filename_component(port "${notice}" DIRECTORY)
+      get_filename_component(port "${port}" NAME)
+      install(FILES "${notice}" DESTINATION licenses/vcpkg RENAME "${port}.txt")
+    endforeach()
+    file(GLOB K22_VCPKG_LISTS "${VCPKG_INSTALLED_DIR}/vcpkg/info/*_${VCPKG_TARGET_TRIPLET}.list")
+    set(K22_VCPKG_PORTS "vcpkg ports in this build (port version), baseline windows/vcpkg.json:\n")
+    foreach(list IN LISTS K22_VCPKG_LISTS)
+      get_filename_component(name "${list}" NAME)
+      string(REGEX REPLACE "_${VCPKG_TARGET_TRIPLET}\\.list$" "" name "${name}")
+      string(REGEX REPLACE "^([^_]+)_" "\\1 " name "${name}")
+      string(APPEND K22_VCPKG_PORTS "${name}\n")
+    endforeach()
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/vcpkg-ports.txt" "${K22_VCPKG_PORTS}")
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/vcpkg-ports.txt" DESTINATION licenses)
+  endif()
 endif()

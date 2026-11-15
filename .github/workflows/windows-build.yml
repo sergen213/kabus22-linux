@@ -1,0 +1,157 @@
+name: Windows build
+# Windows desktop build (MSVC + vcpkg; Direct3D 12 and OpenGL) packaged as the portable zip and the setup exe
+# (docs/WINDOWS.md). Called by ci.yml on every push/PR and by release.yml for tags, which also asks for the
+# corresponding-sources archive of the bundled vcpkg libraries. Never contains game data.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Package version X.Y.Z[-pre]; empty means the CMake project version
+        type: string
+        default: ""
+      sources:
+        description: Also build kabus22-<version>-windows-x64-sources.zip
+        type: boolean
+        default: false
+permissions:
+  contents: read
+env:
+  K22_DXC_URL: https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/dxc_2026_09_29.zip
+  K22_DXC_SHA256: ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1
+  K22_INNO_CHOCO_VERSION: "6.4.3"
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: vcpkg at the manifest baseline
+        shell: pwsh
+        run: |
+          $baseline = (Get-Content -Raw windows/vcpkg.json | ConvertFrom-Json).'builtin-baseline'
+          $root = Join-Path $env:RUNNER_TEMP 'vcpkg'
+          # A full clone: vcpkg's versioning refuses shallow repositories.
+          git clone --quiet https://github.com/microsoft/vcpkg.git $root
+          if ($LASTEXITCODE) { exit 1 }
+          git -C $root checkout --quiet $baseline
+          if ($LASTEXITCODE) { exit 1 }
+          & "$root\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE) { exit 1 }
+          $cache = Join-Path $env:RUNNER_TEMP 'vcpkg-cache'
+          New-Item -ItemType Directory -Force -Path $cache | Out-Null
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "K22_VCPKG_ROOT=$root"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VCPKG_BINARY_SOURCES=clear;files,$cache,readwrite"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VCPKG_DISABLE_METRICS=1"
+      # FFmpeg builds from source for an hour: keep vcpkg's binary packages. Every run saves its own key (the files cache
+      # only grows), so a failed engine build still keeps the dependencies it built.
+      - name: Restore vcpkg binary cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}\vcpkg-cache
+          key: vcpkg-x64-windows-${{ hashFiles('windows/vcpkg.json') }}-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-x64-windows-${{ hashFiles('windows/vcpkg.json') }}-
+            vcpkg-x64-windows-
+      - name: Pinned DirectX shader compiler
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'dxc.zip'
+          Invoke-WebRequest -Uri $env:K22_DXC_URL -OutFile $zip -UseBasicParsing
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash -ne $env:K22_DXC_SHA256) { throw 'DXC download does not match its pinned SHA-256' }
+          $dir = Join-Path $env:RUNNER_TEMP 'dxc'
+          Expand-Archive -LiteralPath $zip -DestinationPath $dir
+          # dxc signs DXIL only with dxil.dll beside it; cmake/KabusD3D12Shaders.cmake rejects unsigned containers.
+          foreach ($file in 'dxc.exe', 'dxil.dll') { if (-not (Test-Path -LiteralPath "$dir\bin\x64\$file")) { throw "DXC archive lacks bin\x64\$file" } }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "K22_DXC=$dir\bin\x64\dxc.exe"
+      - name: Configure (vcpkg dependencies) and build
+        shell: cmd
+        run: |
+          call windows\dev.cmd cmake -S . -B build\win64 -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_TOOLCHAIN_FILE=%K22_VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake" "-DVCPKG_MANIFEST_DIR=%CD%\windows" -DVCPKG_TARGET_TRIPLET=x64-windows "-DVCPKG_INSTALLED_DIR=%CD%\build\vcpkg_installed" "-DK22_DXC=%K22_DXC%" || exit /b 1
+          call windows\dev.cmd cmake --build build\win64 || exit /b 1
+      - name: Save vcpkg binary cache
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}\vcpkg-cache
+          key: vcpkg-x64-windows-${{ hashFiles('windows/vcpkg.json') }}-${{ github.run_id }}
+      - name: Inno Setup compiler
+        shell: pwsh
+        run: |
+          # windows/installer/kabus22.iss needs Inno Setup 6.3 or newer (compiles with 6.4 and 7.1).
+          $candidates = "$env:ProgramFiles\Inno Setup 7\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          $iscc = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup --version=$env:K22_INNO_CHOCO_VERSION --yes --no-progress
+            if ($LASTEXITCODE) { exit 1 }
+            $iscc = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+            if (-not $iscc) { throw 'ISCC.exe not found after installing Inno Setup' }
+          }
+          Write-Host "Inno Setup: $iscc $((Get-Item -LiteralPath $iscc).VersionInfo.ProductVersion)"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "K22_ISCC=$iscc"
+      - name: Package portable zip and setup
+        shell: pwsh
+        env:
+          K22_PACKAGE_VERSION: ${{ inputs.version }}
+        run: |
+          & ./windows/package-windows.ps1 -Build build\win64 -Out dist -Version $env:K22_PACKAGE_VERSION -Iscc $env:K22_ISCC
+      # The runner has no GPU: both commands exit before a renderer is needed (backend probes report unavailable).
+      - name: Smoke test the packaged engine
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $exe = (Resolve-Path dist\Kabus22\kabus22.exe).Path
+          & $exe --version
+          if ($LASTEXITCODE) { throw "kabus22 --version failed with exit code $LASTEXITCODE" }
+          $capabilities = & $exe --list-capabilities
+          if ($LASTEXITCODE) { throw "kabus22 --list-capabilities failed with exit code $LASTEXITCODE" }
+          $json = $capabilities | ConvertFrom-Json
+          foreach ($backend in 'd3d12', 'opengl') { if (-not $json.backends.$backend) { throw "backend $backend not compiled in: $capabilities" } }
+          $json.backends | ConvertTo-Json
+      - name: Corresponding sources of the bundled vcpkg libraries
+        if: ${{ inputs.sources }}
+        shell: pwsh
+        run: |
+          $version = (Get-ChildItem dist\kabus22-*-windows-x64.zip).Name -replace '^kabus22-(.*)-windows-x64\.zip$', '$1'
+          $downloads = Join-Path $env:RUNNER_TEMP 'vcpkg-sources'
+          $env:VCPKG_DOWNLOADS = $downloads
+          $env:VCPKG_BINARY_SOURCES = 'clear'
+          New-Item -ItemType Directory -Force -Path $downloads | Out-Null
+          # A fresh install root: every port's portfile runs in download mode and fetches its upstream source.
+          & "$env:K22_VCPKG_ROOT\vcpkg.exe" install --only-downloads --triplet x64-windows --x-manifest-root=windows "--x-install-root=$env:RUNNER_TEMP\vcpkg-sources-root"
+          if ($LASTEXITCODE) { exit 1 }
+          $name = "kabus22-$version-windows-x64-sources"
+          $stage = Join-Path $env:RUNNER_TEMP $name
+          New-Item -ItemType Directory -Force -Path "$stage\downloads", "$stage\ports" | Out-Null
+          # Upstream source archives; msys2 packages and tools/ are build tools, not part of the binaries.
+          Get-ChildItem -LiteralPath $downloads -File | Where-Object { $_.Name -notlike 'msys2-*' -and $_.Extension -ne '.part' } | Copy-Item -Destination "$stage\downloads"
+          foreach ($list in Get-ChildItem build\vcpkg_installed\vcpkg\info\*_x64-windows.list) {
+            $port = $list.Name.Split('_')[0]
+            Copy-Item -Recurse -LiteralPath "$env:K22_VCPKG_ROOT\ports\$port" -Destination "$stage\ports\$port"
+          }
+          $baseline = (Get-Content -Raw windows/vcpkg.json | ConvertFrom-Json).'builtin-baseline'
+          Set-Content -LiteralPath "$stage\README.txt" -Value @(
+            "Corresponding sources of the third-party libraries in kabus22-$version-windows-x64.zip and its setup exe.",
+            "downloads\: the upstream source archives vcpkg fetched; ports\: the vcpkg port recipes and patches that built them",
+            "(microsoft/vcpkg $baseline, triplet x64-windows, manifest windows/vcpkg.json of the Kabus22 sources).",
+            "Port versions and notices: licenses\ in the zip.")
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [IO.Compression.ZipFile]::CreateFromDirectory($stage, "$PWD\dist\$name.zip", [IO.Compression.CompressionLevel]::Optimal, $true)
+      - name: Upload portable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: kabus22-windows-x64
+          path: dist/kabus22-*-windows-x64.zip
+          if-no-files-found: error
+      - name: Upload setup
+        uses: actions/upload-artifact@v4
+        with:
+          name: kabus22-windows-setup-x64
+          path: dist/Kabus22-*-Windows-Setup-x64.exe
+          if-no-files-found: error
+      - name: Upload vcpkg sources
+        if: ${{ inputs.sources }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kabus22-windows-x64-sources
+          path: dist/kabus22-*-windows-x64-sources.zip
+          if-no-files-found: error

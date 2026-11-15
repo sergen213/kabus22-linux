@@ -676,3 +676,11 @@
 /windows/uwp/*
 !/windows/uwp/AppxManifest.xml.in
 !/docs/XBOX.md
+!/windows/Kabus22.cmd
+!/windows/import-data.ps1
+!/windows/package-windows.ps1
+!/windows/installer/
+/windows/installer/*
+!/windows/installer/kabus22.iss
+!/docs/WINDOWS.md
+!/.github/workflows/windows-build.yml
