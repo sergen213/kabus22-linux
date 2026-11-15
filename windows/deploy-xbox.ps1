@@ -2,17 +2,19 @@
 Installs and starts the Xbox package (windows/package-uwp.ps1 output) on a Dev Mode console through Windows Device Portal
 (docs/XBOX.md). The console's Device Portal must be enabled with a username and password (Dev Home > Remote Access).
 
-  powershell -ExecutionPolicy Bypass -File windows\deploy-xbox.ps1 -Console 192.168.2.28 -User NAME -Password SECRET -Package D:/kabus22/xbox-work/package
+  powershell -ExecutionPolicy Bypass -File windows\deploy-xbox.ps1 -Console 192.168.2.28 -Package D:/kabus22/xbox-work/package
+  ... asks for the Device Portal username and password; pass -Credential (Get-Credential NAME) to supply them from a script.
   ... without -Package   starts the installed game again.
   ... -EngineArgs "--language en"   writes LocalState/args.txt (extra engine arguments, space-separated, no spaces inside
                                     one argument) before starting; -EngineArgs "" clears it.
   ... -Log               prints LocalState/kabus22.log (the engine's stdout/stderr) and does nothing else.
   ... -Screenshot FILE   saves the console's current screen as PNG and does nothing else.
+The password never appears on a command line: curl reads it from a config file only the current user can open, and that
+file, the session cookie jar and the response file are deleted when the script ends.
 #>
 param(
   [Parameter(Mandatory)] [string] $Console,
-  [Parameter(Mandatory)] [string] $User,
-  [Parameter(Mandatory)] [string] $Password,
+  [Parameter(Mandatory)] [System.Management.Automation.PSCredential] $Credential,
   [string] $Package,
   [string] $EngineArgs,
   [switch] $NoLaunch,
@@ -21,14 +23,29 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $base = "https://${Console}:11443"
-$jar = Join-Path $env:TEMP 'kabus22-wdp-cookies.txt'
-$auth = "${User}:${Password}"
+# A private file: inheritance removed, full control for the current user only (set before any secret is written).
+function New-PrivateFile {
+  $path = (New-TemporaryFile).FullName
+  & icacls.exe $path /inheritance:r /grant:r "*$([Security.Principal.WindowsIdentity]::GetCurrent().User.Value):F" | Out-Null
+  if ($LASTEXITCODE -ne 0) { Remove-Item -LiteralPath $path -Force; throw "icacls failed to restrict $path (exit $LASTEXITCODE)" }
+  $path
+}
+$jar = $null; $body = $null; $config = $null
+try {
+$jar = New-PrivateFile
+$body = New-PrivateFile
+$config = New-PrivateFile
+# curl config syntax: a double-quoted value takes backslash escapes.
+$network = $Credential.GetNetworkCredential() # UserName without the "\" Get-Credential may prefix
+$secret = "$($network.UserName):$($network.Password)"
+$quoted = $secret.Replace('\', '\\').Replace('"', '\"').Replace("`r", '\r').Replace("`n", '\n').Replace("`t", '\t')
+[IO.File]::WriteAllText($config, "user = `"$quoted`"`n")
+Remove-Variable network, secret, quoted
 function Invoke-Wdp([string] $method, [string] $path, [string[]] $extra = @()) {
   if ($method -ne 'GET' -and $extra -notcontains '-F' -and $extra -notcontains '--data-binary') { $extra += @('-H', 'Content-Length: 0') } # WDP answers 411 otherwise
   $token = (Get-Content $jar -ErrorAction SilentlyContinue | Where-Object { $_ -match "`tCSRF-Token`t" } | ForEach-Object { ($_ -split "`t")[-1] }) | Select-Object -Last 1
-  $body = Join-Path $env:TEMP 'kabus22-wdp-body.txt'
-  Remove-Item $body -ErrorAction SilentlyContinue
-  $curlArgs = @('-sk', '-u', $auth, '-b', $jar, '-c', $jar, '-X', $method, '-o', $body, '-w', '%{http_code}', '-H', "X-CSRF-Token: $token") + $extra + @("$base$path")
+  Clear-Content -LiteralPath $body
+  $curlArgs = @('-sk', '-K', $config, '-b', $jar, '-c', $jar, '-X', $method, '-o', $body, '-w', '%{http_code}', '-H', "X-CSRF-Token: $token") + $extra + @("$base$path")
   $code = & curl.exe @curlArgs
   if ($LASTEXITCODE -ne 0) { throw "Device Portal $method $path failed (curl exit $LASTEXITCODE)" }
   [pscustomobject]@{ Code = [int]$code; Body = (Get-Content -Raw $body -ErrorAction SilentlyContinue) }
@@ -46,7 +63,7 @@ if ($Log) {
   $r.Body; return
 }
 if ($Screenshot) {
-  & curl.exe -sk -u $auth -o $Screenshot -w '%{http_code}' "$base/ext/screenshot" | Out-Null
+  & curl.exe -sk -K $config -o $Screenshot -w '%{http_code}' "$base/ext/screenshot" | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Screenshot failed (curl exit $LASTEXITCODE)" }
   Write-Host "kabus22: screenshot $Screenshot"; return
 }
@@ -110,4 +127,7 @@ if (-not $NoLaunch) {
   Stop-Kabus
   Start-Kabus
   Write-Host 'kabus22: started'
+}
+} finally {
+  foreach ($temporary in $config, $jar, $body) { if ($temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue } }
 }

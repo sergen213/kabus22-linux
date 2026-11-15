@@ -3,7 +3,7 @@
 # Authority: world-contact-boundary/contract.txt section 4 and paired 100c9930 ASM.
 set(_kabus_contact_file "${kabus_ode_SOURCE_DIR}/ode/src/collision_trimesh_box.cpp")
 set(_kabus_contact_original_sha256 "748b26ef299b6abeb0ddf23d910889673ecf18da01d34f6c94eedb69ccc72970")
-set(_kabus_contact_modified_sha256 "b35f35cea3ac01ca454de046979560cd45da841e01fbddd71ebbe0a1b58454fa")
+set(_kabus_contact_modified_sha256 "378f3d21e5e0317b91c13fbbd6a80a4a08d7d46010a1e963355362938d3faf9d")
 # 0.4.17's replacement (long double only); an existing build tree holding it is rewritten.
 set(_kabus_contact_previous_sha256 "b4e81e712cd5c833e38d95287b4ce415bc8db32e20deacc2f9eae93b5c6ddd42")
 file(SHA256 "${_kabus_contact_file}" _kabus_contact_actual_sha256)
@@ -13,8 +13,9 @@ set(_kabus_contact_replacement [=[void sTrimeshBoxColliderData::GenerateContact(
 #if !defined(dSINGLE)
 #error Kabus contact merge requires float dReal
 #elif defined(_MSC_VER) && !defined(__clang__)
-    // MSVC has no 64-significand-bit long double. With float inputs, double holds the differences, squares and products
-    // exactly; only the three-term sums may round differently from PC64, which matters solely at a threshold tie.
+    // MSVC has no 64-significand-bit long double. Float products are exact in double; the coordinate differences and
+    // their squares are exact only for nearby points, the only case where the distance threshold can decide. The sums,
+    // and distant points, may round differently from PC64; that changes a result solely at a threshold tie.
     typedef double kabus_wide;
 #elif !defined(__LDBL_MANT_DIG__) || __LDBL_MANT_DIG__ != 64
 #error Kabus contact merge requires 64-significand-bit long double

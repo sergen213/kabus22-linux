@@ -129,18 +129,32 @@ bool replace(const std::filesystem::path& temporary,const std::filesystem::path&
 unsigned long process_id(){return GetCurrentProcessId();}
 int named_pipe_open(const std::wstring& name){
     CREATEFILE2_EXTENDED_PARAMETERS parameters{};parameters.dwSize=sizeof parameters;parameters.dwSecurityQosFlags=SECURITY_SQOS_PRESENT|SECURITY_IDENTIFICATION;
+    parameters.dwFileFlags=FILE_FLAG_OVERLAPPED; // bounded writes (named_pipe_write)
     HANDLE pipe=CreateFile2(name.c_str(),GENERIC_READ|GENERIC_WRITE,0,OPEN_EXISTING,&parameters);if(pipe==INVALID_HANDLE_VALUE)return -1;
     return int(HandleToLong(pipe));
 }
 void named_pipe_close(int pipe){if(pipe>=0)CloseHandle(LongToHandle(pipe));}
 std::int64_t named_pipe_read(int pipe,void* data,std::size_t size){
-    DWORD pending=0;if(!PeekNamedPipe(LongToHandle(pipe),nullptr,0,nullptr,&pending,nullptr))return -1;if(pending==0)return 0;
-    DWORD n=0;if(!ReadFile(LongToHandle(pipe),data,DWORD(std::min(size,std::size_t(pending))),&n,nullptr)||n==0)return -1;
-    return n;
+    HANDLE h=LongToHandle(pipe);DWORD pending=0;if(!PeekNamedPipe(h,nullptr,0,nullptr,&pending,nullptr))return -1;if(pending==0)return 0;
+    Handle event(CreateEventExW(nullptr,nullptr,CREATE_EVENT_MANUAL_RESET,EVENT_ALL_ACCESS));if(!event)return -1;
+    OVERLAPPED io{};io.hEvent=event.get();DWORD n=0; // the pending bytes are already in the pipe: completes without blocking
+    if(!ReadFile(h,data,DWORD(std::min(size,std::size_t(pending))),&n,&io)&&(GetLastError()!=ERROR_IO_PENDING||!GetOverlappedResult(h,&io,&n,TRUE)))return -1;
+    return n==0?-1:std::int64_t(n);
 }
+// Like the POSIX path's non-blocking send with a 100 ms poll: a write that makes no progress for 100 ms is cancelled and fails,
+// so a stalled Discord client never stalls the game thread.
 bool named_pipe_write(int pipe,const void* data,std::size_t size){
+    HANDLE h=LongToHandle(pipe);Handle event(CreateEventExW(nullptr,nullptr,CREATE_EVENT_MANUAL_RESET,EVENT_ALL_ACCESS));if(!event)return false;
     auto* p=static_cast<const unsigned char*>(data);
-    while(size){DWORD n=0;if(!WriteFile(LongToHandle(pipe),p,DWORD(std::min<std::size_t>(size,1u<<20)),&n,nullptr)||n==0)return false;p+=n;size-=n;}
+    while(size){
+        OVERLAPPED io{};io.hEvent=event.get();DWORD n=0;
+        if(!WriteFile(h,p,DWORD(std::min<std::size_t>(size,1u<<20)),&n,&io)){
+            if(GetLastError()!=ERROR_IO_PENDING)return false;
+            if(WaitForSingleObject(io.hEvent,100)!=WAIT_OBJECT_0){CancelIoEx(h,&io);GetOverlappedResult(h,&io,&n,TRUE);return false;}
+            if(!GetOverlappedResult(h,&io,&n,FALSE))return false;
+        }
+        if(n==0)return false;p+=n;size-=n;
+    }
     return true;
 }
 FontFile system_font(std::string_view family,bool bold,bool italic){

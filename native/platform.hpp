@@ -12,6 +12,13 @@
 #include <vector>
 
 namespace k22::platform {
+// Characters that split a user-supplied directory name (mods/, packs/) into path components; a name holding one could leave its
+// parent folder (on Windows also a backslash component or a drive "C:").
+#ifdef _WIN32
+inline constexpr std::string_view pathSeparators="/\\:";
+#else
+inline constexpr std::string_view pathSeparators="/";
+#endif
 // Windows-1254 (Turkish) to Unicode by Microsoft's published table (unicode.org MAPPINGS/VENDORS/MICSFT/WINDOWS/CP1254.TXT);
 // 0x81, 0x8D-0x90, 0x9D and 0x9E are undefined there and map to cp1254Undefined here.
 inline constexpr char32_t cp1254Undefined=0xFFFF;
@@ -97,7 +104,7 @@ bool replace(const std::filesystem::path& temporary,const std::filesystem::path&
 // GetCurrentProcessId: the POSIX getpid() of the temporary-file names and Discord activity.
 unsigned long process_id();
 // Client end of a local named pipe (Discord IPC \\.\pipe\discord-ipc-N) as its handle value (HandleToLong, always >= 0); -1 when
-// it cannot be opened. Writes block; reads never do.
+// it cannot be opened. Opened for overlapped I/O: a write gives up after 100 ms without progress; reads never block.
 int named_pipe_open(const std::wstring& name);
 void named_pipe_close(int pipe);
 // PeekNamedPipe, then ReadFile of what is pending: bytes read, 0 when nothing is pending, -1 when the pipe closed or failed.

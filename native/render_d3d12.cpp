@@ -80,7 +80,7 @@ struct FrameContext {
     ComPtr<ID3D12CommandAllocator> allocator;UINT64 fence{};
     std::vector<UploadPage> pages;
     std::vector<ComPtr<ID3D12DescriptorHeap>> tables;std::size_t table{},tableUsed{};
-    UINT transientUsed{};
+    std::vector<ComPtr<ID3D12DescriptorHeap>> transients;UINT transientUsed{}; // CPU-only pages for per-draw views, copied into tables at flush
 };
 // Device, queue, frame contexts, upload rings, descriptor rings and the deferred-release graveyard.
 struct Device {
@@ -88,15 +88,15 @@ struct Device {
     ComPtr<ID3D12GraphicsCommandList> list;ComPtr<ID3D12Fence> fence;HANDLE event{};UINT64 fenceValue{};
     ComPtr<ID3D12InfoQueue> info;
     std::array<FrameContext,3> frames;std::size_t frameIndex{};std::uint64_t frameCount{};bool recording{};
-    CpuDescriptors srvs,rtvs,dsvs,transient;
+    CpuDescriptors srvs,rtvs,dsvs;
     ComPtr<ID3D12DescriptorHeap> samplerHeap;UINT tableIncrement{},samplerIncrement{};
     std::vector<UploadPage> freePages;
     std::deque<std::pair<UINT64,ComPtr<ID3D12Resource>>> graveyard;
     std::vector<D3D12_RESOURCE_BARRIER> barriers;
-    static constexpr UINT64 pageBytes=8u<<20;static constexpr UINT tablePage=32768,transientCount=8192;
+    static constexpr UINT64 pageBytes=8u<<20;static constexpr UINT tablePage=32768,transientPage=4096;
     std::string adapterName;D3D_FEATURE_LEVEL featureLevel{};D3D_SHADER_MODEL shaderModel{};
     ~Device(){
-        if(queue&&fence){wait_idle();}
+        try{if(queue&&fence)wait_idle();}catch(...){} // Destructors must not throw; a lost device has nothing left to wait for.
         for(auto&[value,res]:graveyard)res.Reset();
         if(event)CloseHandle(event);
     }
@@ -141,9 +141,13 @@ struct Device {
         bind_heaps();return true;
     }
     void bind_heaps(){auto&f=frame();ID3D12DescriptorHeap*heaps[]{f.tables[f.table].Get(),samplerHeap.Get()};list->SetDescriptorHeaps(2,heaps);}
+    // Transient views live in non-shader-visible pages (no SetDescriptorHeaps involved); a frame grows its page set when full and
+    // reuses it from the start once that frame context comes round again. Handles stay unique within a frame, so the table cache keyed
+    // on CPU handle values never mistakes a rewritten slot for an already copied one.
     D3D12_CPU_DESCRIPTOR_HANDLE transient_view(){
-        auto&f=frame();if(f.transientUsed==transientCount)throw std::runtime_error("Direct3D 12 transient descriptor ring exhausted");
-        auto h=transient.pages[0]->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(frameIndex*transientCount+f.transientUsed++)*transient.increment;return h;
+        auto&f=frame();const UINT page=f.transientUsed/transientPage;
+        if(page==f.transients.size()){D3D12_DESCRIPTOR_HEAP_DESC desc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,transientPage,D3D12_DESCRIPTOR_HEAP_FLAG_NONE,0};ComPtr<ID3D12DescriptorHeap> heap;check(device->CreateDescriptorHeap(&desc,IID_PPV_ARGS(&heap)),"transient descriptor heap");f.transients.push_back(heap);}
+        auto h=f.transients[page]->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(f.transientUsed++%transientPage)*tableIncrement;return h;
     }
     void transition(Resource&r,D3D12_RESOURCE_STATES state,UINT sub=allSubresources){
         auto add=[&](UINT index){
@@ -317,7 +321,6 @@ struct D3D12Backend::Impl {
         check(dev.device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,dev.frames[0].allocator.Get(),nullptr,IID_PPV_ARGS(&dev.list)),"CreateCommandList");dev.list->Close();
         check(dev.device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&dev.fence)),"CreateFence");dev.event=CreateEventW(nullptr,FALSE,FALSE,nullptr);if(!dev.event)throw std::runtime_error("Direct3D 12 fence event creation failed");
         dev.srvs.init(dev.device.Get(),D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);dev.rtvs.init(dev.device.Get(),D3D12_DESCRIPTOR_HEAP_TYPE_RTV);dev.dsvs.init(dev.device.Get(),D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-        dev.transient.init(dev.device.Get(),D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);{D3D12_DESCRIPTOR_HEAP_DESC d{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,Device::transientCount*UINT(dev.frames.size()),D3D12_DESCRIPTOR_HEAP_FLAG_NONE,0};ComPtr<ID3D12DescriptorHeap> heap;check(dev.device->CreateDescriptorHeap(&d,IID_PPV_ARGS(&heap)),"transient descriptor heap");dev.transient.pages.push_back(heap);}
         {D3D12_DESCRIPTOR_HEAP_DESC d{D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,256,D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,0};check(dev.device->CreateDescriptorHeap(&d,IID_PPV_ARGS(&dev.samplerHeap)),"sampler heap");}
         dev.tableIncrement=dev.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);dev.samplerIncrement=dev.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
         rtvSlot=dev.rtvs.allocate();dsvSlot=dev.dsvs.allocate();
@@ -353,7 +356,7 @@ struct D3D12Backend::Impl {
         for(UINT i=0;i<3;++i){auto t=std::make_shared<Tex>();check(swapchain->GetBuffer(i,IID_PPV_ARGS(&t->resource)),"swap chain buffer");t->format=DXGI_FORMAT_R8G8B8A8_UNORM;t->width=swapWidth;t->height=swapHeight;t->renderTarget=true;t->states={D3D12_RESOURCE_STATE_PRESENT};backBuffers.push_back(t);}
     }
     void resize_swapchain(UINT w,UINT h){
-        drain_completion();dev.wait_idle();dev.collect();backBuffers.clear();applied={};
+        drain_completion();dev.wait_idle();dev.collect();backFbo={};backBuffers.clear();applied={}; // ResizeBuffers fails while any back-buffer reference survives
         check(swapchain->ResizeBuffers(3,w,h,DXGI_FORMAT_R8G8B8A8_UNORM,tearing?UINT(DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING):0u),"ResizeBuffers");swapWidth=w;swapHeight=h;acquire_back_buffers();
     }
     void create_root_signature(){
@@ -671,7 +674,7 @@ struct D3D12Backend::Impl {
         execute();signal();dev.wait_idle();
         uiVertices.reserve(4096);lightData.reserve(128);transparent.reserve(256);particleOrder.reserve(1024);particleData.reserve(1024);
     }
-    ~Impl(){if(dev.queue&&dev.fence){if(dev.recording)execute(),signal();dev.wait_idle();}}
+    ~Impl(){try{if(dev.queue&&dev.fence){if(dev.recording)execute(),signal();dev.wait_idle();}}catch(...){}} // Destructors must not throw (std::terminate)
     std::string feature_level_name()const{auto l=unsigned(dev.featureLevel);return std::to_string(l>>12)+"_"+std::to_string((l>>8)&15);}
     std::string shader_model_name()const{auto s=unsigned(dev.shaderModel);return std::to_string(s>>4)+"."+std::to_string(s&15);}
     void configure_sampling(double mipmapping,double enabledAnisotropy){
@@ -1578,7 +1581,7 @@ void D3D12Backend::draw(const RenderFrame&f,WindowMetrics m){
     }
     i.gamma.enabled=f.adjustment.enabled;
     auto&back=i.backBuffers[i.swapchain->GetCurrentBackBufferIndex()];i.backFbo={back};
-    i.post_draw(i.backFbo);i.dev.transition(*back,D3D12_RESOURCE_STATE_PRESENT);
+    i.post_draw(i.backFbo);i.dev.transition(*back,D3D12_RESOURCE_STATE_PRESENT);i.backFbo={}; // Only backBuffers may hold swap-chain buffers between frames (ResizeBuffers)
     i.await_submission();i.execute();
     const UINT interval=UINT(i.requestedSwapInterval);
     const HRESULT presented=i.swapchain->Present(interval,interval==0&&i.tearing?DXGI_PRESENT_ALLOW_TEARING:0);

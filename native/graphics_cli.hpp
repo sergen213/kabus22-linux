@@ -1,5 +1,6 @@
 #pragma once
 // Contract D graphics command line: --list-capabilities, --dump-textures, --preset, --graphics, --texture-pack.
+#include "platform.hpp"
 #include "render.hpp"
 #include "render_policy.hpp"
 #include "texture_pack.hpp"
@@ -32,7 +33,7 @@ inline Request extract(int& argc,char** argv){
         auto value=[&]{if(i+1>=argc)throw std::runtime_error("missing value for "+std::string(a));return std::string(argv[++i]);};
         if(a=="--preset"){r.preset=value();r.active=true;}
         else if(a=="--graphics"){auto v=value();auto eq=v.find('=');if(eq==std::string::npos||!eq)throw std::runtime_error("--graphics requires KEY=VALUE");r.overrides.emplace_back(v.substr(0,eq),v.substr(eq+1));r.active=true;}
-        else if(a=="--texture-pack"){auto v=value();if(v.empty()||v.find('/')!=std::string::npos||v=="."||v=="..")throw std::runtime_error("--texture-pack requires a pack directory name");r.packs.push_back(v);r.active=true;}
+        else if(a=="--texture-pack"){auto v=value();if(v.empty()||v.find_first_of(platform::pathSeparators)!=std::string::npos||v=="."||v=="..")throw std::runtime_error("--texture-pack requires a pack directory name");r.packs.push_back(v);r.active=true;}
         else{if(a=="--renderer"||a=="--ray-tracing")r.rendererFlag=true;argv[kept++]=argv[i];}
     }
     argc=kept;argv[argc]=nullptr;

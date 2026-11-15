@@ -2,13 +2,15 @@
 # the generated header d3d12/render_d3d12_shaders.hpp (namespace k22::d3d12::dxil). No shader files are read at runtime.
 # Included from cmake/KabusWindows.cmake when K22_D3D12=ON; run with `cmake -P` by its own custom command for the embedding.
 if(CMAKE_SCRIPT_MODE_FILE)
-  # cmake -DK22_DXIL_LIST=<file of "symbol path" lines> -DK22_DXIL_OUTPUT=<header> -P KabusD3D12Shaders.cmake
+  # cmake -DK22_DXIL_LIST=<file of "symbol|path" lines> -DK22_DXIL_OUTPUT=<header> -P KabusD3D12Shaders.cmake
+  # '|' cannot occur in a Windows path; the path is everything after the first one (build trees may contain spaces).
   file(STRINGS "${K22_DXIL_LIST}" entries)
   set(text "#pragma once\n#include <cstddef>\nnamespace k22::d3d12::dxil {\n")
   foreach(entry IN LISTS entries)
-    string(REPLACE " " ";" pair "${entry}")
-    list(GET pair 0 symbol)
-    list(GET pair 1 path)
+    string(FIND "${entry}" "|" separator)
+    string(SUBSTRING "${entry}" 0 ${separator} symbol)
+    math(EXPR separator "${separator} + 1")
+    string(SUBSTRING "${entry}" ${separator} -1 path)
     file(READ "${path}" hex HEX)
     string(LENGTH "${hex}" digits)
     if(digits LESS 40 OR NOT hex MATCHES "^44584243")
@@ -70,7 +72,7 @@ foreach(shader IN LISTS K22_D3D12_SHADERS)
     DEPENDS "${K22_D3D12_SHADER_DIRECTORY}/${file}.hlsl" ${K22_D3D12_SHADER_INCLUDES}
     COMMENT "dxc ${symbol}" VERBATIM)
   list(APPEND K22_D3D12_DXIL_FILES "${output}")
-  string(APPEND K22_D3D12_DXIL_LIST "${symbol} ${output}\n")
+  string(APPEND K22_D3D12_DXIL_LIST "${symbol}|${output}\n")
 endforeach()
 file(CONFIGURE OUTPUT "${K22_D3D12_SHADER_OUTPUT}/shaders.txt" CONTENT "${K22_D3D12_DXIL_LIST}")
 set(K22_D3D12_SHADER_HEADER "${K22_D3D12_SHADER_OUTPUT}/render_d3d12_shaders.hpp")

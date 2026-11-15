@@ -666,4 +666,13 @@
 !/native/render_d3d12.cpp
 !/native/shaders/d3d12/
 !/windows/
+/windows/*
+!/windows/deploy-xbox.ps1
+!/windows/dev.cmd
+!/windows/package-uwp.ps1
+!/windows/prepare-data.ps1
+!/windows/vcpkg.json
+!/windows/uwp/
+/windows/uwp/*
+!/windows/uwp/AppxManifest.xml.in
 !/docs/XBOX.md

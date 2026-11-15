@@ -29,7 +29,7 @@ All build commands run through `windows\dev.cmd`, which loads the Visual Studio 
 powershell -ExecutionPolicy Bypass -File windows/prepare-data.ps1 -Iso "D:/.../Kabus 22.iso" -Output D:/kabus22/xbox-work/game
 ```
 
-It mounts the ISO, extracts the Inno setup with innoextract 1.9 (downloaded once, SHA-256 pinned) and keeps the files the Linux installer selects (`*.k22`, `*.wrs`, `*.dat`, help/gallery images, menu sounds), about 2.2 GB. `K22.exe` is copied as data only: the engine reads its embedded `_a4font` and never runs it.
+It mounts the ISO, extracts the Inno setup with innoextract 1.9 (downloaded once; the cached zip is checked against its pinned SHA-256 on every run) and keeps the files the Linux installer selects (`*.k22`, `*.wrs`, `*.dat`, help/gallery images, menu sounds), about 2.2 GB. `K22.exe` is copied as data only: the engine reads its embedded `_a4font` and never runs it.
 
 ## 2. Dependencies (vcpkg, once per triplet)
 
@@ -64,11 +64,11 @@ Options: `-DK22_D3D12=OFF` or `-DK22_OPENGL=OFF` drop a backend. On hybrid-graph
   -DVCPKG_INSTALLED_DIR=D:/kabus22/xbox-work/vcpkg/x64-uwp -DVCPKG_TARGET_TRIPLET=x64-uwp
 ./windows/dev.cmd --uwp ninja -C D:/kabus22/xbox-work/build/uwp kabus22
 powershell -ExecutionPolicy Bypass -File windows/package-uwp.ps1 -Build D:/kabus22/xbox-work/build/uwp -Game D:/kabus22/xbox-work/game -Out D:/kabus22/xbox-work/package
-powershell -ExecutionPolicy Bypass -File windows/deploy-xbox.ps1 -Console 192.168.2.28 -User NAME -Password SECRET -Package D:/kabus22/xbox-work/package
+powershell -ExecutionPolicy Bypass -File windows/deploy-xbox.ps1 -Console 192.168.2.28 -Package D:/kabus22/xbox-work/package
 ```
 
 - `package-uwp.ps1` lays out `kabus22.exe`, the vcpkg DLLs, `AppxManifest.xml` (from `windows/uwp/AppxManifest.xml.in`, identity `Kabus22.Native`, publisher `CN=Kabus22 Dev`), generated tiles and the game data (hard links), packs `Kabus22.msix` and signs it with a self-signed certificate it creates in `Cert:\CurrentUser\My` (exported as `Kabus22-dev.cer`). Every package gets the next fourth version field (`<build>\package-revision.txt`), so an install updates in place. `-NoGame` makes a small package without data for smoke tests.
-- `deploy-xbox.ps1` turns on the console setting `DefaultUWPContentTypeToGame`, so the package installs as a **Game** (about 5 GB of memory, exclusive CPU cores and the full GPU, instead of the 1 GB App budget); the engine logs the limit it got (`kabus22: UWP memory limit 5120 MB`). It stops the running game, uploads the package with its certificate and the VCLibs framework over the installed one (no uninstall, so saves, `launcher.ini` and `controller.ini` in LocalState survive), waits for the install and starts the game. You can also set App type: Game by hand in Dev Home (select the game, View button → View details).
+- `deploy-xbox.ps1` asks for the Device Portal username and password (or takes `-Credential (Get-Credential NAME)`); curl reads them from a temporary config file only your account can open, never from its command line, and that file and the session cookie jar are deleted when the script ends. It turns on the console setting `DefaultUWPContentTypeToGame`, so the package installs as a **Game** (about 5 GB of memory, exclusive CPU cores and the full GPU, instead of the 1 GB App budget); the engine logs the limit it got (`kabus22: UWP memory limit 5120 MB`). It stops the running game, uploads the package with its certificate and the VCLibs framework over the installed one (no uninstall, so saves, `launcher.ini` and `controller.ini` in LocalState survive), waits for the install and starts the game. You can also set App type: Game by hand in Dev Home (select the game, View button → View details).
 
 Testing on the console:
 
@@ -90,5 +90,5 @@ In 2 PLAYER mode the second pad drives player 2 with the same default buttons; a
 
 ## Build notes
 
-- The pinned ODE source is patched at configure time (`cmake/KabusODELcp.cmake`, `cmake/KabusODEContact.cmake`); the patched files are written byte-exact with `file(CONFIGURE ... NEWLINE_STYLE UNIX)` because `file(WRITE)` translates newlines on Windows. MSVC has no 64-bit-significand `long double`, so the contact-merge predicate computes in `double` there: the differences, squares and products of the float inputs are exact in double, only the three-term sums can round differently from x87 PC64, which matters solely at a threshold tie. In the UWP build ODE's error reporting goes to stderr (`cmake/ode_uwp_error.h`), as UWP has no MessageBox.
+- The pinned ODE source is patched at configure time (`cmake/KabusODELcp.cmake`, `cmake/KabusODEContact.cmake`); the patched files are written byte-exact with `file(CONFIGURE ... NEWLINE_STYLE UNIX)` because `file(WRITE)` translates newlines on Windows. MSVC has no 64-bit-significand `long double`, so the contact-merge predicate computes in `double` there: products of the float inputs are exact in double, and the coordinate differences and their squares are exact for nearby points, the only case where the distance threshold can decide; the sums (and distant points) can round differently from x87 PC64, which changes a result solely at a threshold tie. In the UWP build ODE's error reporting goes to stderr (`cmake/ode_uwp_error.h`), as UWP has no MessageBox.
 - `windows/dev.cmd` uses `vswhere -all` so it also finds an instance the Visual Studio Installer is modifying.

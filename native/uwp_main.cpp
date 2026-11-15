@@ -73,7 +73,12 @@ int engine_main(int, char**) {
         else if (line.starts_with("K22_") && line.find('=') != std::string::npos) {
             const auto equal = line.find('=');
             std::string value = line.substr(equal + 1);
-            if (value.starts_with("local:")) value = utf8(localFolder / from_utf8(value.c_str() + 6));
+            if (value.starts_with("local:")) {
+                // Only a relative path that stays inside LocalState: no root/drive, no leading ".." after normalisation.
+                const auto relative = from_utf8(value.c_str() + 6).lexically_normal();
+                if (relative.empty() || relative.has_root_path() || *relative.begin() == "..") { std::fprintf(stderr, "kabus22: args.txt: ignoring %s (local: path leaves LocalState)\n", line.c_str()); first = false; continue; }
+                value = utf8(localFolder / relative);
+            }
             _putenv_s(line.substr(0, equal).c_str(), value.c_str());
         }
         else args.push_back(line);
