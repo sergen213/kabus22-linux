@@ -3,10 +3,12 @@
 // argument per line from LocalState/args.txt (optional, for testing). An args.txt whose first line is --standalone
 // replaces those defaults with its remaining lines (e.g. --list-capabilities). stdout/stderr go to LocalState/kabus22.log.
 #include "platform.hpp"
+#include "render_policy.hpp"
 #include <SDL.h>
 #include <SDL_main.h>
 #include <windows.h>
 #include <winrt/Windows.System.h>
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -19,7 +21,8 @@ std::string utf8(const std::filesystem::path& path) { const auto text = path.u8s
 // The in-game graphics menu saves into config/launcher.ini (native/launcher_config.cpp); on Linux the launcher turns that file
 // into the command line (installer/launcher_settings.cpp command). The Xbox has no launcher, so the same rules apply here:
 // [Launcher] preset -> --preset (not for original); [Graphics] key=value -> --graphics key=value, under the custom preset for
-// every key and otherwise only fps_limit and seamless_doors. Renderer, window and resolution are fixed on the console.
+// every key and otherwise only fps_limit and seamless_doors. Renderer, window and resolution are fixed on the console. Keys
+// the engine does not list (launcher_config::retiredGraphicsKeys) are skipped, as the launcher skips them.
 std::vector<std::string> launcher_arguments(const std::filesystem::path& file) {
     std::ifstream in(file);
     std::string group, preset = "original";
@@ -33,7 +36,7 @@ std::vector<std::string> launcher_arguments(const std::filesystem::path& file) {
         if (equal == std::string::npos) continue;
         const auto key = trim(line.substr(0, equal)), value = trim(line.substr(equal + 1));
         if (group == "Launcher" && key == "preset") preset = value;
-        else if (group == "Graphics" && !key.empty() && !value.empty()) graphics.emplace_back(key, value);
+        else if (group == "Graphics" && !key.empty() && !value.empty() && std::any_of(k22::render_policy::graphicsOptions.begin(), k22::render_policy::graphicsOptions.end(), [&](const auto& o) { return o.key == key; })) graphics.emplace_back(key, value);
     }
     std::vector<std::string> args;
     if (preset != "original") args.insert(args.end(), {"--preset", preset});

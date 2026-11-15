@@ -49,7 +49,7 @@ struct Effect { std::uint64_t generation{~0ull};EffectKind kind{EffectKind::None
 struct OverrideBounds{const Model*model{};std::uint64_t revision{~0ull};std::size_t count{};Bounds bounds;};
 struct Allocation {Buffer*buffer{};VkDeviceSize offset{},size{};};
 enum Program {Scene,Shadow,UI,Post,SkyProgram,WarpProgram,CloudProgram,TonemapProgram,EffectProgram};
-// premultiplied: 1 premultiplied, 2 native model alpha, 3 multiply (AO), 4 additive keeping destination alpha (fog, bloom).
+// premultiplied: 1 premultiplied, 2 native model alpha, 3 multiply (AO), 4 additive keeping destination alpha (bloom).
 // tess: PN-triangle tessellation stages (tessellation=1, MDL draws; scene.tesc/scene.tese).
 struct PipelineKey {int program{},samples{},depth{},write{},blend{},additive{},premultiplied{},cull{},clockwise{},stencil{},colorFormat{},depthFormat{},tess{};auto operator<=>(const PipelineKey&)const=default;};
 // Scene descriptor set identity. Image/Buffer::id never repeats, so a cached set cannot alias a recreated resource whose
@@ -158,7 +158,7 @@ struct Raster {
     struct Fx {
         VkExtent2D extent{};
         Image depth,depthSampled;VkImageView depthView{}; // Single-sample primary depth before view-space entities; depthSampled aliases a depth-only view.
-        Image linear,ao,ldr,fog;std::array<Image,2>taa;std::array<Image,5>bloom;
+        Image linear,ao,ldr;std::array<Image,2>taa;std::array<Image,5>bloom;
         Image sharp; // sharpen with FXAA: FXAA output, read by the final CAS pass.
         Image fsrDepth,fsrMotion,upscaled; // FSR inputs (render size: R32F device depth, RG16F full motion) and its display-size output.
         Image opaque,reactive; // FSR: primary view colour before translucent/particle/view-space draws, and the derived reactive mask.
@@ -261,7 +261,7 @@ struct Raster {
     // Extent-dependent effect images are retired (fence-safe) on resize; shadow maps only on teardown.
     void free_effects(bool all){
         auto drop=[&](Image&i){if(all)s.destroy(i);else s.retire(i);};auto dropView=[&](VkImageView&v){if(!v)return;if(all)vkDestroyImageView(s.device,v,nullptr);else arenas[s.slotIndex].views.push_back(v);v=VK_NULL_HANDLE;};
-        dropView(fx.depthView);fx.depthSampled={};drop(fx.depth);drop(fx.linear);drop(fx.ao);drop(fx.fog);drop(fx.ldr);drop(fx.motion);drop(fx.motionDepth);for(auto*set:{&fx.taa,&fx.gdata,&fx.gdepth,&fx.length})for(auto&i:*set)drop(i);for(auto&i:fx.bloom)drop(i);drop(fx.guide);drop(fx.maskTiles);drop(fx.maskNear);for(auto&i:fx.raw)drop(i);for(auto&i:fx.tmp)drop(i);for(auto&h:fx.history)for(auto&i:h)drop(i);
+        dropView(fx.depthView);fx.depthSampled={};drop(fx.depth);drop(fx.linear);drop(fx.ao);drop(fx.ldr);drop(fx.motion);drop(fx.motionDepth);for(auto*set:{&fx.taa,&fx.gdata,&fx.gdepth,&fx.length})for(auto&i:*set)drop(i);for(auto&i:fx.bloom)drop(i);drop(fx.guide);drop(fx.maskTiles);drop(fx.maskNear);for(auto&i:fx.raw)drop(i);for(auto&i:fx.tmp)drop(i);for(auto&h:fx.history)for(auto&i:h)drop(i);
         drop(fx.sharp);drop(fx.fsrDepth);drop(fx.fsrMotion);drop(fx.upscaled);drop(fx.opaque);drop(fx.reactive);drop(fx.interpolated);
         fx.taaValid=fx.historyValid=fx.linearValid=fx.fsrValid=false;fx.extent={};
         if(all){for(auto&v:fx.faces)dropView(v);drop(fx.sun);drop(fx.cube);}
@@ -670,7 +670,7 @@ struct Raster {
         if(fx.shadowsValid){globals[0]={&fx.sun,compareSampler};if(fx.shadowIndex>=0)globals[1]={&fx.cube,compareSampler};}
     }
     void ensure_effects(){
-        const auto&f=s.options.features;const bool depthEffects=f.ssao||f.fog||f.taa||f.fsr,rt=rtSignals();
+        const auto&f=s.options.features;const bool depthEffects=f.ssao||f.taa||f.fsr,rt=rtSignals();
         if((!depthEffects&&!f.bloom&&!f.fxaa&&!rt)||(fx.extent.width==s.render.width&&fx.extent.height==s.render.height&&(!f.fsr||(fx.upscaled.width==s.extent.width&&fx.upscaled.height==s.extent.height))&&(!s.generating||(fx.interpolated.width==s.extent.width&&fx.interpolated.height==s.extent.height))))return;
         free_effects(false);fx.extent=s.render;const auto w=s.render.width,h=s.render.height;
         constexpr VkImageUsageFlags color=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,storage=VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -678,7 +678,6 @@ struct Raster {
         auto general=[&](Image&i){s.transition(i,VK_IMAGE_LAYOUT_GENERAL,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);};
         if(depthEffects){fx.depth=s.image(w,h,s.depthFormat,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);fx.depthView=depth_view(fx.depth);fx.depthSampled=fx.depth;fx.depthSampled.view=fx.depthView;fx.linear=s.image(w,h,VK_FORMAT_R32_SFLOAT,color);}
         if(f.ssao)fx.ao=s.image(w,h,VK_FORMAT_R16_SFLOAT,color);
-        if(f.fog)fx.fog=s.image(std::max(1u,w/2),std::max(1u,h/2),VK_FORMAT_R16G16B16A16_SFLOAT,color);
         if(f.taa||f.fxaa||f.sharpen||f.fsr)fx.ldr=s.image(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,color);
         if(f.fsr){fx.fsrDepth=s.image(w,h,VK_FORMAT_R32_SFLOAT,color);fx.fsrMotion=s.image(w,h,VK_FORMAT_R16G16_SFLOAT,color);fx.upscaled=s.image(s.extent.width,s.extent.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|(s.generating?VkImageUsageFlags{VK_IMAGE_USAGE_TRANSFER_SRC_BIT}:0u));readable(fx.upscaled);
             // Frame interpolation copies its source (upscaled) for the next frame and may clear its output.
@@ -756,10 +755,10 @@ struct Raster {
         }
         fx.shadowsValid=true;
     }
-    Uniform effect_uniform(int mode,float texelWidth,float texelHeight)const{Uniform u=view;u.inverseViewProjection=fx.inverseVP;u.camera=vec(fx.forward,fx.nearPlane);u.range={fx.farPlane,view.fogParameters[0],view.fogParameters[1],0};u.pass={float(mode),float(frameIndex%64)*7.f,texelWidth,texelHeight};return u;}
-    // Primary view, before view-space entities clear depth: single-sample depth copy, linear depth, SSAO, volumetric fog.
+    Uniform effect_uniform(int mode,float texelWidth,float texelHeight)const{Uniform u=view;u.inverseViewProjection=fx.inverseVP;u.camera=vec(fx.forward,fx.nearPlane);u.range={fx.farPlane,0,0,0};u.pass={float(mode),float(frameIndex%64)*7.f,texelWidth,texelHeight};return u;}
+    // Primary view, before view-space entities clear depth: single-sample depth copy, linear depth, SSAO.
     void depth_effects(Target&destination,VkRect2D r){
-        const auto&f=s.options.features;if(!(f.ssao||f.fog||f.taa||f.fsr))return;end();
+        const auto&f=s.options.features;if(!(f.ssao||f.taa||f.fsr))return;end();
         constexpr auto depthStages=VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;constexpr auto depthAccess=VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         if(destination.depth.samples!=VK_SAMPLE_COUNT_1_BIT){
             // An empty rendering instance resolves sample 0 of the MSAA depth (Vulkan 1.2 depth/stencil resolve). The resolve
@@ -779,9 +778,6 @@ struct Raster {
             begin_image(fx.ao);set_region(full());bind({EffectProgram},effect_uniform(2,tw,th),{&fx.linear},{nearest});vkCmdDraw(s.command,3,1,0,0);end();readable(fx.ao);
             begin(destination);set_region(r);bind({EffectProgram,0,0,0,1,0,3},effect_uniform(3,tw,th),{&fx.ao,&fx.linear},{linear,nearest});vkCmdDraw(s.command,3,1,0,0);
         }
-        // Volumetric fog marches at half resolution (alpha keeps each sample's depth) and is added with a depth-aware upsample.
-        if(f.fog){begin_image(fx.fog);set_region(full());bind({EffectProgram},effect_uniform(4,1.f/fx.fog.width,1.f/fx.fog.height),{&fx.linear},{nearest});vkCmdDraw(s.command,3,1,0,0);end();readable(fx.fog);
-            begin(destination);set_region(r);bind({EffectProgram,0,0,0,1,0,4},effect_uniform(14,tw,th),{&fx.fog,&fx.linear},{nearest,nearest});vkCmdDraw(s.command,3,1,0,0);}
         begin(destination);set_region(r);
     }
     VkDescriptorSet allocate_set(VkDescriptorSetLayout setLayout){

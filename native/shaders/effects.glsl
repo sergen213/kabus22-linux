@@ -96,40 +96,4 @@ float k22CubeShadow(samplerCubeShadow map,vec3 light,vec3 p,vec3 n,float nearPla
         float ref=((farPlane+nearPlane)/(farPlane-nearPlane)-2.0*farPlane*nearPlane/((farPlane-nearPlane)*z))*0.5+0.5;sum+=texture(map,vec4(s,ref-0.0002));}
     return sum*0.25;
 }
-// ---- Volumetric fog: single-scattering of the scene lights along the view ray (Henyey-Greenstein g=0.25).
-// The medium follows the level fog (extinction 3/(end-start) beyond fog start) or, when the level has no fog,
-// a faint haze. Only in-scattered light is added: the original linear fog blend stays untouched.
-const int k22FogSteps=24;const float k22FogHaze=0.00015,k22FogMaxDistance=3000.0,k22FogG=0.25,k22FogHalo=0.1;
-float k22FogDensity(float distance,vec2 fogSpan){return fogSpan.y>fogSpan.x?(distance>fogSpan.x?3.0/(fogSpan.y-fogSpan.x):0.0):k22FogHaze;}
-// Normalized so an isotropic medium scatters with weight 1.
-float k22Phase(float cosine){float g2=k22FogG*k22FogG;return (1.0-g2)/pow(1.0+g2-2.0*k22FogG*cosine,1.5);}
-// Includer defines K22_LIGHT(i), int lightCount and K22_FOG_VISIBILITY(i,x) (1.0 when unshadowed), as for pbr.glsl.
-// Scattered radiance uses the light's own falloff times a halo term 1/(1+(d/(0.15 range))^2) and a (1-d/range)^2 window:
-// native lights are constant inside their range, which alone would turn the haze into a uniform veil.
-#ifdef K22_FOG_VISIBILITY
-vec3 k22FogInscatter(vec3 eye,vec3 surface,vec2 fogSpan,float noise){
-    vec3 ray=surface-eye;float total=min(length(ray),k22FogMaxDistance);if(total<=0.0)return vec3(0);vec3 dir=normalize(ray);
-    // A light scatters only at samples inside its range: lights whose range the marched segment never enters (and
-    // the synthetic and directional ones the loop skips) are left out of all 24 steps. Bits cover the first 32 lights.
-    uint reach=0u;
-    for(int i=0;i<lightCount&&i<32;++i){vec4 a=K22_LIGHT(i*5);vec3 rel=a.xyz-eye,off=rel-dir*clamp(dot(rel,dir),0.0,total);
-        if(dot(off,off)<=a.w*a.w*1.002+0.01&&K22_LIGHT(i*5+4).z<=0.5&&K22_LIGHT(i*5+2).w!=3.0)reach|=1u<<uint(i);}
-    if(reach==0u&&lightCount<=32)return vec3(0);
-    float ds=total/float(k22FogSteps),transmittance=1.0;vec3 result=vec3(0);
-    for(int s=0;s<k22FogSteps;++s){
-        float t=(float(s)+noise)*ds,sigma=k22FogDensity(t,fogSpan);if(sigma<=0.0)continue;vec3 x=eye+dir*t;vec3 radiance=vec3(0);
-        for(int i=0;i<lightCount;++i){
-            if(i<32&&(reach&(1u<<uint(i)))==0u)continue;
-            vec4 a=K22_LIGHT(i*5),b=K22_LIGHT(i*5+1),d=K22_LIGHT(i*5+2),e=K22_LIGHT(i*5+3),c=K22_LIGHT(i*5+4);
-            if(c.z>0.5||d.w==3.0)continue;
-            vec3 delta=a.xyz-x;float distance=length(delta);if(distance>a.w)continue;vec3 L=delta/max(distance,0.0001);
-            float window=max(1.0-distance/max(a.w,0.0001),0.0),halo=distance/max(k22FogHalo*a.w,0.0001),attenuation=window*window/(1.0+halo*halo)*(b.a<0.0?1.0:1.0/max(e.x+e.y*distance+e.z*distance*distance,0.0001));
-            if(d.w==2.0){float rho=dot(-L,d.xyz);attenuation*=rho>=c.x?1.0:rho<=c.y?0.0:pow((rho-c.y)/max(c.x-c.y,0.0001),e.w);}
-            if(attenuation>0.0)radiance+=clamp(b.rgb*abs(b.a)*attenuation,0.0,1.0)*k22Phase(dot(dir,-L))*K22_FOG_VISIBILITY(i,x);
-        }
-        result+=transmittance*sigma*ds*radiance;transmittance*=exp(-sigma*ds);
-    }
-    return result;
-}
-#endif
 #endif

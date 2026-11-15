@@ -286,25 +286,11 @@ void main(){vec4 c=texelFetch(original,ivec3(ivec2(gl_FragCoord.xy),layer),level
 const char* sceneFSPrelude="#version 330 core\nuniform samplerBuffer lights;uniform int lightCount;\n#define K22_LIGHT(i) texelFetch(lights,i)\n";
 const char* tonemapFSPrelude="#version 330 core\n#define K22_LIGHT(i) vec4(0)\nconst int lightCount=0;\n";
 const char* tonemapFS="in vec2 uv;out vec4 color;uniform sampler2D image;void main(){vec4 c=texture(image,uv);color=vec4(k22ToneMap(c.rgb),c.a);}";
-// Wave-2 screen effects (effects.glsl), built on tonemapFSPrelude+pbrGLSL+effectsGLSL; the fog program reads the scene lights.
+// Wave-2 screen effects (effects.glsl), built on tonemapFSPrelude+pbrGLSL+effectsGLSL.
 const char* linearizeFS="in vec2 uv;out vec4 color;uniform sampler2D depth;uniform float nearPlane,farPlane;void main(){float d=texelFetch(depth,ivec2(gl_FragCoord.xy),0).r;color=vec4(d<1.0?k22LinearDepth(d,nearPlane,farPlane):0.0);}";
 const char* ssaoFS="in vec2 uv;out vec4 color;uniform sampler2D linearDepth;uniform mat4 viewProjection,inverseViewProjection;uniform vec3 eye,forward;uniform vec2 texel;void main(){color=vec4(k22Ssao(linearDepth,uv,texel,inverseViewProjection,viewProjection,eye,forward,k22Noise(gl_FragCoord.xy)));}";
 // 4x4 box (four bilinear taps) over the noisy AO, multiplied into the view color by the blend.
 const char* aoApplyFS="in vec2 uv;out vec4 color;uniform sampler2D ao;uniform vec2 texel;void main(){float a=0.0;for(int i=0;i<4;++i)a+=texture(ao,uv+texel*vec2((i&1)!=0?0.5:-1.5,(i&2)!=0?0.5:-1.5)).r;color=vec4(vec3(a*0.25),1);}";
-const char* fogFSPrelude="#version 330 core\nuniform samplerBuffer lights;uniform int lightCount;\n#define K22_LIGHT(i) texelFetch(lights,i)\nfloat fogVisibility(int i,vec3 x);\n#define K22_FOG_VISIBILITY(i,x) fogVisibility(i,x)\n";
-const char* fogFS="in vec2 uv;out vec4 color;uniform sampler2D linearDepth;uniform mat4 inverseViewProjection;uniform vec3 eye,forward;uniform vec2 fogRange;uniform float farPlane;uniform bool shadowMaps;uniform int shadowLight;uniform samplerCubeShadow cubeShadowMap;\n"
-    "float fogVisibility(int i,vec3 x){if(!shadowMaps||i!=shadowLight)return 1.0;vec4 a=K22_LIGHT(i*5);return k22CubeShadow(cubeShadowMap,a.xyz,x,vec3(0),k22CubeShadowNear,a.w);}\n"
-    "void main(){float d=texture(linearDepth,uv).r;if(d<=0.0)d=farPlane;color=vec4(k22FogInscatter(eye,eye+k22ViewRay(k22NdcFromUv(uv),inverseViewProjection,eye,forward)*d,fogRange,k22Noise(gl_FragCoord.xy)),d);}";
-// Half-resolution fog (alpha = its sample's linear depth) added at full resolution: effects.frag mode 14 (Vulkan raster).
-const char* fogUpsampleFS=R"(#version 330 core
-in vec2 uv;out vec4 color;uniform sampler2D fog,linearDepth;uniform float farPlane;
-void main(){
-    vec2 size=vec2(textureSize(fog,0)),p=uv*size-0.5,f=fract(p);ivec2 b=ivec2(floor(p)),last=ivec2(size)-1;float d=texture(linearDepth,uv).r;if(d<=0.0)d=farPlane;
-    vec3 sum=vec3(0),best=vec3(0);float weight=0.0,closest=1e30;
-    for(int i=0;i<4;++i){ivec2 o=ivec2(i&1,i>>1);vec4 s=texelFetch(fog,clamp(b+o,ivec2(0),last),0);float dz=abs(s.a-d);
-        float w=(o.x==1?f.x:1.0-f.x)*(o.y==1?f.y:1.0-f.y)*exp(-dz/(0.05*max(d,1e-3)));sum+=w*s.rgb;weight+=w;if(dz<closest){closest=dz;best=s.rgb;}}
-    color=vec4(weight>1e-4?sum/weight:best,0);
-})";
 // mode 0: prefiltered 4x4 downsample of the HDR scene, 1: downsample, 2: tent upsample (additively blended).
 const char* bloomFS="in vec2 uv;out vec4 color;uniform sampler2D image;uniform vec2 texel;uniform int mode;void main(){color=vec4(mode==0?k22BloomPrefilter(k22BloomDown(image,uv,texel)):mode==1?k22BloomDown(image,uv,texel):k22BloomUp(image,uv,texel),1);}";
 const char* compositeFS="in vec2 uv;out vec4 color;uniform sampler2D image,bloom;uniform bool bloomEnabled,toneMap;void main(){vec4 c=texture(image,uv);if(bloomEnabled)c.rgb+=k22BloomStrength*texture(bloom,uv).rgb;color=vec4(toneMap?k22ToneMap(c.rgb):c.rgb,c.a);}";
@@ -390,10 +376,10 @@ struct GLBackend::Impl {
             glMultiDrawElements(GL_TRIANGLES,g.counts.data(),GL_UNSIGNED_INT,g.offsets.data(),GLsizei(g.counts.size()));
         }
     }
-    GLuint compositeProgram{},bloomProgram{},fxaaProgram{},linearizeProgram{},ssaoProgram{},aoApplyProgram{},fogProgram{},fogUpsampleProgram{};
+    GLuint compositeProgram{},bloomProgram{},fxaaProgram{},linearizeProgram{},ssaoProgram{},aoApplyProgram{};
     std::array<GLuint,5> bloomFbo{},bloomTexture{};GLuint ldrFbo{},ldrColor{};
-    // Primary-view screen effects (SSAO, volumetric fog), sized to that view.
-    GLuint effectDepthFbo{},effectDepth{},linearFbo{},linearDepth{},aoFbo{},aoTexture{},fogFbo{},fogTexture{};int effectWidth{},effectHeight{};
+    // Primary-view SSAO, sized to that view.
+    GLuint effectDepthFbo{},effectDepth{},linearFbo{},linearDepth{},aoFbo{},aoTexture{};int effectWidth{},effectHeight{};
     GLuint sunShadowFbo{},sunShadowMap{},cubeShadowFbo{},cubeShadowMap{};
     bool retainedColorValid{},portalColorValid{},finalFrameValid{};
     GLuint videoTexture{};int videoWidth{},videoHeight{};std::uint64_t videoSerial{~0ull};
@@ -418,12 +404,12 @@ struct GLBackend::Impl {
     std::uint64_t completionSubmissions{},completionWaits{};
     int requestedSwapInterval{-1};
     // K22_GL_TIMINGS=1: GPU time per pass from GL_TIMESTAMP queries, read back four frames later (no stall), averaged to stderr
-    // every 300 frames. Views includes the sky stencil mask and planar shadows; SSAO and volumetric fog are reported apart.
+    // every 300 frames. Views includes the sky stencil mask and planar shadows; SSAO is reported apart.
     // CPU side: the completion-fence wait before a frame, command recording, and SDL_GL_SwapWindow.
     struct GpuTimings{
-        enum Mark{Begin,Shadows,EffectsBegin,SsaoEnd,EffectsEnd,Views,Composite,Ui,End,Count};
+        enum Mark{Begin,Shadows,EffectsBegin,EffectsEnd,Views,Composite,Ui,End,Count};
         bool enabled{};std::array<std::array<GLuint,Count>,4> queries{};std::array<std::array<bool,Count>,4> used{};std::uint64_t frame{};
-        std::array<double,8> sums{};unsigned samples{};std::array<double,3> cpu{};unsigned cpuFrames{};
+        std::array<double,7> sums{};unsigned samples{};std::array<double,3> cpu{};unsigned cpuFrames{};
     } timings;
     void mark(GpuTimings::Mark m){if(timings.enabled){glQueryCounter(timings.queries[timings.frame%4][m],GL_TIMESTAMP);timings.used[timings.frame%4][m]=true;}}
     void begin_timings(){
@@ -432,14 +418,13 @@ struct GLBackend::Impl {
         if(ready&&used[GpuTimings::Begin]){
             std::array<GLuint64,GpuTimings::Count> v{};for(int m=0;m<GpuTimings::Count;++m)if(used[m])glGetQueryObjectui64v(q[m],GL_QUERY_RESULT,&v[m]);
             auto at=[&](int m,int fallback){return used[m]?v[m]:v[fallback];};
-            const bool effects=used[GpuTimings::EffectsBegin]&&used[GpuTimings::EffectsEnd];
-            const double ssao=effects?double(v[GpuTimings::SsaoEnd]-v[GpuTimings::EffectsBegin]):0,fog=effects?double(v[GpuTimings::EffectsEnd]-v[GpuTimings::SsaoEnd]):0;
+            const double ssao=used[GpuTimings::EffectsBegin]&&used[GpuTimings::EffectsEnd]?double(v[GpuTimings::EffectsEnd]-v[GpuTimings::EffectsBegin]):0;
             const GLuint64 shadows=at(GpuTimings::Shadows,GpuTimings::Begin),views=at(GpuTimings::Views,GpuTimings::Shadows),composite=used[GpuTimings::Composite]?v[GpuTimings::Composite]:views;
-            const std::array<double,8> d{double(shadows-v[GpuTimings::Begin]),double(views-shadows)-ssao-fog,ssao,fog,double(composite-views),double(v[GpuTimings::Ui]-composite),double(v[GpuTimings::End]-v[GpuTimings::Ui]),double(v[GpuTimings::End]-v[GpuTimings::Begin])};
+            const std::array<double,7> d{double(shadows-v[GpuTimings::Begin]),double(views-shadows)-ssao,ssao,double(composite-views),double(v[GpuTimings::Ui]-composite),double(v[GpuTimings::End]-v[GpuTimings::Ui]),double(v[GpuTimings::End]-v[GpuTimings::Begin])};
             for(std::size_t i=0;i<d.size();++i)t.sums[i]+=d[i];
             if(++t.samples==300){
                 auto ms=[&](int i){return t.sums[i]/t.samples/1e6;};
-                std::cerr<<"kabus22: gl gpu ms (300-frame avg): shadows "<<ms(0)<<" views "<<ms(1)<<" ssao "<<ms(2)<<" fog "<<ms(3)<<" composite "<<ms(4)<<" ui "<<ms(5)<<" resolve+post "<<ms(6)<<" total "<<ms(7);
+                std::cerr<<"kabus22: gl gpu ms (300-frame avg): shadows "<<ms(0)<<" views "<<ms(1)<<" ssao "<<ms(2)<<" composite "<<ms(3)<<" ui "<<ms(4)<<" resolve+post "<<ms(5)<<" total "<<ms(6);
                 if(t.cpuFrames)std::cerr<<"; cpu ms: fence wait "<<t.cpu[0]/t.cpuFrames<<" record "<<t.cpu[1]/t.cpuFrames<<" swap "<<t.cpu[2]/t.cpuFrames;
                 std::cerr<<'\n';t.sums={};t.samples=0;t.cpu={};t.cpuFrames=0;
             }
@@ -584,7 +569,7 @@ struct GLBackend::Impl {
             for(auto&[image,sky]:skies)glDeleteTextures(1,&sky.texture);glDeleteProgram(skyProgram);glDeleteProgram(cloudProgram);glDeleteSamplers(1,&skyClampSampler);
             glDeleteProgram(shadowProgram);
             glDeleteProgram(tonemapProgram);glDeleteTextures(1,&flatNormal);glDeleteTextures(1,&defaultOrm);
-            for(GLuint p:{compositeProgram,bloomProgram,fxaaProgram,linearizeProgram,ssaoProgram,aoApplyProgram,fogProgram,fogUpsampleProgram})glDeleteProgram(p);
+            for(GLuint p:{compositeProgram,bloomProgram,fxaaProgram,linearizeProgram,ssaoProgram,aoApplyProgram})glDeleteProgram(p);
             glDeleteFramebuffers(1,&sunShadowFbo);glDeleteTextures(1,&sunShadowMap);glDeleteFramebuffers(1,&cubeShadowFbo);glDeleteTextures(1,&cubeShadowMap);
             if(timings.enabled)for(auto&q:timings.queries)glDeleteQueries(GpuTimings::Count,q.data());
             glDeleteProgram(scene);glDeleteProgram(ui);glDeleteProgram(post);glDeleteTextures(1,&white);glDeleteTextures(1,&videoTexture);glDeleteVertexArrays(1,&uiVao);glDeleteVertexArrays(1,&postVao);glDeleteBuffers(1,&uiVbo);glDeleteBuffers(1,&lightBuffer);glDeleteTextures(1,&lightTexture);free_targets();SDL_GL_DeleteContext(context);context=nullptr;}
@@ -614,9 +599,9 @@ struct GLBackend::Impl {
         retainedColorValid=portalColorValid=finalFrameValid=false;targetWidth=targetHeight=0;
     }
     void free_effects(){
-        for(GLuint*fbo:{&effectDepthFbo,&linearFbo,&aoFbo,&fogFbo})glDeleteFramebuffers(1,fbo);
-        for(GLuint*texture:{&effectDepth,&linearDepth,&aoTexture,&fogTexture})glDeleteTextures(1,texture);
-        effectDepthFbo=linearFbo=aoFbo=fogFbo=effectDepth=linearDepth=aoTexture=fogTexture=0;effectWidth=effectHeight=0;
+        for(GLuint*fbo:{&effectDepthFbo,&linearFbo,&aoFbo})glDeleteFramebuffers(1,fbo);
+        for(GLuint*texture:{&effectDepth,&linearDepth,&aoTexture})glDeleteTextures(1,texture);
+        effectDepthFbo=linearFbo=aoFbo=effectDepth=linearDepth=aoTexture=0;effectWidth=effectHeight=0;
     }
     // Effect programs exist only for enabled effects; reconfigure builds newly enabled ones and keeps disabled ones. The
     // composite program is the exception: its presence selects it over the plain tone-map pass (composite_pass).
@@ -626,9 +611,7 @@ struct GLBackend::Impl {
         if(blend&&!compositeProgram)compositeProgram=effect(compositeFS);else if(!blend&&compositeProgram){glDeleteProgram(compositeProgram);compositeProgram=0;}
         if(fx.bloom&&!bloomProgram)bloomProgram=effect(bloomFS);
         if(fx.fxaa&&!fxaaProgram)fxaaProgram=effect(fxaaFS);
-        if((fx.ssao||fx.fog)&&!linearizeProgram)linearizeProgram=effect(linearizeFS);
-        if(fx.ssao&&!ssaoProgram){ssaoProgram=effect(ssaoFS);aoApplyProgram=effect(aoApplyFS);}
-        if(fx.fog&&!fogProgram){fogProgram=program(postVS,(std::string(fogFSPrelude)+effectsGLSL+fogFS).c_str());fogUpsampleProgram=program(postVS,fogUpsampleFS);}
+        if(fx.ssao&&!ssaoProgram){linearizeProgram=effect(linearizeFS);ssaoProgram=effect(ssaoFS);aoApplyProgram=effect(aoApplyFS);}
     }
     // Renderer::reconfigure. Only shadow maps on<->off needs a new context: K22_SHADOW_MAPS is compiled into the scene
     // program whose uniform locations are resolved once. Everything else is per-frame state, a lazily rebuilt target or
@@ -639,7 +622,7 @@ struct GLBackend::Impl {
         drain_completion();
         const auto&a=options.features,&b=next.features;
         const bool rebuildTargets=next.samples!=samples||next.pbr!=options.pbr||a.bloom!=b.bloom||a.fxaa!=b.fxaa||composite_enabled(next.pbr,b)!=composite;
-        const bool rebuildEffects=a.ssao!=b.ssao||a.fog!=b.fog;
+        const bool rebuildEffects=a.ssao!=b.ssao;
         reloadScene=next.pbr!=options.pbr||next.packs!=options.packs; // pack textures and PBR tangent streams upload lazily
         if(maxAnisotropy>0&&(next.anisotropy!=preferredAnisotropy||next.forceAnisotropy!=options.forceAnisotropy)){preferredAnisotropy=next.anisotropy;anisotropy=0;} // configure_sampling re-applies next frame
         options=next;samples=next.samples;composite=composite_enabled(options.pbr,options.features);
@@ -701,16 +684,15 @@ struct GLBackend::Impl {
         glActiveTexture(GL_TEXTURE8);glBindTexture(GL_TEXTURE_2D,sunShadowMap);glBindSampler(8,0);glActiveTexture(GL_TEXTURE9);glBindTexture(GL_TEXTURE_CUBE_MAP,cubeShadowMap);glBindSampler(9,0);
         shadowsReady=true;
     }
-    // Primary-view SSAO and volumetric fog, before view-space entities clear depth. Depth is copied to a single-sample
-    // texture and linearized; AO multiplies into the view color, fog in-scattering adds to it (HDR before tone mapping).
-    void screen_effects(const RenderFrame&f,const Camera&camera,int x,int y,int w,int h){
-        mark(GpuTimings::EffectsBegin);const auto&fx=options.features;GLint destination{};glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&destination);
+    // Primary-view SSAO, before view-space entities clear depth. Depth is copied to a single-sample texture and linearized;
+    // AO multiplies into the view color.
+    void screen_effects(const Camera&camera,int x,int y,int w,int h){
+        mark(GpuTimings::EffectsBegin);GLint destination{};glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&destination);
         if(effectWidth!=w||effectHeight!=h){
             free_effects();effectWidth=w;effectHeight=h;
             render_target(effectDepthFbo,effectDepth,GL_DEPTH24_STENCIL8,GL_DEPTH_STENCIL,GL_UNSIGNED_INT_24_8,w,h,GL_DEPTH_STENCIL_ATTACHMENT);
             render_target(linearFbo,linearDepth,GL_R32F,GL_RED,GL_FLOAT,w,h);
-            if(fx.ssao)render_target(aoFbo,aoTexture,GL_R8,GL_RED,GL_UNSIGNED_BYTE,w,h);
-            if(fx.fog)render_target(fogFbo,fogTexture,GL_RGBA16F,GL_RGBA,GL_HALF_FLOAT,std::max(1,w/2),std::max(1,h/2));
+            render_target(aoFbo,aoTexture,GL_R8,GL_RED,GL_UNSIGNED_BYTE,w,h);
         }
         const bool clip=glIsEnabled(GL_CLIP_DISTANCE0);glDisable(GL_SCISSOR_TEST);glDisable(GL_DEPTH_TEST);glDisable(GL_BLEND);glDisable(GL_CULL_FACE);glDisable(GL_CLIP_DISTANCE0);
         glBindFramebuffer(GL_READ_FRAMEBUFFER,destination);glBindFramebuffer(GL_DRAW_FRAMEBUFFER,effectDepthFbo);glBlitFramebuffer(x,y,x+w,y+h,0,0,w,h,GL_DEPTH_BUFFER_BIT,GL_NEAREST);
@@ -719,26 +701,10 @@ struct GLBackend::Impl {
         glUniform1i(uniform(linearizeProgram,"depth"),10);glUniform1f(uniform(linearizeProgram,"nearPlane"),camera.nearClip);glUniform1f(uniform(linearizeProgram,"farPlane"),camera.farClip);glDrawArrays(GL_TRIANGLES,0,3);
         glBindTexture(GL_TEXTURE_2D,linearDepth);
         const Matrix inverseVP=inverse(viewProjection),basis=transform({},camera.angles,{1,1,1});
-        auto view=[&](GLuint p){glUseProgram(p);glUniform1i(uniform(p,"linearDepth"),10);glUniformMatrix4fv(uniform(p,"inverseViewProjection"),1,GL_FALSE,inverseVP.data());glUniform3f(uniform(p,"eye"),camera.position.x,camera.position.y,camera.position.z);glUniform3f(uniform(p,"forward"),basis[0],basis[1],basis[2]);};
-        if(fx.ssao){
-            glBindFramebuffer(GL_FRAMEBUFFER,aoFbo);view(ssaoProgram);glUniformMatrix4fv(uniform(ssaoProgram,"viewProjection"),1,GL_FALSE,viewProjection.data());glUniform2f(uniform(ssaoProgram,"texel"),1.f/w,1.f/h);glDrawArrays(GL_TRIANGLES,0,3);
-            glBindFramebuffer(GL_FRAMEBUFFER,destination);glViewport(x,y,w,h);glUseProgram(aoApplyProgram);glActiveTexture(GL_TEXTURE11);glBindTexture(GL_TEXTURE_2D,aoTexture);glBindSampler(11,uiLinearSampler);
-            glUniform1i(uniform(aoApplyProgram,"ao"),11);glUniform2f(uniform(aoApplyProgram,"texel"),1.f/w,1.f/h);glEnable(GL_BLEND);glBlendFuncSeparate(GL_ZERO,GL_SRC_COLOR,GL_ZERO,GL_ONE);glDrawArrays(GL_TRIANGLES,0,3);glDisable(GL_BLEND);
-        }
-        mark(GpuTimings::SsaoEnd);
-        if(fx.fog){
-            // Half resolution, as the Vulkan raster path: 24 march steps x every scene light per pixel cost 8-16 ms of GPU at 4K
-            // (K22_GL_TIMINGS, RX 7900 XTX); the depth-aware upsample keeps silhouettes from bleeding.
-            const int fw=std::max(1,w/2),fh=std::max(1,h/2);const float farPlane=camera.farClip;
-            glBindFramebuffer(GL_FRAMEBUFFER,fogFbo);glViewport(0,0,fw,fh);view(fogProgram);
-            glUniform1i(uniform(fogProgram,"lights"),3);glUniform1i(uniform(fogProgram,"lightCount"),lightData.size()/5);glUniform1i(uniform(fogProgram,"cubeShadowMap"),9);
-            glUniform1i(uniform(fogProgram,"shadowMaps"),shadowsReady&&shadowLight>=0);glUniform1i(uniform(fogProgram,"shadowLight"),shadowLight);glUniform1f(uniform(fogProgram,"farPlane"),farPlane);
-            glUniform2f(uniform(fogProgram,"fogRange"),camera.environmentOverride?camera.fogStart:f.fogStart,camera.environmentOverride?camera.fogEnd:f.fogEnd);
-            glDrawArrays(GL_TRIANGLES,0,3);
-            glBindFramebuffer(GL_FRAMEBUFFER,destination);glViewport(x,y,w,h);glUseProgram(fogUpsampleProgram);glActiveTexture(GL_TEXTURE11);glBindTexture(GL_TEXTURE_2D,fogTexture);glBindSampler(11,uiNearestSampler);
-            glUniform1i(uniform(fogUpsampleProgram,"fog"),11);glUniform1i(uniform(fogUpsampleProgram,"linearDepth"),10);glUniform1f(uniform(fogUpsampleProgram,"farPlane"),farPlane);
-            glEnable(GL_BLEND);glBlendFuncSeparate(GL_ONE,GL_ONE,GL_ZERO,GL_ONE);glDrawArrays(GL_TRIANGLES,0,3);
-        }
+        glBindFramebuffer(GL_FRAMEBUFFER,aoFbo);glUseProgram(ssaoProgram);glUniform1i(uniform(ssaoProgram,"linearDepth"),10);glUniformMatrix4fv(uniform(ssaoProgram,"inverseViewProjection"),1,GL_FALSE,inverseVP.data());glUniform3f(uniform(ssaoProgram,"eye"),camera.position.x,camera.position.y,camera.position.z);glUniform3f(uniform(ssaoProgram,"forward"),basis[0],basis[1],basis[2]);
+        glUniformMatrix4fv(uniform(ssaoProgram,"viewProjection"),1,GL_FALSE,viewProjection.data());glUniform2f(uniform(ssaoProgram,"texel"),1.f/w,1.f/h);glDrawArrays(GL_TRIANGLES,0,3);
+        glBindFramebuffer(GL_FRAMEBUFFER,destination);glViewport(x,y,w,h);glUseProgram(aoApplyProgram);glActiveTexture(GL_TEXTURE11);glBindTexture(GL_TEXTURE_2D,aoTexture);glBindSampler(11,uiLinearSampler);
+        glUniform1i(uniform(aoApplyProgram,"ao"),11);glUniform2f(uniform(aoApplyProgram,"texel"),1.f/w,1.f/h);glEnable(GL_BLEND);glBlendFuncSeparate(GL_ZERO,GL_SRC_COLOR,GL_ZERO,GL_ONE);glDrawArrays(GL_TRIANGLES,0,3);glDisable(GL_BLEND);
         glBindFramebuffer(GL_FRAMEBUFFER,destination);glViewport(x,y,w,h);glEnable(GL_SCISSOR_TEST);glEnable(GL_DEPTH_TEST);glEnable(GL_BLEND);if(clip)glEnable(GL_CLIP_DISTANCE0);glUseProgram(scene);mark(GpuTimings::EffectsEnd);
     }
     // Background composite: HDR resolve, bloom, tone map (PBR only, else identity) and FXAA into the LDR scene target.
@@ -1744,7 +1710,7 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
     i.configure_sampling(f.mipmapping,f.anisotropy);
     i.targets(m.drawableWidth,m.drawableHeight);
     if(f.door.world)i.prepare_door(f.door.world->mesh);
-    // Primary view: first full-window background world view. Shadow maps, SSAO and volumetric fog follow it.
+    // Primary view: first full-window background world view. Shadow maps and SSAO follow it.
     const Camera*primary=nullptr;
     for(const auto&camera:f.cameras)if(!camera.foreground&&!camera.portalTarget&&camera.drawWorld){
         const Rect v=camera.viewport;if(v.width<=0||v.height<=0||(v.x<=0&&v.y<=0&&v.x+v.width>=m.width&&v.y+v.height>=m.height)){primary=&camera;break;}
@@ -1963,7 +1929,7 @@ void GLBackend::draw(const RenderFrame&f,WindowMetrics m){
                 glBlendFuncSeparate(GL_SRC_ALPHA,particle.additive?GL_ONE:GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);glDrawElementsInstanced(GL_TRIANGLES,6,GL_UNSIGNED_INT,nullptr,end-first);first=end;
             }
         }
-        if(!targetOnly&&&camera==primary&&(fx.ssao||fx.fog))i.screen_effects(f,camera,x,y,w,h);
+        if(!targetOnly&&&camera==primary&&fx.ssao)i.screen_effects(camera,x,y,w,h);
         bool hasViewEntities=false;
         if(f.renderEntities&&!camera.noEntities)for(const auto&d:f.instances)if(!targetOnly&&d.viewSpace&&(d.layers&camera.layers)&&d.visible&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId)){hasViewEntities=true;break;}
         if(hasViewEntities){

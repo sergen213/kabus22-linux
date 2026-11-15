@@ -166,7 +166,7 @@ Resource::~Resource(){if(owner){owner->retire(std::move(resource));if(srvSlot!=~
 
 // ---- Programs: shaders, input layout and the GL texture units each SRV register reads. ----
 enum class Kind : std::uint8_t { Tex2D, Buffer, Cube, Array };
-enum Program : std::uint8_t { PScene, PShadow, PUi, PPost, PPresent, PTonemap, PWarp, PSky, PCloud, PMip, PComposite, PBloom, PFxaa, PLinearize, PLinearizeMS, PSsao, PAoApply, PFog, PFogUpsample, ProgramCount };
+enum Program : std::uint8_t { PScene, PShadow, PUi, PPost, PPresent, PTonemap, PWarp, PSky, PCloud, PMip, PComposite, PBloom, PFxaa, PLinearize, PLinearizeMS, PSsao, PAoApply, ProgramCount };
 enum class Layout : std::uint8_t { None, Scene, Shadow, Ui };
 struct Unit { std::uint8_t unit;Kind kind; };
 struct Shader { const void*data{};std::size_t size{}; };
@@ -221,7 +221,7 @@ struct WarpCB { int size[2]{};int stride{};int padding{}; };
 struct SkyCB { std::array<F4,3> basis{};F2 cone,scroll;float curve{},clip{};int cube{},blend{};int layer{};int padding[3]{}; };
 struct CloudCB { int level{},layer{},convertAlpha{},padding{}; };
 struct MipCB { F2 inverseSize;F2 padding; };
-struct EffectCB { Matrix viewProjection{},inverseViewProjection{};F3 eye;float nearPlane{};F3 forward;float farPlane{};F2 texel,fogRange;int mode{},bloomEnabled{},toneMap{},lightCount{};int shadowMaps{},shadowLight{-1};int depthOffset[2]{}; };
+struct EffectCB { Matrix viewProjection{},inverseViewProjection{};F3 eye;float nearPlane{};F3 forward;float farPlane{};F2 texel;int mode{},bloomEnabled{},toneMap{};int depthOffset[2]{};int padding{}; };
 static_assert(sizeof(SceneView)%16==0&&sizeof(SceneDraw)%16==0&&sizeof(ShadowCB)%16==0&&sizeof(SkyCB)%16==0&&sizeof(EffectCB)%16==0);
 // A CPU constant block; uploaded to the frame's ring only when its bytes changed since the last upload this frame.
 struct CbSlot { const void*data{};std::size_t size{};std::vector<std::uint8_t> last;D3D12_GPU_VIRTUAL_ADDRESS va{};bool valid{}; };
@@ -396,8 +396,6 @@ struct D3D12Backend::Impl {
         set(PLinearizeMS,post,shader_bytes(linearizeMSPS),Layout::None,{{10,K::Tex2D}},&fxSlot);
         set(PSsao,post,shader_bytes(ssaoPS),Layout::None,{{10,K::Tex2D}},&fxSlot);
         set(PAoApply,post,shader_bytes(aoApplyPS),Layout::None,{{11,K::Tex2D}},&fxSlot);
-        set(PFog,post,shader_bytes(fogPS),Layout::None,{{10,K::Tex2D},{3,K::Buffer},{9,K::Cube}},&fxSlot);
-        set(PFogUpsample,post,shader_bytes(fogUpsamplePS),Layout::None,{{11,K::Tex2D},{10,K::Tex2D}},&fxSlot);
     }
     void create_null_views(){
         for(int kind=0;kind<4;++kind){
@@ -618,9 +616,9 @@ struct D3D12Backend::Impl {
     }
     // ---- Port of GLBackend::Impl (same names; GL calls replaced by the emulation above). ----
     std::shared_ptr<Tex> white,zero,flatNormal,defaultOrm,gammaTexture,videoTexture;int videoWidth{},videoHeight{};std::uint64_t videoSerial{~0ull};
-    std::shared_ptr<Tex> msaaColor,msaaDepth,resolveColor,alphaColor,alphaDepth,portalColor,portalDepth,hdrColor,hdrDepth,hdrResolveColor,ldrColor,linearDepth,aoTexture,fogTexture,sunShadowMap,cubeShadowMap,captureColor;
+    std::shared_ptr<Tex> msaaColor,msaaDepth,resolveColor,alphaColor,alphaDepth,portalColor,portalDepth,hdrColor,hdrDepth,hdrResolveColor,ldrColor,linearDepth,aoTexture,sunShadowMap,cubeShadowMap,captureColor;
     std::array<std::shared_ptr<Tex>,5> bloomTexture;
-    Fbo msaaFbo,resolveFbo,alphaFbo,portalFbo,hdrFbo,ldrFbo,linearFbo,aoFbo,fogFbo,sunShadowFbo,backFbo,captureFbo;std::array<Fbo,5> bloomFbo;std::array<Fbo,6> cubeShadowFbo;
+    Fbo msaaFbo,resolveFbo,alphaFbo,portalFbo,hdrFbo,ldrFbo,linearFbo,aoFbo,sunShadowFbo,backFbo,captureFbo;std::array<Fbo,5> bloomFbo;std::array<Fbo,6> cubeShadowFbo;
     int targetWidth{},targetHeight{};
     bool composite{},compositeBlend{},shadowMapsOn{},shadowsReady{},casterPass{};int shadowLight{-1};
     struct CasterGroup{std::shared_ptr<Tex> texture;std::uint8_t sampler;bool textureAlpha;Color tint;float alpha;Vec2 uvScale,uvOffset;std::vector<UINT> counts,firsts;};
@@ -688,7 +686,7 @@ struct D3D12Backend::Impl {
         free_effects();
         retainedColorValid=portalColorValid=finalFrameValid=false;targetWidth=targetHeight=0;
     }
-    void free_effects(){linearDepth.reset();aoTexture.reset();fogTexture.reset();linearFbo=aoFbo=fogFbo={};effectWidth=effectHeight=0;}
+    void free_effects(){linearDepth.reset();aoTexture.reset();linearFbo=aoFbo={};effectWidth=effectHeight=0;}
     // Renderer::reconfigure. Only shadow maps on<->off needs a new device, as GLBackend's compiled-in scene variant.
     bool reconfigure(RenderOptions next,bool&reloadScene){
         if(shadow_maps_enabled(next.features)!=shadowMapsOn)return false;
@@ -696,7 +694,7 @@ struct D3D12Backend::Impl {
         drain_completion();
         const auto&a=options.features,&b=next.features;
         const bool rebuildTargets=next.samples!=samples||next.pbr!=options.pbr||a.bloom!=b.bloom||a.fxaa!=b.fxaa||composite_enabled(next.pbr,b)!=composite;
-        const bool rebuildEffects=a.ssao!=b.ssao||a.fog!=b.fog;
+        const bool rebuildEffects=a.ssao!=b.ssao;
         reloadScene=next.pbr!=options.pbr||next.packs!=options.packs;
         if(next.anisotropy!=preferredAnisotropy||next.forceAnisotropy!=options.forceAnisotropy){preferredAnisotropy=next.anisotropy;anisotropy=0;}
         options=next;samples=next.samples;composite=composite_enabled(options.pbr,options.features);compositeBlend=composite&&(options.features.bloom||!options.pbr);
@@ -752,15 +750,14 @@ struct D3D12Backend::Impl {
         bind(8,sunShadowMap);bind(9,cubeShadowMap,Kind::Cube);
         shadowsReady=true;
     }
-    // Primary-view SSAO and volumetric fog, before view-space entities clear depth (render_gl.cpp screen_effects). The
-    // linearize pass reads the view rectangle of the bound depth buffer directly instead of a blitted single-sample copy.
-    void screen_effects(const RenderFrame&f,const Camera&camera,int x,int y,int w,int h){
-        const auto&fxs=options.features;const Fbo*destination=gl.fbo;
+    // Primary-view SSAO, before view-space entities clear depth (render_gl.cpp screen_effects). The linearize pass reads
+    // the view rectangle of the bound depth buffer directly instead of a blitted single-sample copy.
+    void screen_effects(const Camera&camera,int x,int y,int w,int h){
+        const Fbo*destination=gl.fbo;
         if(effectWidth!=w||effectHeight!=h){
             free_effects();effectWidth=w;effectHeight=h;
             linearDepth=create_texture(DXGI_FORMAT_R32_FLOAT,UINT(w),UINT(h),1,1,1,true);linearFbo={linearDepth};
-            if(fxs.ssao){aoTexture=create_texture(DXGI_FORMAT_R8_UNORM,UINT(w),UINT(h),1,1,1,true);aoFbo={aoTexture};}
-            if(fxs.fog){fogTexture=create_texture(DXGI_FORMAT_R16G16B16A16_FLOAT,UINT(std::max(1,w/2)),UINT(std::max(1,h/2)),1,1,1,true);fogFbo={fogTexture};}
+            aoTexture=create_texture(DXGI_FORMAT_R8_UNORM,UINT(w),UINT(h),1,1,1,true);aoFbo={aoTexture};
         }
         gl.scissorTest=false;gl.depthTest=false;gl.blend=false;gl.cull=false;
         framebuffer(linearFbo);viewport(0,0,w,h);use(destination->depth->samples>1?PLinearizeMS:PLinearize);
@@ -768,21 +765,9 @@ struct D3D12Backend::Impl {
         fx.nearPlane=camera.nearClip;fx.farPlane=camera.farClip;fx.depthOffset[0]=x;fx.depthOffset[1]=y;draw_arrays(3);
         bind(10,linearDepth);
         const Matrix inverseVP=inverse(viewProjection),basis=transform({},camera.angles,{1,1,1});
-        auto view=[&](Program p){use(p);fx.inverseViewProjection=inverseVP;fx.eye=f3(camera.position);fx.forward={basis[0],basis[1],basis[2]};};
-        if(fxs.ssao){
-            framebuffer(aoFbo);view(PSsao);fx.viewProjection=viewProjection;fx.texel={1.f/w,1.f/h};draw_arrays(3);
-            framebuffer(*destination);viewport(x,y,w,h);use(PAoApply);bind(11,aoTexture);bind_sampler(11,UiLinearSampler);
-            fx.texel={1.f/w,1.f/h};gl.blend=true;blend_func_separate(D3D12_BLEND_ZERO,D3D12_BLEND_SRC_COLOR,D3D12_BLEND_ZERO,D3D12_BLEND_ONE);draw_arrays(3);gl.blend=false;
-        }
-        if(fxs.fog){
-            const int fw=std::max(1,w/2),fh=std::max(1,h/2);const float farPlane=camera.farClip;
-            framebuffer(fogFbo);viewport(0,0,fw,fh);view(PFog);
-            fx.lightCount=int(lightData.size()/5);fx.shadowMaps=shadowsReady&&shadowLight>=0;fx.shadowLight=shadowLight;fx.farPlane=farPlane;
-            fx.fogRange={camera.environmentOverride?camera.fogStart:f.fogStart,camera.environmentOverride?camera.fogEnd:f.fogEnd};
-            draw_arrays(3);
-            framebuffer(*destination);viewport(x,y,w,h);use(PFogUpsample);bind(11,fogTexture);bind_sampler(11,UiNearestSampler);
-            fx.farPlane=farPlane;gl.blend=true;blend_func_separate(D3D12_BLEND_ONE,D3D12_BLEND_ONE,D3D12_BLEND_ZERO,D3D12_BLEND_ONE);draw_arrays(3);
-        }
+        framebuffer(aoFbo);use(PSsao);fx.inverseViewProjection=inverseVP;fx.eye=f3(camera.position);fx.forward={basis[0],basis[1],basis[2]};fx.viewProjection=viewProjection;fx.texel={1.f/w,1.f/h};draw_arrays(3);
+        framebuffer(*destination);viewport(x,y,w,h);use(PAoApply);bind(11,aoTexture);bind_sampler(11,UiLinearSampler);
+        fx.texel={1.f/w,1.f/h};gl.blend=true;blend_func_separate(D3D12_BLEND_ZERO,D3D12_BLEND_SRC_COLOR,D3D12_BLEND_ZERO,D3D12_BLEND_ONE);draw_arrays(3);gl.blend=false;
         framebuffer(*destination);viewport(x,y,w,h);gl.scissorTest=true;gl.depthTest=true;gl.blend=true;use(PScene);
     }
     // Background composite: HDR resolve, bloom, tone map (PBR only, else identity) and FXAA into the LDR scene target.
@@ -1540,7 +1525,7 @@ void D3D12Backend::draw(const RenderFrame&f,WindowMetrics m){
             }
             i.vertex_buffer(slotParticle,i.dummyInstance,0,sizeof(ParticleGPU));
         }
-        if(!targetOnly&&&camera==primary&&(fx.ssao||fx.fog))i.screen_effects(f,camera,x,y,w,h);
+        if(!targetOnly&&&camera==primary&&fx.ssao)i.screen_effects(camera,x,y,w,h);
         bool hasViewEntities=false;
         if(f.renderEntities&&!camera.noEntities)for(const auto&d:f.instances)if(!targetOnly&&d.viewSpace&&(d.layers&camera.layers)&&d.visible&&(!camera.excludeEntityId||d.objectId!=camera.excludeEntityId)){hasViewEntities=true;break;}
         if(hasViewEntities){

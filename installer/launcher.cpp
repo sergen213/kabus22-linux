@@ -79,7 +79,7 @@ constexpr const char* padLabels[]={"A","B","X","Y",txn("Left shoulder"),txn("Rig
 // Engine `--list-capabilities` labels, values and presets shown on Rendering (looked up by tx at runtime; unknown ones stay English).
 [[maybe_unused]] constexpr const char* engineTexts[]={txn("PBR materials (HDR + tone mapping)"),txn("Anisotropic filtering"),txn("MSAA samples"),txn("Shadows (original, shadow maps, ray traced)"),
     txn("Ray-traced global illumination"),txn("Ray-traced reflections (original mirror, roughness-aware)"),txn("Temporal/spatial ray-tracing denoiser"),txn("Bloom"),txn("Screen-space ambient occlusion"),
-    txn("FXAA anti-aliasing"),txn("Temporal anti-aliasing"),txn("Volumetric fog light scattering"),txn("Smooth vertex normals (raster and ray tracing)"),txn("PN-triangle tessellation of models"),
+    txn("FXAA anti-aliasing"),txn("Temporal anti-aliasing"),txn("Smooth vertex normals (raster and ray tracing)"),txn("PN-triangle tessellation of models"),
     txn("Edge-aware 2x texture upscaling"),txn("Contrast-adaptive sharpening"),txn("AMD FSR 3.1 upscaling (replaces TAA)"),txn("AMD FSR 3.1.4 frame generation (needs fsr; one generated frame per rendered frame)"),
     txn("Seamless doors (next zone visible through the open door, no fade)"),txn("original"),txn("shadowmap"),txn("rough"),txn("off"),txn("on"),txn("native"),txn("quality"),txn("balanced"),
     txn("performance"),txn("ultra_performance"),txn("Enhanced"),txn("Custom")};
