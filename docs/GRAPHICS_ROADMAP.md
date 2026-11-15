@@ -28,7 +28,7 @@ Implemented `--graphics` keys:
 | `shadows` | `original`, `shadowmap`, `rt` | `original` | `rt` only on `vulkan-rt` (capabilities `value_backends`); elsewhere it degrades to `shadowmap` with a notice. |
 | `gi`, `denoise` | `0`, `1` | `0` | `vulkan-rt` only. |
 | `reflections` | `original`, `rough` | `original` | `vulkan-rt` only. |
-| `bloom`, `ssao`, `fxaa`, `volumetric_fog` | `0`, `1` | `0` | All backends. |
+| `bloom`, `ssao`, `fxaa` | `0`, `1` | `0` | All backends. |
 | `taa` | `0`, `1` | `0` | Vulkan raster and RT only. |
 | `texture_upscale`, `sharpen` | `0`, `1` | `0` | Vulkan raster and RT only; on in `enhanced`/`ultra`. |
 | `fsr` | `off`, `native`, `quality`, `balanced`, `performance`, `ultra_performance` | `off` | AMD FSR 3.1.4 upscaling, Vulkan raster and RT only; `quality` in `ultra`. Replaces TAA. |
@@ -46,7 +46,7 @@ option only for the backends that implement it.
 | --- | --- | --- | --- | --- |
 | `original` | OpenGL | original | original | script-controlled anisotropy (8x when enabled), MSAA 4 |
 | `enhanced` | Vulkan raster | installed packs | original + shadow maps + SSAO | 16x anisotropy forced, MSAA 4, FXAA |
-| `ultra` | Vulkan ray tracing | installed packs | PBR + HDR, RT shadows/GI/rough reflections, denoise, bloom, volumetric fog | 16x anisotropy forced, MSAA 4, TAA |
+| `ultra` | Vulkan ray tracing | installed packs | PBR + HDR, RT shadows/GI/rough reflections, denoise, bloom | 16x anisotropy forced, MSAA 4, TAA |
 | `custom` | `original` plus explicit `--graphics` only | | | |
 
 A backend that a preset picked degrades `vulkan-rt -> vulkan-raster -> opengl`, and each step prints
@@ -126,15 +126,11 @@ world camera; depth-based effects apply only to it.
   darker than the original (`docs/RAYTRACING.md` Limits).
 - **SSAO** (`ssao=1`): 12-sample hemisphere AO from linear depth captured before view-space entities,
   depth-aware 4x4 blur, multiplied into the view (strength 0.65, radius 20 units).
-- **Volumetric fog** (`volumetric_fog=1`): single scattering of the scene lights along the view ray
-  (24 steps, HG g=0.25), density from the level fog (3/(end-start)) or a faint haze when the level has no
-  fog; only in-scattered light is added, so the original linear fog stays untouched. Shadowed by the
-  cube shadow map under `shadows=shadowmap`; unshadowed under `shadows=rt` (no depth maps are rendered
-  just for fog). No original level has fog: all 970 WMBs have fog range 0..0 and no script sets
-  `fog_start`/`fog_end`. Original content therefore always gets the haze path (checked on the Start4 test
-  view, light shaft around the script light, and saves 8 and 26). Both backends march at half resolution
-  (alpha keeps each sample's linear depth) and add the result through a depth-aware upsample, so fog does not
-  bleed across silhouettes; OpenGL marched at full resolution up to 0.4.15 ([OpenGL performance](#opengl-performance)).
+- **Volumetric fog** (`volumetric_fog`, a screen-space single scattering of the scene lights) was removed after 0.4.17:
+  it was one of the costliest passes and no original level has fog (all 970 WMBs have fog range 0..0), so it only added a
+  haze the original never had. The original A6 distance fog is unchanged. A `volumetric_fog` line left in launcher.ini is
+  skipped by the launcher and the Xbox entry and deleted when the in-game graphics menu next saves; `--graphics
+  volumetric_fog=...` is an unknown key.
 - **Composite** (`pbr`, `bloom`, `taa`, `fxaa`, `sharpen`): background views render into an RGBA16F target. With
   PBR off the values stay LDR and the tone curve is identity (bloom/TAA/FXAA work in LDR). Bloom: soft
   threshold 0.7 (knee 0.2), 5-level down/up chain, strength 0.15. On saves 1 and 21 (dark streets) the
@@ -159,7 +155,7 @@ world camera; depth-based effects apply only to it.
 - **FSR** (`fsr=native|quality|balanced|performance|ultra_performance`, Vulkan): AMD FidelityFX Super Resolution
   3.1.4 (SDK v1.1.4 upscaler + Vulkan backend vendored in `third_party/FidelityFX-SDK`, MIT, provenance and the 5 local
   patches in `KABUS-PROVENANCE.txt`; wrapper `native/fsr_vk.cpp`, shader blobs `tools/k22_fsr3_blobs.py`). Background
-  views (HDR target), their effects (SSAO, fog, bloom) and the ray-traced signals/denoiser render at the quality mode's
+  views (HDR target), their effects (SSAO, bloom) and the ray-traced signals/denoiser render at the quality mode's
   render size (1.0x, 1.5x, 1.7x, 2x, 3x per axis); the tone-mapped composite is upscaled to the display before the
   UI/HUD and VIEW-entity layers, which stay at display resolution. Inputs: FSR's Halton jitter on the primary view,
   device depth captured before view-space entities, full unjittered motion (the TAA motion-vector pass for moving or
@@ -435,7 +431,7 @@ clamps (MSAA count, anisotropy limit, dropped tessellation/frame generation).
 
 | Backend | Live | Needs a new renderer |
 | --- | --- | --- |
-| OpenGL | vsync, anisotropy (+force), MSAA, texture packs, `pbr`, bloom, FXAA, SSAO, fog (effect programs build on first enable) | backend, `shadows` original↔shadowmap (`K22_SHADOW_MAPS` is compiled into the scene program) |
+| OpenGL | vsync, anisotropy (+force), MSAA, texture packs, `pbr`, bloom, FXAA, SSAO (effect programs build on first enable) | backend, `shadows` original↔shadowmap (`K22_SHADOW_MAPS` is compiled into the scene program) |
 | Vulkan raster/RT | vsync, anisotropy (+force), MSAA, texture packs, `pbr`, every effect toggle, `shadows`, `gi`/`reflections`/`denoise` (RT signal pipelines build on first enable), `fsr` level between non-off modes, `smooth_normals`, `texture_upscale`, `tessellation` off (and back on) when the device was created with it | backend, raster↔RT, `fsr` off↔on (device features), `frame_generation` on↔off, `tessellation` on when the device was created without it |
 
 A Vulkan change drains every frame (and the frame-generation present thread) and idles the queue, then drops the frame

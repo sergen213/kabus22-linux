@@ -89,6 +89,7 @@ std::vector<Edit> edits(const Graphics& g){
 #endif
         out.push_back({"Graphics",key,value==fallback&&!explicitValue?std::nullopt:std::optional<std::string>(value)});
     }
+    for(auto key:retiredGraphicsKeys)out.push_back({"Graphics",std::string(key),std::nullopt});
     return out;
 }
 #ifdef _WIN32

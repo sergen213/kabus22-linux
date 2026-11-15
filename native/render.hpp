@@ -22,7 +22,7 @@ enum class ShadowMode : std::uint8_t { Original, ShadowMap, RayTraced };
 // Wave-2 optional effects; all default off, so a default-constructed value is the original path.
 struct GraphicsFeatures {
     ShadowMode shadows{ShadowMode::Original};
-    bool gi{}, roughReflections{}, denoise{}, bloom{}, ssao{}, fxaa{}, taa{}, fog{};
+    bool gi{}, roughReflections{}, denoise{}, bloom{}, ssao{}, fxaa{}, taa{};
     // Vulkan-only visual upgrades: smoothed vertex normals, PN-triangle tessellation, load-time texture upscaling, sharpening.
     bool smoothNormals{}, tessellation{}, upscale{}, sharpen{};
     // AMD FSR 3.1.4 upscaling (Vulkan): 0 off, 1 native AA, 2 quality, 3 balanced, 4 performance, 5 ultra performance.

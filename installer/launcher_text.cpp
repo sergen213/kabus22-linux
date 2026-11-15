@@ -37,7 +37,6 @@ constexpr Text table[] = {
 {"Screen-space ambient occlusion","Ekran uzayı ortam kapatması (SSAO)"},
 {"FXAA anti-aliasing","FXAA kenar yumuşatma"},
 {"Temporal anti-aliasing","Zamansal kenar yumuşatma (TAA)"},
-{"Volumetric fog light scattering","Hacimsel siste ışık saçılması"},
 {"Smooth vertex normals (raster and ray tracing)","Yumuşak köşe normalleri (raster ve ışın izleme)"},
 {"PN-triangle tessellation of models","Modellerde PN üçgen mozaikleme"},
 {"Edge-aware 2x texture upscaling","Kenar duyarlı 2x doku büyütme"},

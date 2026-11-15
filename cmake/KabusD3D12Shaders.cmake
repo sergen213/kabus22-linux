@@ -43,8 +43,8 @@ set(K22_D3D12_SHADERS
   "postVS|post|postVS|vs_6_0|" "presentVS|post|presentVS|vs_6_0|"
   "postPS|post|postPS|ps_6_0|K22_POST" "warpPS|post|warpPS|ps_6_0|K22_WARP" "skyPS|post|skyPS|ps_6_0|K22_SKY" "cloudPS|post|cloudPS|ps_6_0|K22_CLOUD" "mipPS|post|mipPS|ps_6_0|K22_MIP"
   "tonemapPS|effect_passes|tonemapPS|ps_6_0|K22_TONEMAP" "linearizePS|effect_passes|linearizePS|ps_6_0|K22_LINEARIZE" "linearizeMSPS|effect_passes|linearizePS|ps_6_0|K22_LINEARIZE_MS"
-  "ssaoPS|effect_passes|ssaoPS|ps_6_0|K22_SSAO" "aoApplyPS|effect_passes|aoApplyPS|ps_6_0|K22_AO_APPLY" "fogPS|effect_passes|fogPS|ps_6_0|K22_FOG"
-  "fogUpsamplePS|effect_passes|fogUpsamplePS|ps_6_0|K22_FOG_UPSAMPLE" "bloomPS|effect_passes|bloomPS|ps_6_0|K22_BLOOM" "compositePS|effect_passes|compositePS|ps_6_0|K22_COMPOSITE"
+  "ssaoPS|effect_passes|ssaoPS|ps_6_0|K22_SSAO" "aoApplyPS|effect_passes|aoApplyPS|ps_6_0|K22_AO_APPLY"
+  "bloomPS|effect_passes|bloomPS|ps_6_0|K22_BLOOM" "compositePS|effect_passes|compositePS|ps_6_0|K22_COMPOSITE"
   "fxaaPS|effect_passes|fxaaPS|ps_6_0|K22_FXAA")
 set(K22_D3D12_DXIL_FILES)
 set(K22_D3D12_DXIL_LIST "")

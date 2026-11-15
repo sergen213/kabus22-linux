@@ -76,31 +76,4 @@ float k22CubeShadow(TextureCube<float> map,float3 light,float3 p,float3 n,float 
         float ref=((farPlane+nearPlane)/(farPlane-nearPlane)-2.0*farPlane*nearPlane/((farPlane-nearPlane)*z))*0.5+0.5;sum+=map.SampleCmpLevelZero(k22ShadowCompare,s,ref-0.0002);}
     return sum*0.25;
 }
-static const int k22FogSteps=24;static const float k22FogHaze=0.00015,k22FogMaxDistance=3000.0,k22FogG=0.25,k22FogHalo=0.1;
-float k22FogDensity(float distance,float2 fogSpan){return fogSpan.y>fogSpan.x?(distance>fogSpan.x?3.0/(fogSpan.y-fogSpan.x):0.0):k22FogHaze;}
-float k22Phase(float cosine){float g2=k22FogG*k22FogG;return (1.0-g2)/pow(1.0+g2-2.0*k22FogG*cosine,1.5);}
-#ifdef K22_FOG_VISIBILITY
-float3 k22FogInscatter(float3 eye,float3 surface,float2 fogSpan,float noise){
-    float3 ray=surface-eye;float total=min(length(ray),k22FogMaxDistance);if(total<=0.0)return 0;float3 dir=normalize(ray);
-    uint reach=0u;
-    for(int i=0;i<lightCount&&i<32;++i){float4 a=K22_LIGHT(i*5);float3 rel=a.xyz-eye,off=rel-dir*clamp(dot(rel,dir),0.0,total);
-        if(dot(off,off)<=a.w*a.w*1.002+0.01&&K22_LIGHT(i*5+4).z<=0.5&&K22_LIGHT(i*5+2).w!=3.0)reach|=1u<<uint(i);}
-    if(reach==0u&&lightCount<=32)return 0;
-    float ds=total/float(k22FogSteps),transmittance=1.0;float3 result=0;
-    for(int s=0;s<k22FogSteps;++s){
-        float t=(float(s)+noise)*ds,sigma=k22FogDensity(t,fogSpan);if(sigma<=0.0)continue;float3 x=eye+dir*t;float3 radiance=0;
-        for(int i=0;i<lightCount;++i){
-            if(i<32&&(reach&(1u<<uint(i)))==0u)continue;
-            float4 a=K22_LIGHT(i*5),b=K22_LIGHT(i*5+1),d=K22_LIGHT(i*5+2),e=K22_LIGHT(i*5+3),c=K22_LIGHT(i*5+4);
-            if(c.z>0.5||d.w==3.0)continue;
-            float3 delta=a.xyz-x;float distance=length(delta);if(distance>a.w)continue;float3 L=delta/max(distance,0.0001);
-            float window=max(1.0-distance/max(a.w,0.0001),0.0),halo=distance/max(k22FogHalo*a.w,0.0001),attenuation=window*window/(1.0+halo*halo)*(b.a<0.0?1.0:1.0/max(e.x+e.y*distance+e.z*distance*distance,0.0001));
-            if(d.w==2.0){float rho=dot(-L,d.xyz);attenuation*=rho>=c.x?1.0:rho<=c.y?0.0:pow((rho-c.y)/max(c.x-c.y,0.0001),e.w);}
-            if(attenuation>0.0)radiance+=clamp(b.rgb*abs(b.a)*attenuation,0.0,1.0)*k22Phase(dot(dir,-L))*K22_FOG_VISIBILITY(i,x);
-        }
-        result+=transmittance*sigma*ds*radiance;transmittance*=exp(-sigma*ds);
-    }
-    return result;
-}
-#endif
 #endif

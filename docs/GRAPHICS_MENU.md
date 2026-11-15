@@ -23,7 +23,7 @@ The rows are the launcher's Rendering settings ([LAUNCHER.md](LAUNCHER.md)). A r
 | Frame limit | Original (the game's own cap: campaign 72, Bonus 60), 30–240, Unlimited | at once |
 | AMD FSR, Frame generation | Vulkan; frame generation needs FSR | renderer restart when FSR or frame generation turns on or off, live between FSR modes |
 | MSAA | Off, 2X, 4X, 8X (Off is one sample; the hardware's highest count when lower) | live |
-| Anisotropic filtering, Bloom, Ambient occlusion, FXAA, Volumetric fog, PBR materials | | live |
+| Anisotropic filtering, Bloom, Ambient occlusion, FXAA, PBR materials | | live |
 | Shadows | Original, Shadow maps, Ray traced (Vulkan RT) | live on Vulkan; OpenGL restarts when shadow maps turn on or off |
 | Global illumination, Reflections, Denoise | Vulkan RT | live |
 | TAA, Sharpen, Smooth normals, Tessellation, Texture upscale | Vulkan; TAA is greyed while FSR replaces it | live (tessellation restarts the renderer the first time it is turned on) |

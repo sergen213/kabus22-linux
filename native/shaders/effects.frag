@@ -7,12 +7,10 @@ layout(set=0,binding=1) uniform sampler2D inputA;
 layout(set=0,binding=2) uniform sampler2D inputB;
 layout(set=0,binding=3) uniform sampler2D inputC;
 layout(set=0,binding=4) uniform sampler2D inputD;
-layout(set=0,binding=10) uniform samplerCubeShadow cubeShadowMap;
 layout(location=0) in vec2 uv;
 layout(location=0) out vec4 color;
 #define K22_FLIP_Y 1
 #define K22_LIGHT(i) lightData[i]
-#define K22_FOG_VISIBILITY(i,x) (k22ShadowMaps&&u.dataShadowLight.w>0.0&&(i)==int(u.dataEffects.w)?k22CubeShadow(cubeShadowMap,u.dataShadowLight.xyz,x,vec3(0),k22CubeShadowNear,u.dataShadowLight.w):1.0)
 #include "pbr.glsl"
 #include "effects.glsl"
 vec3 forwardAxis(){return u.dataCamera.xyz;}
@@ -25,16 +23,6 @@ void main(){
         float center=texture(inputB,uv).r,sum=0.0,weight=0.0;
         for(int y=-2;y<2;++y)for(int x=-2;x<2;++x){vec2 o=(vec2(x,y)+0.5)*texel;float w=1.0/(1.0+abs(texture(inputB,uv+o).r-center)*0.25);sum+=texture(inputA,uv+o).r*w;weight+=w;}
         color=vec4(vec3(sum/weight),1);return;
-    }
-    if(mode==4){float d=texture(inputA,uv).r;vec3 eye=cameraPosition;vec3 p=eye+k22ViewRay(k22NdcFromUv(uv),u.dataInverseViewProjection,eye,forwardAxis())*d;color=vec4(k22FogInscatter(eye,p,u.dataRange.yz,k22Noise(gl_FragCoord.xy+u.dataPass.y)),d);return;}
-    if(mode==14){
-        // Half-resolution fog (mode 4, alpha = its sample's linear depth): bilinear weights damped by relative depth
-        // difference so fog does not bleed across silhouettes; the closest-depth texel when every neighbour differs.
-        vec2 size=vec2(textureSize(inputA,0)),p=uv*size-0.5,f=fract(p);ivec2 b=ivec2(floor(p)),last=ivec2(size)-1;float d=texture(inputB,uv).r;
-        vec3 sum=vec3(0),best=vec3(0);float weight=0.0,closest=1e30;
-        for(int i=0;i<4;++i){ivec2 o=ivec2(i&1,i>>1);vec4 s=texelFetch(inputA,clamp(b+o,ivec2(0),last),0);float dz=abs(s.a-d);
-            float w=(o.x==1?f.x:1.0-f.x)*(o.y==1?f.y:1.0-f.y)*exp(-dz/(0.05*max(d,1e-3)));sum+=w*s.rgb;weight+=w;if(dz<closest){closest=dz;best=s.rgb;}}
-        color=vec4(weight>1e-4?sum/weight:best,0);return;
     }
     if(mode==5){color=vec4(k22BloomPrefilter(k22BloomDown(inputA,uv,texel)),1);return;}
     if(mode==6){color=vec4(k22BloomDown(inputA,uv,texel),1);return;}
