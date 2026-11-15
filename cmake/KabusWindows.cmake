@@ -89,11 +89,14 @@ else()
   add_executable(kabus22 native/main.cpp native/scenario.cpp)
   target_compile_options(kabus22 PRIVATE ${K22_MSVC_OPTIONS})
   target_link_libraries(kabus22 PRIVATE kabus22_core $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main>)
-  # Portable folder (docs/WINDOWS.md): `cmake --install BUILD --prefix DIR` is what windows/package-windows.ps1 zips and
-  # windows/installer/kabus22.iss packs. vcpkg's applocal step copies the SDL2/FFmpeg/FreeType/libepoxy DLLs next to
-  # kabus22.exe in the build tree and, by x_vcpkg_install_local_dependencies (the toolchain's install() override exists only
-  # when X_VCPKG_APPLOCAL_DEPS_INSTALL is set before it loads), into the install tree. The MSVC runtime DLLs are deployed
-  # app-locally (the UCRT is part of Windows 10 and later). No game data is ever installed.
+  # Portable folder (docs/WINDOWS.md): `cmake --install BUILD --prefix DIR --component Kabus22` is what
+  # windows/package-windows.ps1 zips and windows/installer/kabus22.iss packs. Every rule below defaults to that component;
+  # the pinned ODE subproject's own rules (headers, static library, CMake/pkg-config files) stay outside it and are never
+  # shipped. vcpkg's applocal step copies the SDL2/FFmpeg/FreeType/libepoxy DLLs next to kabus22.exe in the build tree and,
+  # by x_vcpkg_install_local_dependencies (the toolchain's install() override exists only when X_VCPKG_APPLOCAL_DEPS_INSTALL
+  # is set before it loads), into the install tree. The MSVC runtime DLLs are deployed app-locally (the UCRT is part of
+  # Windows 10 and later). No game data is ever installed.
+  set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME Kabus22)
   install(TARGETS kabus22 RUNTIME DESTINATION .)
   if(COMMAND x_vcpkg_install_local_dependencies)
     x_vcpkg_install_local_dependencies(TARGETS kabus22 DESTINATION .)

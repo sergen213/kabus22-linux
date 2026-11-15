@@ -353,7 +353,9 @@ bool blended(const DrawInstance&d){bool transparent=d.alpha<1||d.additive||d.tra
 GLint uniform(GLuint program,const char*name){return glGetUniformLocation(program,name);}
 } // namespace
 struct GLBackend::Impl {
-    SDL_Window* window{};SDL_GLContext context{};bool portalPass{};
+    // glReady: the context passed the desktop OpenGL 3.3 check, so destroy() may call 3.3 entry points (libepoxy aborts the
+    // process on an entry point the driver lacks, e.g. glDeleteSamplers under Windows' GDI OpenGL 1.1).
+    SDL_Window* window{};SDL_GLContext context{};bool glReady{};bool portalPass{};
     RenderOptions options;GLuint scene{},ui{},post{},white{},uiVao{},uiVbo{},postVao{},lightBuffer{},lightTexture{},gammaTexture{},sceneSampler{},uiNearestSampler{},uiLinearSampler{};
     GLuint particleVbo{},lightmapSampler{},dynamicSceneSampler{};GLint maxTextureSize{};
     GLuint msaaFbo{},msaaColor{},msaaDepth{},resolveFbo{},resolveColor{};int targetWidth{},targetHeight{},samples{1},actualSamples{1};float preferredAnisotropy{1},anisotropy{1};
@@ -464,7 +466,11 @@ struct GLBackend::Impl {
     explicit Impl(SDL_Window* w,RenderOptions o):window(w),options(std::move(o)) {
         try {
             context=SDL_GL_CreateContext(window);if(!context)throw std::runtime_error(SDL_GetError());
-            if(!epoxy_is_desktop_gl()||epoxy_gl_version()<33)throw std::runtime_error("Kabus22 requires desktop OpenGL3.3");
+            if(!epoxy_is_desktop_gl()||epoxy_gl_version()<33){
+                const auto* version=reinterpret_cast<const char*>(glGetString(GL_VERSION));
+                throw std::runtime_error(std::string("Kabus22 requires desktop OpenGL 3.3; the driver offers ")+(epoxy_is_desktop_gl()?"OpenGL ":"OpenGL ES ")+(version?version:"(no version)"));
+            }
+            glReady=true;
             if(SDL_GL_SetSwapInterval(options.vsync?1:0)!=0)std::cerr<<"kabus22: warning: SDL_GL_SetSwapInterval("<<(options.vsync?1:0)<<") failed: "<<SDL_GetError()<<'\n';
             requestedSwapInterval=options.vsync?1:0;
             std::cerr<<"kabus22: GL_VENDOR="<<reinterpret_cast<const char*>(glGetString(GL_VENDOR))<<"\nGL_RENDERER="<<reinterpret_cast<const char*>(glGetString(GL_RENDERER))<<"\nGL_VERSION="<<reinterpret_cast<const char*>(glGetString(GL_VERSION))<<"\nSDL_GL_GetSwapInterval="<<SDL_GL_GetSwapInterval()<<'\n';
@@ -561,6 +567,7 @@ struct GLBackend::Impl {
         ++completionCount;++completionSubmissions;glFlush();
     }
     void destroy() {
+        if(context&&!glReady){SDL_GL_DeleteContext(context);context=nullptr;}
         if(context){SDL_GL_MakeCurrent(window,context);drain_completion(false);for(auto&[key,m]:meshes){glDeleteVertexArrays(1,&m.vao);glDeleteBuffers(1,&m.vertices);glDeleteBuffers(1,&m.indices);glDeleteBuffers(1,&m.tangents);glDeleteBuffers(1,&m.poseBuffer);glDeleteTextures(1,&m.poses);}for(auto&[key,variants]:textures)for(auto&t:variants){glDeleteTextures(1,&t.id);glDeleteTextures(1,&t.normal);glDeleteTextures(1,&t.orm);}
             for(auto&[key,m]:overrides){glDeleteBuffers(1,&m.positions);glDeleteBuffers(1,&m.normals);glDeleteBuffers(1,&m.tangents);}glDeleteTextures(1,&gammaTexture);glDeleteSamplers(1,&sceneSampler);glDeleteSamplers(1,&uiNearestSampler);glDeleteSamplers(1,&uiLinearSampler);
             glDeleteBuffers(1,&particleVbo);glDeleteSamplers(1,&lightmapSampler);
